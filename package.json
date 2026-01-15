@@ -8,7 +8,13 @@
       "default": "./dist/src/index.js"
     }
   },
+  "files": [
+    "dist/src",
+    "docs",
+    "README.md"
+  ],
   "scripts": {
+    "build": "tsc -b",
     "tsc:watch": "tsc -b --watch",
     "tsc:full-emit": "tsc -b --noCheck",
     "tsc:declaration-emit": "tsc -b --emitDeclarationOnly --noCheck",
@@ -18,7 +24,8 @@
     "test:watch": "pnpm test --watch",
     "test:ci": "NODE_OPTIONS=\"--test-reporter=junit --test-reporter-destination=./test-report.xml --test-reporter=spec --test-reporter-destination=stdout\" pnpm run test",
     "dev": "pnpm run tsc:watch",
-    "load-env": "dotenvx run --ignore=MISSING_ENV_FILE"
+    "load-env": "dotenvx run --ignore=MISSING_ENV_FILE",
+    "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
     "es-toolkit": "^1.43.0",
