@@ -388,6 +388,67 @@ describe("Cache", { concurrency: true }, () => {
     },
   );
 
+  describe("PostgresStore-specific behavior", () => {
+    it("should only keep the entry with the newest birth date when storing multiple entries with same id and vary", async () => {
+      const cache = new Cache(postgresStore);
+      const id = randomURI();
+      const vary = emptyVary;
+
+      // Create three entries with the same id and vary, but different birth dates
+      // Entry 1: oldest (produced 3 seconds ago)
+      const oldestContent = { data: "oldest", timestamp: 1 };
+      const oldestProducedAt = new Date(Date.now() - 3000);
+
+      // Entry 2: middle (produced 2 seconds ago)
+      const middleContent = { data: "middle", timestamp: 2 };
+      const middleProducedAt = new Date(Date.now() - 2000);
+
+      // Entry 3: newest (produced 1 second ago)
+      const newestContent = { data: "newest", timestamp: 3 };
+      const newestProducedAt = new Date(Date.now() - 1000);
+
+      // Store all three entries at once
+      await cache.store([
+        {
+          id,
+          vary,
+          content: oldestContent,
+          directives: { freshUntilAge: 60 },
+          date: oldestProducedAt,
+        },
+        {
+          id,
+          vary,
+          content: middleContent,
+          directives: { freshUntilAge: 60 },
+          date: middleProducedAt,
+        },
+        {
+          id,
+          vary,
+          content: newestContent,
+          directives: { freshUntilAge: 60 },
+          date: newestProducedAt,
+        },
+      ]);
+
+      // Retrieve the entries
+      const result = await cache.get({
+        id,
+        params: {},
+        directives: {},
+      });
+
+      // Should only have one entry (the newest one)
+      expect(result.usable).to.not.eq(undefined);
+      expect(result.usable?.content).to.deep.eq(newestContent);
+      expect(result.usable?.date.getTime()).to.be.closeTo(
+        newestProducedAt.getTime(),
+        100,
+      );
+    });
+  });
+
   describe("events", () => {
     it("should emit an event for each stored entry", async () => {
       const cache = new Cache(memoryStore);

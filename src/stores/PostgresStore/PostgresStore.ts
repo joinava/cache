@@ -1,9 +1,11 @@
+import { maxBy } from "es-toolkit";
 import type { ColumnType } from "kysely";
 import { Kysely, PostgresDialect } from "kysely";
 import type { Pool } from "pg";
 import type { Jsonify, Tagged } from "type-fest";
 import type { DateString, JsonOf, JSONWithUndefined } from "type-party";
 import { parseDateString } from "type-party/runtime/dates.js";
+import { entryUtils } from "../../index.js";
 import type { AnyParams } from "../../types/01_Params.js";
 import type { AnyValidators } from "../../types/02_Validators.js";
 import type {
@@ -103,8 +105,7 @@ export default class PostgresStore<
   Validators extends AnyValidators = AnyValidators,
   Params extends PostgresStoreSupportedParams = PostgresStoreSupportedParams,
   Id extends string = string,
-> implements Store<Content, Validators, Params, Id>
-{
+> implements Store<Content, Validators, Params, Id> {
   /** Object containing info about the schema and table name */
   private readonly tableNameData: {
     schemaName: string;
@@ -206,7 +207,15 @@ export default class PostgresStore<
       await this.db
         .insertInto(this.tableName)
         .values(
-          entries.map((it) => ({
+          // Postgres only allows an ON CONFLICT to affect the same key once per
+          // query, so we need to make sure that the entries are unique by id and
+          // vary; if not, we need to choose the one with the newest birth date.
+          keepMaxPerGroup({
+            items: entries,
+            groupBy: (it) =>
+              jsonStringify([it.entry.id, this.serializeVary(it.entry.vary)]),
+            maxBy: (it) => entryUtils.birthDate(it.entry).getTime(),
+          }).map((it) => ({
             resource_id: it.entry.id,
             vary: this.serializeVary(it.entry.vary),
             entry: this.serializeEntry(it.entry),
@@ -334,4 +343,20 @@ export default class PostgresStore<
       date: parseDateString(entry.date),
     };
   }
+}
+
+function keepMaxPerGroup<T>(opts: {
+  items: readonly T[];
+  groupBy: (item: T) => string;
+  maxBy: (item: T) => number;
+}): T[] {
+  return Map.groupBy(opts.items, opts.groupBy)
+    .values()
+    .map((group) =>
+      // Non-null assertions are safe because the group cannot be empty,
+      // or it wouldn't have an entry in the Map.
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      group.length > 1 ? maxBy(group, opts.maxBy)! : group[0]!,
+    )
+    .toArray();
 }
