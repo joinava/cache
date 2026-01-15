@@ -1,0 +1,49 @@
+{
+  "compilerOptions": {
+    "declaration": true,
+    "declarationMap": true,
+
+    // Key target + module system stuff to ensure sanity.
+    "target": "ESNext",
+    "module": "nodenext",
+    "verbatimModuleSyntax": true,
+    "moduleResolution": "nodenext",
+
+    // Strictness (i.e., make things maximally strict)
+    "strict": true,
+    "allowUnreachableCode": false,
+    "noFallthroughCasesInSwitch": true,
+    "useDefineForClassFields": true,
+    "forceConsistentCasingInFileNames": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noUncheckedIndexedAccess": true,
+    "useUnknownInCatchVariables": true,
+    "noUncheckedSideEffectImports": true,
+
+    // Ban syntax (like `enum`) that makes it harder to compile TS to JS,
+    // because that operation no longer involves just type annotation stripping,
+    // which forces the use of slower transpilers (e.g., tsc over swc; tsc-node
+    // over tsx). The TS team also considers these syntax additions as "regrets"
+    // in the language design (e.g., because enum is actually a reserved word in
+    // JS that TC39 might eventually want to use in a way that would conflict
+    // with TS). Cf. isolatedModules.
+    "erasableSyntaxOnly": true,
+
+    // Compilation performance
+    "incremental": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+
+    // Handle JS + JSON files.
+    "allowJs": true,
+    "checkJs": true,
+    "resolveJsonModule": true,
+
+    "rootDir": ".",
+    "outDir": "dist",
+    "sourceMap": true
+  },
+  "include": ["./src", "./test"]
+}

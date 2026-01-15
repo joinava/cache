@@ -1,0 +1,47 @@
+{
+  "name": "@zingage/cache",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "tsc:watch": "tsc -b --watch",
+    "tsc:full-emit": "tsc -b --noCheck",
+    "tsc:declaration-emit": "tsc -b --emitDeclarationOnly --noCheck",
+    "tsc:check": "tsc -b --emitDeclarationOnly",
+    "lint:eslint": "eslint --max-warnings 0 src",
+    "test": "node --test  \"./dist/**/*.test.js\"",
+    "test:watch": "pnpm test --watch",
+    "test:ci": "NODE_OPTIONS=\"--test-reporter=junit --test-reporter-destination=./test-report.xml --test-reporter=spec --test-reporter-destination=stdout\" pnpm run test",
+    "dev": "pnpm run tsc:watch",
+    "load-env": "dotenvx run --ignore=MISSING_ENV_FILE"
+  },
+  "dependencies": {
+    "es-toolkit": "^1.43.0",
+    "kysely": "^0.28.3",
+    "lru_map": "^0.4.1",
+    "p-limit": "^6.2.0",
+    "pg": "^8.16.3",
+    "safe-stable-stringify": "^2.5.0",
+    "type-fest": "^5.4.1",
+    "type-party": "^0.7.3"
+  },
+  "devDependencies": {
+    "@dotenvx/dotenvx": "^1.51.4",
+    "@types/chai": "^5.2.2",
+    "@types/debug": "^4.1.12",
+    "@types/node": "^25.0.8",
+    "@types/pg": "^8.15.4",
+    "chai": "^5.2.1",
+    "debug": "^4.4.1",
+    "eslint": "^9.39.2",
+    "fast-check": "^4.2.0",
+    "pipeline-segment": "^0.0.6",
+    "test-with-fixture": "^1.0.1",
+    "typescript": "^5.9.3"
+  }
+}
