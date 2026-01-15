@@ -35,7 +35,8 @@
     "pg": "^8.16.3",
     "safe-stable-stringify": "^2.5.0",
     "type-fest": "^5.4.1",
-    "type-party": "^0.7.3"
+    "type-party": "^0.7.3",
+    "tagged-tag": "^1.0.0"
   },
   "devDependencies": {
     "@dotenvx/dotenvx": "^1.51.4",
@@ -48,7 +49,14 @@
     "eslint": "^9.39.2",
     "fast-check": "^4.2.0",
     "pipeline-segment": "^0.0.6",
+    "prettier": "^3.8.0",
     "test-with-fixture": "^1.0.1",
     "typescript": "^5.9.3"
-  }
+  },
+  "pnpm": {
+    "overrides": {
+      "type-fest": "^5.4.1"
+    }
+  },
+  "prettier": {}
 }

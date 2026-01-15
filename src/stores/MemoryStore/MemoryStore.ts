@@ -19,9 +19,7 @@ import ExpiringEntryMap from "./ExpiringEntryMap.js";
 
 // Full cache key that includes the variant key.
 type FullCacheKey<ResourceId extends string> = JsonOf<
-  // We know that Jsonify<...> here doesn't change its input type, but TS can't
-  // figure that out, so we need to apply Jsonify.
-  Jsonify<readonly [ResourceId, VariantKey]>
+  readonly [ResourceId, VariantKey]
 >;
 
 /**
@@ -37,8 +35,7 @@ export default class MemoryStore<
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
   Id extends string = string,
-> implements Store<Content, Validators, Params, Id>
-{
+> implements Store<Content, Validators, Params, Id> {
   /**
    * This map stores metadata about each distinct `ResourceId` (i.e., primary
    * cache key) that's stored. Specifically...

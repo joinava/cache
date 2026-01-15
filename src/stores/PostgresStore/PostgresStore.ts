@@ -52,17 +52,13 @@ type CacheTables<
     resource_id: ColumnType<string, string, never>;
     vary: ColumnType<
       Readonly<NormalizedParams<Params>>,
-      // We know that Jsonify<...> here doesn't change its input type, but TS can't
-      // figure that out, so we need to apply Jsonify.
-      JsonOf<Jsonify<NormalizedVary<Params>>>,
+      JsonOf<NormalizedVary<Params>>,
       never
     >;
-    // Ditto: we know that Jsonify<...> here doesn't change its input type, but
-    // TS can't figure that out, so we need to apply Jsonify.
     entry: ColumnType<
       TableEntry<Content, Validators, Params, Id>,
-      JsonOf<Jsonify<Entry<Content, Validators, Params, Id>>>,
-      JsonOf<Jsonify<Entry<Content, Validators, Params, Id>>>
+      JsonOf<Entry<Content, Validators, Params, Id>>,
+      JsonOf<Entry<Content, Validators, Params, Id>>
     >;
   };
 };

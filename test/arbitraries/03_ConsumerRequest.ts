@@ -1,10 +1,13 @@
 import fc from "fast-check";
+import type tag from "tagged-tag";
 import type { AnyParams } from "../../src/types/01_Params.js";
 import type {
   ConsumerDirectives,
   ConsumerRequest,
 } from "../../src/types/03_ConsumerRequest.js";
 import { normalizeConsumerMaxStale } from "../../src/utils/normalization.js";
+
+export type { tag };
 
 /**
  * NB: our types don't yet distinguish between pre- and post-normalization
