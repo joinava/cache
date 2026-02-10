@@ -173,7 +173,7 @@ export function postgresStoreFixture() {
       async cleanup() {
         // eslint-disable-next-line no-console
         console.log("Cleaning up postgres store");
-        await postgresStore.close();
+        await postgresStore[Symbol.asyncDispose]();
         await postgres.query("drop schema cache cascade");
         await postgres.end();
       },

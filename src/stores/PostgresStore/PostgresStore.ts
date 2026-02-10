@@ -250,9 +250,11 @@ export default class PostgresStore<
     }
   }
 
-  async close() {
+  async [Symbol.asyncDispose]() {
     // we don't need to do anything here, the caller should handle closing db connection
-    this.logInfo("close called, but no action needed for postgres store");
+    this.logInfo(
+      "[Symbol.asyncDispose] called, but no action needed for postgres store",
+    );
   }
 
   private getTableNameData(schemaName: string, tableName: string) {

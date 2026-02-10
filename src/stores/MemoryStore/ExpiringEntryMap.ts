@@ -157,4 +157,8 @@ export default class ExpiringEntryMap<K, V> {
   close() {
     clearTimeout(this.cleanupJobTimer);
   }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    this.close();
+  }
 }

@@ -121,5 +121,12 @@ export type Store<
    * if the store has a db client/connection passed in, it's up to the caller to
    * manage that.
    */
-  close(timeout?: number): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+
+  /**
+   * Same as Symbol.asyncDispose, but with a timeout. If you implement both this
+   * and Symbol.asyncDispose, Symbol.asyncDispose should simply call close with
+   * a default timeout.
+   */
+  close?(timeout?: number): Promise<void>;
 };

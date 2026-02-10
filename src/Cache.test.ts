@@ -27,7 +27,7 @@ describe("Cache", { concurrency: true }, () => {
       "Waiting for any redis cleanup tasks to finish before closing Redis connection...",
     );
 
-    await Promise.all([memoryStore.close(), postgresCleanup()]);
+    await Promise.all([memoryStore[Symbol.asyncDispose](), postgresCleanup()]);
   });
 
   // The value returned when there's no cached response at all for the resource

@@ -313,7 +313,13 @@ export default class Cache<
 
   public async close(timeout?: number) {
     this.#closed = true;
-    return this.#dataStore.close(timeout);
+    return (
+      this.#dataStore.close?.(timeout) ?? this.#dataStore[Symbol.asyncDispose]()
+    );
+  }
+
+  public async [Symbol.asyncDispose]() {
+    return this.close(60_000);
   }
 
   /**

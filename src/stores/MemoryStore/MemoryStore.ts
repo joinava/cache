@@ -232,6 +232,10 @@ export default class MemoryStore<
   public async close() {
     this.entriesMap.close();
   }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    return this.close();
+  }
 }
 
 function makeCacheKey<Id extends string>(
