@@ -118,6 +118,8 @@ export async function naiveGetMany<
   maxConcurrency = 10,
   options?: { signal?: AbortSignal },
 ): Promise<Array<Entry<T, Validators, Params, Id>[]>> {
+  options?.signal?.throwIfAborted();
+
   const limit = pLimit(maxConcurrency);
 
   // Process all requests with controlled concurrency

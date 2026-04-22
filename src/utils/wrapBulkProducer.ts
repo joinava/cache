@@ -221,9 +221,7 @@ export function wrapBulkProducer<
         : Promise.resolve([]),
       cacheableRequests.length > 0
         ? cache.getMany(cacheableRequests, options).catch((e: unknown) => {
-            if (e instanceof DOMException && e.name === "AbortError") {
-              throw e;
-            }
+            signal?.throwIfAborted();
 
             switch (onCacheReadFailure) {
               case "throw":
@@ -354,8 +352,9 @@ export function wrapBulkProducer<
       }),
       ...zip2(
         nonCacheableRequests,
-        await uncacheableProducerResultsPromise.then((res) =>
-          res.map((producerResult, i) =>
+        await uncacheableProducerResultsPromise.then((res) => {
+          signal?.throwIfAborted();
+          return res.map((producerResult, i) =>
             producerResult instanceof Error
               ? producerResult
               : primaryNormalizedResultResourceFromRequestPairedProducerResult(
@@ -364,8 +363,8 @@ export function wrapBulkProducer<
                   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
                   nonCacheableRequests[i]!.id satisfies ReadonlyDeep<Id> as Id,
                 ),
-          ),
-        ),
+          );
+        }),
       ),
     ];
 

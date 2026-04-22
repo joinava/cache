@@ -337,9 +337,9 @@ export default function wrapProducer<
     const cacheRes = await cache
       .get(finalRequest, options)
       .catch((e: unknown) => {
-        if (e instanceof DOMException && e.name === "AbortError") {
-          throw e;
-        }
+        // If the errror was the signal being aborted, propagate that; don't
+        // assume a read failure.
+        signal?.throwIfAborted();
 
         switch (onCacheReadFailure) {
           case "throw":
@@ -434,8 +434,9 @@ export default function wrapProducer<
 
     return usableIfError
       ? newContentPromise.catch((error: unknown) => {
-          if (error instanceof DOMException && error.name === "AbortError")
-            throw error;
+          // If the errror was the signal being aborted, propagate that rather
+          // than returning the cached, usable-if-error value.
+          signal?.throwIfAborted();
 
           logWarning(
             "error calling producer; falling back to a cached value, as permitted",
