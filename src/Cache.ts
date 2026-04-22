@@ -165,7 +165,10 @@ export default class Cache<
    */
   public async get(
     req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
+    options?: { signal?: AbortSignal },
   ): Promise<CacheLookupResult<Content, Validators, Params, Id>> {
+    options?.signal?.throwIfAborted();
+
     if (this.#closed) {
       if (this.#onGetAfterClose === "throw") {
         this.#logger("trace", "received request when closed and throwing");
@@ -190,7 +193,9 @@ export default class Cache<
     const cacheEntries = await this.#dataStore.get(
       id satisfies ReadonlyDeep<Id> as Id,
       normalizedParams,
+      options,
     );
+
     return this.#processCacheEntries(cacheEntries, directives, now, {
       requestIndex: 0,
     });
@@ -209,7 +214,10 @@ export default class Cache<
    */
   public async getMany(
     requests: readonly ReadonlyDeep<ConsumerRequest<Params, Id>>[],
+    options?: { signal?: AbortSignal },
   ): Promise<CacheLookupResult<Content, Validators, Params, Id>[]> {
+    options?.signal?.throwIfAborted();
+
     if (requests.length === 0) {
       return [];
     }
@@ -245,6 +253,7 @@ export default class Cache<
         id: req.id satisfies ReadonlyDeep<Id> as Id,
         params: this.normalizeParams(req.params),
       })),
+      options,
     );
 
     this.#logger("trace", "received entries from the store via getMany", {

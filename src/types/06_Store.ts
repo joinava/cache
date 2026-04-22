@@ -72,6 +72,7 @@ export type Store<
   get(
     id: Id,
     params: Readonly<NormalizedParams<Params>>,
+    options?: { signal?: AbortSignal },
   ): Promise<Entry<T, Validators, Params, Id>[]>;
 
   /**
@@ -93,6 +94,7 @@ export type Store<
       readonly id: Id;
       readonly params: Readonly<NormalizedParams<Params>>;
     }[],
+    options?: { signal?: AbortSignal },
   ): Promise<Array<Entry<T, Validators, Params, Id>[]>>;
 
   /**

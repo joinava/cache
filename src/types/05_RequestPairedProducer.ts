@@ -15,6 +15,7 @@ export type RequestPairedProducer<
   Id extends string = string,
 > = (
   req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
+  options?: { signal?: AbortSignal },
 ) => Promise<RequestPairedProducerResult<T, Validators, Params, Id>>;
 
 /**

@@ -477,5 +477,143 @@ describe("Cache", { concurrency: true }, () => {
       expect(listener.mock.calls[1]?.arguments[1]).to.eq(Infinity);
     });
   });
+
+  describe("AbortSignal support", () => {
+    describe("Cache.get", () => {
+      it("should reject immediately with an already-aborted signal", async () => {
+        const cache = new Cache(memoryStore);
+        const controller = new AbortController();
+        controller.abort(new Error("pre-aborted"));
+
+        try {
+          await cache.get(
+            { id: "test", params: {}, directives: {} },
+            { signal: controller.signal },
+          );
+          throw new Error("should have rejected");
+        } catch (e) {
+          expect((e as Error).message).to.eq("pre-aborted");
+        }
+      });
+
+      it("should forward the signal to the store's get method", async () => {
+        const signalCapture: (AbortSignal | undefined)[] = [];
+        const store = new MemoryStore();
+        const origGet = store.get.bind(store);
+        store.get = (async (
+          id: string,
+          params: any,
+          options?: { signal?: AbortSignal },
+        ) => {
+          signalCapture.push(options?.signal);
+          return origGet(id, params);
+        }) as typeof store.get;
+
+        const cache = new Cache(store);
+        const controller = new AbortController();
+
+        try {
+          await cache.get(
+            { id: "signal-fwd-test", params: {}, directives: {} },
+            { signal: controller.signal },
+          );
+
+          expect(signalCapture).to.have.lengthOf(1);
+          expect(signalCapture[0]).to.eq(controller.signal);
+        } finally {
+          await cache.close();
+        }
+      });
+
+      it("should still return results normally when signal is not aborted", async () => {
+        const cache = new Cache(memoryStore);
+        const id = randomURI();
+        await cache.store([
+          {
+            id,
+            vary: emptyVary,
+            content: ["signal-normal"],
+            directives: { freshUntilAge: 100 },
+          },
+        ]);
+
+        const controller = new AbortController();
+        const result = await cache.get(
+          { id, params: {}, directives: {} },
+          { signal: controller.signal },
+        );
+        expect(result.usable).to.deep.include({ content: ["signal-normal"] });
+      });
+    });
+
+    describe("Cache.getMany", () => {
+      it("should reject immediately with an already-aborted signal", async () => {
+        const cache = new Cache(memoryStore);
+        const controller = new AbortController();
+        controller.abort(new Error("pre-aborted-many"));
+
+        try {
+          await cache.getMany(
+            [{ id: "a", params: {}, directives: {} }],
+            { signal: controller.signal },
+          );
+          throw new Error("should have rejected");
+        } catch (e) {
+          expect((e as Error).message).to.eq("pre-aborted-many");
+        }
+      });
+
+      it("should forward the signal to the store's getMany method", async () => {
+        const signalCapture: (AbortSignal | undefined)[] = [];
+        const store = new MemoryStore();
+        const origGetMany = store.getMany.bind(store);
+        store.getMany = (async (
+          requests: any,
+          options?: { signal?: AbortSignal },
+        ) => {
+          signalCapture.push(options?.signal);
+          return origGetMany(requests);
+        }) as typeof store.getMany;
+
+        const cache = new Cache(store);
+        const controller = new AbortController();
+
+        try {
+          await cache.getMany(
+            [{ id: "fwd-test-a", params: {}, directives: {} }],
+            { signal: controller.signal },
+          );
+
+          expect(signalCapture).to.have.lengthOf(1);
+          expect(signalCapture[0]).to.eq(controller.signal);
+        } finally {
+          await cache.close();
+        }
+      });
+
+      it("should still return results normally when signal is not aborted", async () => {
+        const cache = new Cache(memoryStore);
+        const ids = [randomURI(), randomURI()];
+        await cache.store(
+          ids.map((id, i) => ({
+            id,
+            vary: emptyVary,
+            content: [`many-${i}`],
+            directives: { freshUntilAge: 100 },
+          })),
+        );
+
+        const controller = new AbortController();
+        const results = await cache.getMany(
+          ids.map((id) => ({ id, params: {}, directives: {} })),
+          { signal: controller.signal },
+        );
+        expect(results).to.have.lengthOf(2);
+        results.forEach((r, i) => {
+          expect(r.usable).to.deep.include({ content: [`many-${i}`] });
+        });
+      });
+    });
+  });
 });
 /* eslint-enable @typescript-eslint/no-explicit-any */

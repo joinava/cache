@@ -40,6 +40,44 @@ export function assertUnreachable(_it: never): never {
 }
 
 /**
+ * Races a promise against an AbortSignal. If the signal is already aborted or
+ * becomes aborted before the promise settles, the returned promise rejects with
+ * the signal's reason. The original promise is NOT cancelled (it continues
+ * running); this only controls the caller's observation of the result.
+ */
+export function raceWithSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return promise;
+
+  if (signal.aborted) {
+    // Prevent unhandled rejection on the underlying promise, as callers are
+    // supposed to only have to handle rejection of the returned promise from
+    // this fn.
+    promise.catch(() => {});
+    throw signal.reason;
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
  * Faster, more-type-safe version of lodash's zip, just for pairs.
  * If the arrays are not the same length, the longer one will be truncated!
  * (That's what allows us to not have `undefined` in the result type.)
@@ -78,12 +116,13 @@ export async function naiveGetMany<
     readonly params: Readonly<NormalizedParams<Params>>;
   }[],
   maxConcurrency = 10,
+  options?: { signal?: AbortSignal },
 ): Promise<Array<Entry<T, Validators, Params, Id>[]>> {
   const limit = pLimit(maxConcurrency);
 
   // Process all requests with controlled concurrency
   const promises = requests.map(async (request) => {
-    return limit(async () => store.get(request.id, request.params));
+    return limit(async () => store.get(request.id, request.params, options));
   });
 
   return Promise.all(promises);
