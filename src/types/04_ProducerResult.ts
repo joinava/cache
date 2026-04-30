@@ -92,7 +92,7 @@ export type ProducerResultResourceObject<
   // Age of content at the moment it's sent by this producer -- in seconds!
   // Will be non-zero when this producer is itself a cache [since it's been
   // holding the content for some period of time], or it could be non-zero
-  // to reflect that some time passed while it was being retreived [network
+  // to reflect that some time passed while it was being retrieved [network
   // latency]. Defaults to 0 if not provided.
   initialAge?: number;
 
