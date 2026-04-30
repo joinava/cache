@@ -77,7 +77,7 @@ export type ProducerResultResource<
 
 // Core producerResultResource fields factored out of the Spec distribution
 // nonsense, so we can easily intersect in extra properties. Rarely used
-// directly, as it doesn't take a Spec to gaurantee that the id and content
+// directly, as it doesn't take a Spec to guarantee that the id and content
 // uphold any correlation specified by that Spec.
 export type ProducerResultResourceObject<
   Id extends string,
