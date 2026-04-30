@@ -1,4 +1,5 @@
 import fc from "fast-check";
+import type { JSON } from "type-party";
 import type { AnyValidators } from "../../src/types/02_Validators.js";
 
 /**
@@ -7,5 +8,6 @@ import type { AnyValidators } from "../../src/types/02_Validators.js";
  */
 export const AnyValidatorsArb: fc.Arbitrary<AnyValidators> = fc.dictionary(
   fc.string(),
-  fc.jsonValue(),
+  // Fix slight mismatch between fc's JSON type and our JSON type.
+  fc.jsonValue().map((v) => v as JSON),
 );

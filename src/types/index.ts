@@ -2,6 +2,7 @@
 // various components that make up the caching system.
 //
 // Those that are meant to be public are re-exported below.
+export type { CacheSpec, ContentForId, SpecForId } from "./00_CacheSpec.js";
 export type { AnyParams, AnyParamValue } from "./01_Params.js";
 export type { AnyValidators } from "./02_Validators.js";
 export type {
@@ -14,6 +15,7 @@ export type {
   ProducerMaxStale,
   ProducerResult,
   ProducerResultResource,
+  ProducerResultResourceForId,
   Vary,
 } from "./04_ProducerResult.js";
 export type {
@@ -22,11 +24,18 @@ export type {
 } from "./05_RequestPairedProducer.js";
 export type {
   Entry,
+  EntryForId,
   NormalizedConsumerMaxStale,
   NormalizedParams,
   NormalizedProducerDirectives,
+  NormalizedProducerResult,
   NormalizedProducerResultResource,
   NormalizedVary,
 } from "./06_Normalization.js";
-export type { Store, StoreEntryInput } from "./06_Store.js";
+export type {
+  Store,
+  StoreEntryInput,
+  StoreGetManyRequest,
+  StoreGetManyResult,
+} from "./06_Store.js";
 export { components, type Logger } from "./07_Logger.js";

@@ -1118,10 +1118,10 @@ describe("wrapBulkProducer", () => {
     });
   });
 
-  function bulkProducerFromProducer(
+  function bulkProducerFromProducer<C>(
     producer: (req: {
       id: string;
-    }) => Promise<{ content: string; directives: ProducerDirectives }>,
+    }) => Promise<{ content: C; directives: ProducerDirectives }>,
   ) {
     // TODO: make it possible for the bulk producer to reject, even though that
     // shouldn't happen.

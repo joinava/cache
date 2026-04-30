@@ -11,6 +11,12 @@ export { default as PostgresStore } from "./stores/PostgresStore/PostgresStore.j
 export type { PostgresStoreSupportedParams } from "./stores/PostgresStore/PostgresStore.js";
 export * from "./types/index.js";
 export { default as collapsedTaskCreator } from "./utils/collapsedTaskCreator.js";
+export {
+  idStartsWith,
+  producerByIdType,
+  type ProducerBranch,
+  type ProducerByIdTypeBuilder,
+} from "./utils/producerByIdType.js";
 export { naiveGetMany } from "./utils/utils.js";
 export { wrapBulkProducer } from "./utils/wrapBulkProducer.js";
 export { default as wrapProducer } from "./utils/wrapProducer.js";

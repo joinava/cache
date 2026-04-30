@@ -5,6 +5,7 @@ import type { PublicInterface } from "type-party";
 import type Cache from "../Cache.js";
 import type { CacheLookupResult } from "../Cache.js";
 import { publishCacheResult } from "../diagnostics.js";
+import type { CacheSpec, SpecForId } from "../types/00_CacheSpec.js";
 import type {
   AnyParams,
   AnyValidators,
@@ -34,18 +35,25 @@ import {
 /**
  * A bulk producer function that takes an array of consumer requests and returns
  * a promise for an array of request-paired producer results.
+ *
+ * The result type is a flat array of (RequestPairedProducerResult |
+ * ErrorType): each element is a discriminated union over the cache's `Spec`,
+ * so each (id, content) pair must internally agree, but the type system does
+ * not require the i'th result element to align with the i'th request's id at
+ * the call site (which would require gnarly mapped-tuple typing). When
+ * `wrapBulkProducer` returns its results to the caller, they ARE narrowed
+ * per-request via the wrapper's own generic.
  */
 export type BulkProducer<
-  Content,
+  Spec extends CacheSpec,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
-  Id extends string = string,
   ErrorType extends Error = Error,
 > = (
-  reqs: readonly PartialConsumerRequest<Params, Id>[],
+  reqs: readonly PartialConsumerRequest<Params, Spec["id"]>[],
   options?: { signal?: AbortSignal },
 ) => Promise<
-  (RequestPairedProducerResult<Content, Validators, Params, Id> | ErrorType)[]
+  (RequestPairedProducerResult<Spec, Validators, Params> | ErrorType)[]
 >;
 
 /**
@@ -63,6 +71,11 @@ export type BulkProducer<
  *
  * Note that any supplemental resources returned by the producer will be
  * cached but not returned to the caller.
+ *
+ * The wrapped function is generic over the specific ids of incoming requests
+ * so that, when `Spec` is a union of cache key shapes, each output slot's
+ * content type is narrowed to the spec variants compatible with the
+ * corresponding input request's id.
  *
  * ## AbortSignal support
  *
@@ -97,15 +110,14 @@ export type BulkProducer<
  *   and it needs to decide whether to contact its origin.
  */
 export function wrapBulkProducer<
-  Id extends string,
-  Content,
+  Spec extends CacheSpec,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
   ErrorType extends Error = Error,
 >(
-  cache: PublicInterface<Cache<Content, Validators, Params, Id>>,
+  cache: PublicInterface<Cache<Spec, Validators, Params>>,
   options: WrapProducerOptions<Params> | undefined,
-  producer: BulkProducer<Content, Validators, Params, Id, ErrorType>,
+  producer: BulkProducer<Spec, Validators, Params, ErrorType>,
 ) {
   const {
     cacheName,
@@ -119,9 +131,11 @@ export function wrapBulkProducer<
   const logWarning = logger.bind(null, "wrap-producer", "warn");
 
   const callProducerAndLog = async (
-    reqs: readonly PartialConsumerRequest<Params, Id>[],
+    reqs: readonly PartialConsumerRequest<Params, Spec["id"]>[],
     opts?: { signal?: AbortSignal },
-  ) => {
+  ): Promise<
+    (RequestPairedProducerResult<Spec, Validators, Params> | ErrorType)[]
+  > => {
     logTrace("contacting bulk producer", { reqs });
     const responses = opts ? await producer(reqs, opts) : await producer(reqs);
     logTrace("got responses from bulk producer", { responses });
@@ -137,7 +151,7 @@ export function wrapBulkProducer<
   // even when the caller that triggered it has aborted. See the
   // wrapBulkProducer JSDoc for details.
   const collapsedCallProducerAndStore = collapsedTaskCreator(
-    async (reqs: readonly PartialConsumerRequest<Params, Id>[]) => {
+    async (reqs: readonly PartialConsumerRequest<Params, Spec["id"]>[]) => {
       const requestPairedProducerResults = await callProducerAndLog(reqs);
 
       // Extract all resources to store (main resources + supplemental resources),
@@ -146,9 +160,9 @@ export function wrapBulkProducer<
         ([result, req]) =>
           result instanceof Error
             ? []
-            : requestPairedProducerResultToResources(
+            : requestPairedProducerResultToResources<Spec, Validators, Params>(
                 result,
-                req.id satisfies ReadonlyDeep<Id> as Id,
+                req.id satisfies ReadonlyDeep<Spec["id"]> as Spec["id"],
               ),
       );
 
@@ -178,15 +192,25 @@ export function wrapBulkProducer<
   const normalizeVaryBound = (vary: Vary<Params>) =>
     normalizeVary(cache.normalizeParamName, cache.normalizeParamValue, vary);
 
-  const wrappedBulkProducer = async function (
-    reqs: readonly PartialConsumerRequest<Params, Id>[],
+  const wrappedBulkProducer = async function <
+    const Reqs extends readonly PartialConsumerRequest<Params, Spec["id"]>[],
+  >(
+    reqs: Reqs,
     options?: { signal?: AbortSignal },
-  ): Promise<(Entry<Content, Validators, Params, Id> | ErrorType)[]> {
+  ): Promise<{
+    -readonly [K in keyof Reqs]:
+      | Entry<SpecForId<Spec, Reqs[K]["id"]>, Validators, Params>
+      | ErrorType;
+  }> {
     const signal = options?.signal;
     signal?.throwIfAborted();
 
     if (reqs.length === 0) {
-      return [];
+      return [] as unknown as {
+        -readonly [K in keyof Reqs]:
+          | Entry<SpecForId<Spec, Reqs[K]["id"]>, Validators, Params>
+          | ErrorType;
+      };
     }
 
     // Normalize requests by replacing undefined params + directives w/ empty objects
@@ -218,7 +242,12 @@ export function wrapBulkProducer<
     const [uncacheableProducerResultsPromise, cacheResultsPromise] = [
       nonCacheableRequests.length > 0
         ? callProducerAndLog(nonCacheableRequests, options)
-        : Promise.resolve([]),
+        : Promise.resolve(
+            [] as (
+              | RequestPairedProducerResult<Spec, Validators, Params>
+              | ErrorType
+            )[],
+          ),
       cacheableRequests.length > 0
         ? cache.getMany(cacheableRequests, options).catch((e: unknown) => {
             signal?.throwIfAborted();
@@ -229,16 +258,22 @@ export function wrapBulkProducer<
               case "call-producer":
                 // Pretend the cache returned no results so that we'll fall through to
                 // the producer
-                return cacheableRequests.map(() => ({ validatable: [] }));
+                return cacheableRequests.map(() => ({
+                  validatable: [],
+                })) as CacheLookupResult<Spec, Validators, Params>[];
               default:
                 assertUnreachable(onCacheReadFailure);
             }
           })
-        : Promise.resolve([]),
+        : Promise.resolve([] as CacheLookupResult<Spec, Validators, Params>[]),
     ];
 
     // Handle cacheable requests.
-    const cacheResults = await cacheResultsPromise;
+    const cacheResults = (await cacheResultsPromise) as CacheLookupResult<
+      Spec,
+      Validators,
+      Params
+    >[];
 
     signal?.throwIfAborted();
 
@@ -272,7 +307,7 @@ export function wrapBulkProducer<
     // Call the producer immediately for requests that can't be satisfied
     // directly from cache.
     const hasImmediatelyReturnableResult = (
-      res: CacheLookupResult<Content, Validators, Params, Id>,
+      res: CacheLookupResult<Spec, Validators, Params>,
     ) => Boolean(res.usable || res.usableWhileRevalidate);
 
     const requestsNeedingProducerNow = requestsWithCacheResults.filter(
@@ -343,10 +378,15 @@ export function wrapBulkProducer<
           ? ([req, cacheResult.usableIfError ?? producerResult] as const)
           : ([
               req,
-              primaryNormalizedResultResourceFromRequestPairedProducerResult(
+              primaryNormalizedResultResourceFromRequestPairedProducerResult<
+                Spec,
+                Validators,
+                Params,
+                Spec["id"]
+              >(
                 normalizeVaryBound,
                 producerResult,
-                req.id satisfies ReadonlyDeep<Id> as Id,
+                req.id satisfies ReadonlyDeep<Spec["id"]> as Spec["id"],
               ),
             ] as const);
       }),
@@ -357,26 +397,39 @@ export function wrapBulkProducer<
           return res.map((producerResult, i) =>
             producerResult instanceof Error
               ? producerResult
-              : primaryNormalizedResultResourceFromRequestPairedProducerResult(
+              : primaryNormalizedResultResourceFromRequestPairedProducerResult<
+                  Spec,
+                  Validators,
+                  Params,
+                  Spec["id"]
+                >(
                   normalizeVaryBound,
                   producerResult,
                   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-                  nonCacheableRequests[i]!.id satisfies ReadonlyDeep<Id> as Id,
+                  nonCacheableRequests[i]!.id satisfies ReadonlyDeep<
+                    Spec["id"]
+                  > as Spec["id"],
                 ),
           );
         }),
       ),
     ];
 
-    const results: (ErrorType | Entry<Content, Validators, Params, Id>)[] =
-      new Array(finalRequests.length);
+    // oxlint-disable-next-line unicorn/no-new-array -- intentional sparse preallocation; filled by index below
+    const results: (ErrorType | Entry<Spec, Validators, Params>)[] = new Array(
+      finalRequests.length,
+    );
 
     for (const [req, res] of requestsWithResults) {
       // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
       results[finalRequestsToOriginalIndices.get(req)!] = res;
     }
 
-    return results;
+    return results as unknown as {
+      -readonly [K in keyof Reqs]:
+        | Entry<SpecForId<Spec, Reqs[K]["id"]>, Validators, Params>
+        | ErrorType;
+    };
   };
 
   // Expose the cache on the returned function

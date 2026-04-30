@@ -7,12 +7,13 @@ import { dummyEntryData, postgresStoreFixture } from "../test/fixtures.js";
 import Cache from "./Cache.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 import type PostgresStore from "./stores/PostgresStore/PostgresStore.js";
+import type { CacheSpec } from "./types/00_CacheSpec.js";
 import { type JSON } from "./types/utils.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 describe("Cache", { concurrency: true }, () => {
-  let memoryStore: MemoryStore<JSON, any, any>,
-    postgresStore: PostgresStore<any, any, any>,
+  let memoryStore: MemoryStore<CacheSpec<string, JSON>, any, any>,
+    postgresStore: PostgresStore<CacheSpec<string, JSON>, any, any>,
     postgresCleanup: () => Promise<void>;
 
   before(async () => {
@@ -553,10 +554,9 @@ describe("Cache", { concurrency: true }, () => {
         controller.abort(new Error("pre-aborted-many"));
 
         try {
-          await cache.getMany(
-            [{ id: "a", params: {}, directives: {} }],
-            { signal: controller.signal },
-          );
+          await cache.getMany([{ id: "a", params: {}, directives: {} }], {
+            signal: controller.signal,
+          });
           throw new Error("should have rejected");
         } catch (e) {
           expect((e as Error).message).to.eq("pre-aborted-many");

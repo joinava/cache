@@ -4,6 +4,7 @@ import { instantiateTaggedType } from "type-party/runtime/tagged-types.js";
 import {
   type AnyParams,
   type AnyValidators,
+  type CacheSpec,
   type ConsumerDirectives,
 } from "../index.js";
 import type {
@@ -13,7 +14,7 @@ import type {
 import { normalizeConsumerMaxStale } from "./normalization.js";
 
 type AnyNormalizedProducerResultResource = NormalizedProducerResultResource<
-  unknown,
+  CacheSpec,
   AnyValidators,
   AnyParams
 >;

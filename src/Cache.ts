@@ -1,7 +1,7 @@
-import { groupBy, sortBy } from "es-toolkit";
+import { groupBy, sortBy, sumBy } from "es-toolkit";
 import { EventEmitter } from "events";
 import type { InvariantOf, ReadonlyDeep } from "type-fest";
-
+import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
 import {
   type Entry,
   type NormalizeParamName,
@@ -11,10 +11,12 @@ import {
   type AnyParams,
   type AnyParamValue,
   type AnyValidators,
+  type CacheSpec,
   type ConsumerDirectives,
   type ConsumerRequest,
   type Logger,
   type ProducerResultResource,
+  type SpecForId,
   type Store,
   type Vary,
 } from "./types/index.js";
@@ -29,16 +31,19 @@ import { defaultLoggersByComponent } from "./utils/utils.js";
 
 type OnRequestAfterClose = "throw" | "return-nothing";
 
+/**
+ * The result of a cache lookup. MatchingSpecs is the subset of CacheSpec
+ * variants whose id is compatible with the request's id (`Id`).
+ */
 export type CacheLookupResult<
-  Content,
+  MatchingSpecs extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
-  Id extends string = string,
 > = {
-  usable?: Entry<Content, Validators, Params, Id> | undefined;
-  usableWhileRevalidate?: Entry<Content, Validators, Params, Id> | undefined;
-  usableIfError?: Entry<Content, Validators, Params, Id> | undefined;
-  validatable: Entry<Content, Validators, Params, Id>[];
+  usable?: Entry<MatchingSpecs, Validators, Params> | undefined;
+  usableWhileRevalidate?: Entry<MatchingSpecs, Validators, Params> | undefined;
+  usableIfError?: Entry<MatchingSpecs, Validators, Params> | undefined;
+  validatable: Entry<MatchingSpecs, Validators, Params>[];
 };
 
 /**
@@ -56,17 +61,24 @@ export type CacheLookupResult<
  *
  * For (critical) background details on the HTTP caching model, see the docs.
  *
+ * The cache is parameterized over a {@link CacheSpec}, which pairs each `id`
+ * type with the corresponding `content` type. In the simple case, all ids
+ * return the same kind of content, and `Spec` can stay as the default. To
+ * support multiple id-to-content mappings within a single cache, pass a union
+ * of CacheSpecs; the cache's get/store/getMany methods will then narrow the
+ * content type based on the id of each request, and reject mismatched
+ * (id, content) pairs at compile time.
+ *
  * TODO: support the concept of warnings.
  * See https://tools.ietf.org/html/rfc7234#section-5.5
  */
 export default class Cache<
-  Content,
+  Spec extends CacheSpec = CacheSpec,
   Validators extends AnyValidators = AnyValidators,
   in out Params extends AnyParams = AnyParams,
-  in out Id extends string = string,
 > {
   readonly #logger: Bind1<Logger, "cache">;
-  readonly #dataStore: Store<Content, Validators, Params, Id>;
+  readonly #dataStore: Store<Spec, Validators, Params>;
   #closed = false;
   readonly #onGetAfterClose: OnRequestAfterClose;
   readonly #onStoreAfterClose: OnRequestAfterClose;
@@ -86,7 +98,7 @@ export default class Cache<
     // https://www.typescriptlang.org/tsconfig/#strictFunctionTypes) means that
     // we have to use `InvariantOf<Params>` explicitly to get the type errors we
     // want.
-    dataStore: Store<Content, Validators, InvariantOf<Params>, Id>,
+    dataStore: Store<Spec, Validators, InvariantOf<Params>>,
     options: {
       logger?: Logger;
       onGetAfterClose?: OnRequestAfterClose;
@@ -108,11 +120,10 @@ export default class Cache<
   }
 
   private static bestEntry<
-    Content,
+    EntrySpec extends CacheSpec,
     Validators extends AnyValidators,
     Params extends AnyParams,
-    Id extends string = string,
-  >(suitableEntries: readonly Entry<Content, Validators, Params, Id>[]) {
+  >(suitableEntries: readonly Entry<EntrySpec, Validators, Params>[]) {
     // "When more than one suitable response is stored, a cache MUST use
     // the most recent response (as determined by the Date header field)."
     // https://tools.ietf.org/html/rfc7234#section-4
@@ -162,11 +173,16 @@ export default class Cache<
    *    the etags w/ `If-None-Match`) of these saved responses. These responses
    *    are probably stale, but it's possible they're not (e.g., if consumer
    *    used a maxAge directive shorter than the producer's freshness lifetime).
+   *
+   * The result's content type is narrowed to the spec variants whose id is
+   * compatible with `req.id`. So, e.g., if the cache's `Spec` is a union and
+   * `req.id` is a literal that only matches one variant, callers don't have to
+   * narrow the returned content themselves.
    */
-  public async get(
+  public async get<Id extends Spec["id"]>(
     req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
     options?: { signal?: AbortSignal },
-  ): Promise<CacheLookupResult<Content, Validators, Params, Id>> {
+  ): Promise<CacheLookupResult<SpecForId<Spec, Id>, Validators, Params>> {
     options?.signal?.throwIfAborted();
 
     if (this.#closed) {
@@ -208,18 +224,38 @@ export default class Cache<
    * using the store's `getMany` method to batch the underlying data store
    * operations.
    *
+   * The result is a tuple typed per-request: each output slot's content type
+   * is narrowed to the spec variants compatible with the corresponding input
+   * request's id.
+   *
    * @param requests Array of consumer requests to process
    * @returns Promise that resolves to an array of CacheLookupResult objects in
    * the same order as the input requests
    */
-  public async getMany(
-    requests: readonly ReadonlyDeep<ConsumerRequest<Params, Id>>[],
+  public async getMany<
+    const Reqs extends readonly ReadonlyDeep<
+      ConsumerRequest<Params, Spec["id"]>
+    >[],
+  >(
+    requests: Reqs,
     options?: { signal?: AbortSignal },
-  ): Promise<CacheLookupResult<Content, Validators, Params, Id>[]> {
+  ): Promise<{
+    -readonly [K in keyof Reqs]: CacheLookupResult<
+      SpecForId<Spec, Reqs[K]["id"]>,
+      Validators,
+      Params
+    >;
+  }> {
     options?.signal?.throwIfAborted();
 
-    if (requests.length === 0) {
-      return [];
+    if (!isNonEmptyArray(requests)) {
+      return [] as {
+        -readonly [K in keyof Reqs]: CacheLookupResult<
+          SpecForId<Spec, Reqs[K]["id"]>,
+          Validators,
+          Params
+        >;
+      };
     }
 
     if (this.#closed) {
@@ -235,7 +271,7 @@ export default class Cache<
         "received getMany request when closed, so returning no entries",
       );
 
-      return requests.map(() => ({ validatable: [] }));
+      return mapNonEmpty(requests, () => ({ validatable: [] }));
     }
 
     const now = new Date();
@@ -249,21 +285,19 @@ export default class Cache<
 
     // Use the store's optimized getMany method
     const cacheEntriesForRequests = await this.#dataStore.getMany(
-      requests.map((req) => ({
-        id: req.id satisfies ReadonlyDeep<Id> as Id,
+      mapNonEmpty(requests, (req) => ({
+        id: req.id,
         params: this.normalizeParams(req.params),
       })),
       options,
     );
 
     this.#logger("trace", "received entries from the store via getMany", {
-      resultCount: cacheEntriesForRequests
-        .map((it) => it.length)
-        .reduce((a: number, b: number) => a + b, 0),
+      resultCount: sumBy(cacheEntriesForRequests, (it) => it.length),
     });
 
     // Process each request and return results in the same order
-    return requests.map((req, i) =>
+    return mapNonEmpty(requests, (req, i) =>
       this.#processCacheEntries(
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         cacheEntriesForRequests[i]!,
@@ -275,12 +309,16 @@ export default class Cache<
   }
 
   /**
-   * Stores ProducerResultResources that it assumes were _just now_ retreived
-   * from the producer. If the result wasn't retreived just now, its retreival
+   * Stores ProducerResultResources that it assumes were _just now_ retrieved
+   * from the producer. If the result wasn't retrieved just now, its retrieval
    * time can be specified.
+   *
+   * The (id, content) pairs in `data` are checked against the cache's `Spec`
+   * at compile time, so a `Story[]` cannot be stored under a `story:...` id,
+   * etc.
    */
   public async store(
-    data: readonly ProducerResultResource<Content, Validators, Params, Id>[],
+    data: readonly ProducerResultResource<Spec, Validators, Params>[],
   ) {
     if (this.#closed) {
       if (this.#onStoreAfterClose === "throw") {
@@ -335,12 +373,12 @@ export default class Cache<
    * Processes cache entries for a single request and returns the appropriate
    * CacheLookupResult. This is the core logic shared between get() and getMany().
    */
-  #processCacheEntries(
-    entries: readonly Entry<Content, Validators, Params, Id>[],
+  #processCacheEntries<Id extends Spec["id"]>(
+    entries: readonly Entry<SpecForId<Spec, Id>, Validators, Params>[],
     directives: ReadonlyDeep<ConsumerDirectives>,
     now: Date,
     context: { requestIndex: number },
-  ): CacheLookupResult<Content, Validators, Params, Id> {
+  ): CacheLookupResult<SpecForId<Spec, Id>, Validators, Params> {
     const classifiedEntries = groupBy(entries, (it) =>
       entryUtils.classify(it, directives, now),
     );
@@ -420,7 +458,7 @@ export default class Cache<
  *   dictated by the producer's directives).
  */
 function calculateStoreFor(
-  entry: Entry<unknown, AnyValidators, AnyParams>,
+  entry: Entry<CacheSpec, AnyValidators, AnyParams>,
   at: Date,
 ) {
   const producerStoreFor = entry.directives.storeFor;

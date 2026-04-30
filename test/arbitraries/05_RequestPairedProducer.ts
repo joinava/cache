@@ -1,4 +1,6 @@
+import { omit } from "es-toolkit";
 import fc from "fast-check";
+import type { CacheSpec } from "../../src/types/00_CacheSpec.js";
 import type { AnyParams } from "../../src/types/01_Params.js";
 import type { AnyValidators } from "../../src/types/02_Validators.js";
 import type { RequestPairedProducerResult } from "../../src/types/05_RequestPairedProducer.js";
@@ -18,13 +20,16 @@ export const RequestPairedProducerResultArb = <
   validatorsArb: fc.Arbitrary<U>,
   paramsArb: fc.Arbitrary<V>,
   idArb: fc.Arbitrary<Id>,
-): fc.Arbitrary<RequestPairedProducerResult<T, U, V, Id>> =>
+): fc.Arbitrary<RequestPairedProducerResult<CacheSpec<Id, T>, U, V, Id>> =>
   fc
     .tuple(
       ProducerResultArb(contentArb, validatorsArb, paramsArb, idArb),
       fc.option(idArb),
     )
-    .map(([result, id]) => ({
-      ...result,
-      ...(id !== null ? { id } : {}),
-    }));
+    .map(
+      ([result, id]) =>
+        ({
+          ...omit(result, ["id"]),
+          ...(id !== null ? { id } : {}),
+        }) as RequestPairedProducerResult<CacheSpec<Id, T>, U, V, Id>,
+    );

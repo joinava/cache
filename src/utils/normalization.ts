@@ -1,7 +1,8 @@
 import type { ReadonlyDeep } from "type-fest";
-
 import { instantiateTaggedType } from "type-party/runtime/tagged-types.js";
+import type { CacheSpec } from "../types/00_CacheSpec.js";
 import {
+  type Entry,
   type NormalizedConsumerMaxStale,
   type NormalizedParams,
   type NormalizedProducerMaxStale,
@@ -25,41 +26,58 @@ import {
 } from "../types/index.js";
 
 export function normalizeProducerResult<
-  Content,
+  Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
 >(
   normalizeVary: (vary: Vary<Params>) => NormalizedVary<Params>,
-  it: ProducerResult<Content, Validators, Params>,
+  it: ProducerResult<Spec, Validators, Params>,
   fallbackProducedAt?: Date,
-): NormalizedProducerResult<Content, Validators, Params> {
-  const { supplementalResources, ...rest } = it;
+): NormalizedProducerResult<Spec, Validators, Params> {
+  const { supplementalResources } = it;
+  // The conditional/distributive `ProducerResult` and `Entry` types make TS
+  // unable to verify the equivalence of the spread'd object with the target
+  // type, even though the runtime shape is identical. We assert here.
+  const primary = normalizeProducerResultResource(
+    normalizeVary,
+    it satisfies ProducerResultResource<Spec, Validators, Params>,
+    fallbackProducedAt,
+  );
   return {
-    ...normalizeProducerResultResource(normalizeVary, rest, fallbackProducedAt),
-    supplementalResources: supplementalResources?.map((it) =>
-      normalizeProducerResultResource(normalizeVary, it, fallbackProducedAt),
+    ...primary,
+    supplementalResources: supplementalResources?.map((resource) =>
+      normalizeProducerResultResource(
+        normalizeVary,
+        resource,
+        fallbackProducedAt,
+      ),
     ),
   };
 }
 
 export function normalizeProducerResultResource<
-  Content,
+  Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
-  Id extends string = string,
 >(
   normalizeVary: (vary: Vary<Params>) => NormalizedVary<Params>,
-  resourceResult: ProducerResultResource<Content, Validators, Params, Id>,
+  resourceResult: ProducerResultResource<Spec, Validators, Params>,
   fallbackProducedAt?: Date,
-): NormalizedProducerResultResource<Content, Validators, Params, Id> {
+): NormalizedProducerResultResource<Spec, Validators, Params> {
+  // Treat the resource as a single (id, content) pair (it always is at runtime,
+  // even when `Spec` is a union and the type is conditional). The resulting
+  // object's id/content correlation is preserved because we don't synthesize
+  // values; we just round-trip them.
+
   return {
-    ...resourceResult,
+    id: resourceResult.id as Spec["id"],
+    content: resourceResult.content as Spec["content"],
     initialAge: Math.max(resourceResult.initialAge ?? 0, 0),
     vary: normalizeVary(resourceResult.vary ?? {}),
     directives: normalizeProducerDirectives(resourceResult.directives),
     validators: resourceResult.validators ?? {},
     date: resourceResult.date ?? fallbackProducedAt ?? new Date(),
-  };
+  } as Entry<Spec, Validators, Params>;
 }
 
 export function normalizeProducerDirectives(directives: ProducerDirectives) {

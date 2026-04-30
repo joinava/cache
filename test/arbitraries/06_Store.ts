@@ -1,4 +1,5 @@
 import fc from "fast-check";
+import type { CacheSpec } from "../../src/types/00_CacheSpec.js";
 import type { AnyParams } from "../../src/types/01_Params.js";
 import type { AnyValidators } from "../../src/types/02_Validators.js";
 import type { StoreEntryInput } from "../../src/types/06_Store.js";
@@ -18,7 +19,7 @@ export const StoreEntryInputArb = <
   validatorsArb: fc.Arbitrary<Validators>,
   paramsArb: fc.Arbitrary<Params>,
   idArb: fc.Arbitrary<Id>,
-): fc.Arbitrary<StoreEntryInput<T, Validators, Params, Id>> =>
+): fc.Arbitrary<StoreEntryInput<CacheSpec<Id, T>, Validators, Params>> =>
   fc.record({
     entry: EntryArb(contentArb, validatorsArb, paramsArb, idArb),
     maxStoreForSeconds: fc.nat(),
