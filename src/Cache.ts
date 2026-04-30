@@ -309,8 +309,8 @@ export default class Cache<
   }
 
   /**
-   * Stores ProducerResultResources that it assumes were _just now_ retreived
-   * from the producer. If the result wasn't retreived just now, its retreival
+   * Stores ProducerResultResources that it assumes were _just now_ retrieved
+   * from the producer. If the result wasn't retrieved just now, its retrieval
    * time can be specified.
    *
    * The (id, content) pairs in `data` are checked against the cache's `Spec`
