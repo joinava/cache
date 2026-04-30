@@ -88,17 +88,25 @@ export type NormalizedProducerResult<
   Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
+> = _NormalizedProducerResult<Spec, Spec, Validators, Params>;
+
+type _NormalizedProducerResult<
+  Spec extends CacheSpec,
+  // Just a duplicate of Spec supplied by the public NormalizedProducerResult
+  // type, so that the supplementalResources field can get all the spec variants
+  // _before_ distribution (matching the pattern in _ProducerResult).
+  AllSpecs extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
 > = Spec extends unknown
-  ? // Intersect _within_ the Spec distribution to help TS follow the difference between
-    // this type and NormalizedProducerResultResource.
-    _NormalizedProducerResultResource<
+  ? _NormalizedProducerResultResource<
       Spec["id"],
       Spec["content"],
       Params,
       Validators
     > & {
       supplementalResources?:
-        | NormalizedProducerResultResource<Spec, Validators, Params>[]
+        | NormalizedProducerResultResource<AllSpecs, Validators, Params>[]
         | undefined;
     }
   : never;
