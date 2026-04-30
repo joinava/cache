@@ -151,12 +151,18 @@ export default class PostgresStore<
   async get(
     id: Id,
     params: Readonly<NormalizedParams<Params>>,
+    options?: { signal?: AbortSignal },
   ): Promise<Entry<Content, Validators, Params, Id>[]> {
+    const signal = options?.signal;
+    signal?.throwIfAborted();
+
     this.logTrace("querying for entries with id and params", {
       id,
       params,
     });
     await this.ensureInitializedPromise;
+
+    signal?.throwIfAborted();
 
     const result = await this.db
       .selectFrom(this.tableName)
@@ -168,6 +174,8 @@ export default class PostgresStore<
       .selectAll()
       .execute();
 
+    signal?.throwIfAborted();
+
     const entries = result.map((it) => this.deserializeEntry(it.entry));
     this.logTrace("returning entries from postgres query", entries);
     return entries;
@@ -178,13 +186,14 @@ export default class PostgresStore<
       readonly id: Id;
       readonly params: Readonly<NormalizedParams<Params>>;
     }[],
+    options?: { signal?: AbortSignal },
   ): Promise<Array<Entry<Content, Validators, Params, Id>[]>> {
     this.logTrace("querying for multiple entries", {
       requestCount: requests.length,
     });
 
     // For PostgresStore, we'll use the naive implementation until we have time to optimize it
-    return naiveGetMany(this, requests);
+    return naiveGetMany(this, requests, undefined, options);
   }
 
   async store(

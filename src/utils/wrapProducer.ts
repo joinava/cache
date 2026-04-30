@@ -10,6 +10,7 @@ import type {
   AnyParams,
   AnyValidators,
   ConsumerDirectives,
+  ConsumerRequest,
   Logger,
   RequestPairedProducer,
   Vary,
@@ -22,7 +23,11 @@ import {
   requestPairedProducerResultToResources,
   type PartialConsumerRequest,
 } from "./requestPairedProducerUtils.js";
-import { assertUnreachable, defaultLoggersByComponent } from "./utils.js";
+import {
+  assertUnreachable,
+  defaultLoggersByComponent,
+  raceWithSignal,
+} from "./utils.js";
 
 /**
  * Represents the outcome of a cache lookup operation.
@@ -124,6 +129,34 @@ export type WrapProducerOptions<V extends AnyParams> = {
  * Note that any supplemental resources returned by the producer will be
  * cached but not returned to the caller.
  *
+ * ## AbortSignal support
+ *
+ * The returned function accepts an optional `{ signal }` parameter. The signal
+ * is propagated differently depending on the request path:
+ *
+ * - **Uncacheable requests** (per `isCacheable`): the signal is forwarded
+ *   directly to the producer, so the producer can use it to abort its own work
+ *   (e.g., cancel an outgoing fetch). These calls are never collapsed.
+ *
+ * - **Cacheable requests**: the signal is forwarded to `cache.get()`, so the
+ *   store read can be aborted. If the signal fires before the cache read
+ *   completes, the function throws without ever contacting the producer.
+ *   Once the cache read resolves and the producer must be called, the signal is
+ *   **not** forwarded to the producer — because that call goes through the
+ *   `collapsedTaskCreator`, which may be sharing the same underlying producer
+ *   call with other callers who have not aborted. However, the caller's wait
+ *   for the producer result is **raced** against the signal, so the caller can
+ *   bail out immediately without waiting for the producer to finish.
+ *
+ *   Critically, bailing out does NOT prevent the producer's result from being
+ *   stored: `callProducerAndStore` always fires a (non-awaited) `cache.store()`
+ *   after the producer resolves, so the work is never wasted. The trade-off is
+ *   that the producer itself cannot observe the signal to cancel its own
+ *   in-progress work (e.g., an outgoing HTTP request). Supporting that would
+ *   require either (a) aborting the shared task only when *all* callers have
+ *   aborted, which adds significant complexity, or (b) giving up request
+ *   collapsing for callers that pass a signal, which would defeat its purpose.
+ *
  * @param cache - An instance of the cache class. This is where values returned
  *   by the producer (see below) will actually be stored.
  *
@@ -213,36 +246,48 @@ export default function wrapProducer<
   // similar situation with directives, which must also match.
   //
   // Of course, we can only use this IF THE REQUEST IS CACHEABLE.
-  const callProducerAndLog: typeof producer = async (req) => {
+  const callProducerAndLog = async (
+    req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
+    opts?: { signal?: AbortSignal },
+  ) => {
     logTrace("contacting producer", req);
-    const resp = await producer(req);
+    const resp = opts ? await producer(req, opts) : await producer(req);
     logTrace("got response from producer", resp);
     return resp;
   };
 
-  const callProducerAndStore: typeof producer = async (req) => {
-    const requestPairedResult = await callProducerAndLog(req);
-
-    logTrace(`attempting to store response.`);
-    cache
-      .store(
-        requestPairedProducerResultToResources(
-          requestPairedResult,
-          req.id satisfies ReadonlyDeep<Id> as Id,
-        ),
-      )
-      .then(() => {
-        logTrace(`successfully stored producer's response`);
-      })
-      .catch((e) => {
-        logTrace(`error storing producer's response`, e);
-      });
-
-    return requestPairedResult;
-  };
-
+  // For collapsed tasks, don't forward the signal to the producer, because the
+  // task may be shared with other callers who haven't aborted.
+  // This function always fires a (non-awaited) cache.store() after the
+  // producer resolves. This is critical for the abort-signal design: since
+  // collapsed producer calls don't receive a signal and can't be cancelled by
+  // individual callers, we rely on the fact that the producer's work always
+  // flows into the cache -- ensuring it isn't wasted even when the caller that
+  // triggered it has aborted.
   const collapsedCallProducerAndStore = collapsedTaskCreator(
-    callProducerAndStore,
+    async (
+      req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
+      opts?: { signal?: AbortSignal },
+    ) => {
+      const requestPairedResult = await callProducerAndLog(req, opts);
+
+      logTrace(`attempting to store response.`);
+      cache
+        .store(
+          requestPairedProducerResultToResources(
+            requestPairedResult,
+            req.id satisfies ReadonlyDeep<Id> as Id,
+          ),
+        )
+        .then(() => {
+          logTrace(`successfully stored producer's response`);
+        })
+        .catch((e) => {
+          logTrace(`error storing producer's response`, e);
+        });
+
+      return requestPairedResult;
+    },
     collapseOverlappingRequestsTime * 1000,
     stableStringify,
   );
@@ -252,7 +297,11 @@ export default function wrapProducer<
 
   const wrappedProducer = async function (
     req: PartialConsumerRequest<Params, Id>,
+    options?: { signal?: AbortSignal },
   ): Promise<NormalizedProducerResult<Content, Validators, Params>> {
+    const signal = options?.signal;
+    signal?.throwIfAborted();
+
     const finalRequest = completeRequest(req);
     const { id, params, directives } = finalRequest;
 
@@ -266,11 +315,18 @@ export default function wrapProducer<
 
     // If this request is not cacheable, we absolutely must contact the origin,
     // without any collapsing of concurrent requests, as the request could be
-    // being made for its side effects.
+    // being made for its side effects. Pass signal directly since this call
+    // is not shared with other callers.
     if (!reqIsCacheable) {
       publishCacheResult({ cacheName, outcome: "uncacheable", cacheKey: id });
 
-      const unnormalizedResult = await callProducerAndLog(finalRequest);
+      const unnormalizedResult = await callProducerAndLog(
+        finalRequest,
+        options,
+      );
+
+      signal?.throwIfAborted();
+
       return primaryNormalizedResultResourceFromRequestPairedProducerResult(
         normalizeVaryBound,
         unnormalizedResult,
@@ -278,22 +334,28 @@ export default function wrapProducer<
       );
     }
 
-    const cacheRes = await cache.get(finalRequest).catch((e) => {
-      switch (onCacheReadFailure) {
-        case "throw":
-          throw e;
-        case "call-producer":
-          // Pretend the cache returned no results so that we'll fall through to
-          // the producer
-          return { validatable: [] } satisfies CacheLookupResult<
-            Content,
-            Validators,
-            Params
-          > as CacheLookupResult<Content, Validators, Params>;
-        default:
-          assertUnreachable(onCacheReadFailure);
-      }
-    });
+    const cacheRes = await cache
+      .get(finalRequest, options)
+      .catch((e: unknown) => {
+        // If the errror was the signal being aborted, propagate that; don't
+        // assume a read failure.
+        signal?.throwIfAborted();
+
+        switch (onCacheReadFailure) {
+          case "throw":
+            throw e;
+          case "call-producer":
+            // Pretend the cache returned no results so that we'll fall through to
+            // the producer
+            return { validatable: [] } satisfies CacheLookupResult<
+              Content,
+              Validators,
+              Params
+            > as CacheLookupResult<Content, Validators, Params>;
+          default:
+            assertUnreachable(onCacheReadFailure);
+        }
+      });
 
     const { usable, usableIfError, usableWhileRevalidate } = cacheRes;
 
@@ -304,10 +366,12 @@ export default function wrapProducer<
       return usable;
     }
 
+    signal?.throwIfAborted();
+
     // If we're here, we either don't have usable content at all, or we have
-    // content that's only usable in the event of an origin error, or if we
-    // make a background request to revalidate it. In any case, we're gonna
-    // need to contact the origin for the result.
+    // content that's only usable in the event of an origin error, or if we make
+    // a background request to revalidate it. In any case, we're gonna need to
+    // contact the origin for the result.
     //
     // TODO: Support validation requests and invalidation. How to do this is
     // actually tricker than it seems. There are questions like does the
@@ -317,20 +381,29 @@ export default function wrapProducer<
     // that?] What if the existing entry has since been deleted or aged out of
     // the store? Can the response update more than one entry? Can it update
     // things about it beyond reseting age to zero (e.g., changing the producer
-    // directives)? Etc. For some HTTP context, see https://tools.ietf.org/html/rfc7234#section-4.3.4
-    // For invalidation, the idea would be to somehow let request A passing
-    // through the producer trigger the invalidation of other cached results [a
-    // la a POST invalidating a GET in HTTP], but how? Call a user-provided
-    // invalidate function and pass it the just-made request, the promise for
-    // its response, and the entry store, and can delete entries made invalid by
-    // the request that just passed through?
-    const newContentPromise = collapsedCallProducerAndStore(finalRequest).then(
-      (it) =>
+    // directives)? Etc. For some HTTP context, see
+    // https://tools.ietf.org/html/rfc7234#section-4.3.4 For invalidation, the
+    // idea would be to somehow let request A passing through the producer
+    // trigger the invalidation of other cached results [a la a POST
+    // invalidating a GET in HTTP], but how? Call a user-provided invalidate
+    // function and pass it the just-made request, the promise for its response,
+    // and the entry store, and can delete entries made invalid by the request
+    // that just passed through?
+    //
+    // The collapsed call doesn't receive the signal directly (since the
+    // underlying task may be shared with other callers who haven't aborted).
+    // However, we race the caller's observation of the result against the
+    // signal so they can bail out immediately. The underlying producer task
+    // keeps running and its result is stored via callProducerAndStore.
+    const newContentPromise = raceWithSignal(
+      collapsedCallProducerAndStore(finalRequest).then((it) =>
         primaryNormalizedResultResourceFromRequestPairedProducerResult(
           normalizeVaryBound,
           it,
           finalRequest.id satisfies ReadonlyDeep<Id> as Id,
         ),
+      ),
+      signal,
     );
 
     if (usableWhileRevalidate) {
@@ -360,7 +433,11 @@ export default function wrapProducer<
     });
 
     return usableIfError
-      ? newContentPromise.catch((error) => {
+      ? newContentPromise.catch((error: unknown) => {
+          // If the errror was the signal being aborted, propagate that rather
+          // than returning the cached, usable-if-error value.
+          signal?.throwIfAborted();
+
           logWarning(
             "error calling producer; falling back to a cached value, as permitted",
             { error, entry: usableIfError },

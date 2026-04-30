@@ -854,6 +854,270 @@ describe("wrapBulkProducer", () => {
     });
   });
 
+  describe("AbortSignal support", () => {
+    it("should reject immediately with an already-aborted signal", async () => {
+      const store = new MemoryStore();
+      const cache = new Cache(store);
+
+      try {
+        const producer = mock.fn(
+          async (reqs: readonly { id: string }[]) =>
+            reqs.map((req) => ({
+              content: `c-${req.id}`,
+              directives: { freshUntilAge: 1 },
+            })),
+        );
+
+        const wrappedBulk = wrapBulkProducer(cache, {}, producer);
+
+        const controller = new AbortController();
+        controller.abort(new Error("pre-aborted"));
+
+        await assert.rejects(
+          async () =>
+            wrappedBulk(
+              [{ id: "a" }, { id: "b" }],
+              { signal: controller.signal },
+            ),
+          { message: "pre-aborted" },
+        );
+
+        assert.equal(producer.mock.callCount(), 0);
+      } finally {
+        await cache.close();
+      }
+    });
+
+    it("should reject if signal fires before the cache read completes (i.e., before producer is called)", async () => {
+      const store = new MemoryStore();
+      const cache = new Cache(store);
+
+      let cacheGetManyResolve: (v: any) => void;
+      const originalGetMany = cache.getMany.bind(cache);
+      cache.getMany = () =>
+        new Promise((resolve) => {
+          cacheGetManyResolve = resolve;
+        });
+
+      try {
+        const controller = new AbortController();
+        const producer = mock.fn(
+          async (reqs: readonly { id: string }[]) =>
+            reqs.map((r) => ({
+              content: `c-${r.id}`,
+              directives: { freshUntilAge: 1 },
+            })),
+        );
+
+        const wrappedBulk = wrapBulkProducer(
+          cache,
+          { collapseOverlappingRequestsTime: 0 },
+          producer,
+        );
+
+        const resultPromise = wrappedBulk(
+          [{ id: "abort-during-read" }],
+          { signal: controller.signal },
+        );
+
+        await delay(5);
+        controller.abort(new Error("cancelled-during-read"));
+
+        // Resolve the cache read after the abort — the throwIfAborted checkpoint
+        // should fire.
+        cacheGetManyResolve!([{ validatable: [] }]);
+
+        await assert.rejects(
+          async () => resultPromise,
+          { message: "cancelled-during-read" },
+        );
+
+        assert.equal(producer.mock.callCount(), 0);
+      } finally {
+        cache.getMany = originalGetMany;
+        await cache.close();
+      }
+    });
+
+    it("should reject when signal is aborted mid-producer, but still store the producer's result", async () => {
+      const store = new MemoryStore();
+      const cache = new Cache(store);
+
+      try {
+        const controller = new AbortController();
+        const slowProducer = mock.fn(
+          async (reqs: readonly { id: string }[]) =>
+            new Promise<{ content: string; directives: { freshUntilAge: number } }[]>(
+              (resolve) => {
+                setTimeout(
+                  () =>
+                    resolve(
+                      reqs.map((r) => ({
+                        content: `slow-${r.id}`,
+                        directives: { freshUntilAge: 10 },
+                      })),
+                    ),
+                  100,
+                );
+              },
+            ),
+        );
+
+        const wrappedBulk = wrapBulkProducer(
+          cache,
+          { collapseOverlappingRequestsTime: 0 },
+          slowProducer,
+        );
+
+        const resultPromise = wrappedBulk(
+          [{ id: "mid-abort" }],
+          { signal: controller.signal },
+        );
+
+        await delay(10);
+        controller.abort(new Error("cancelled-mid-producer"));
+
+        await assert.rejects(
+          async () => resultPromise,
+          { message: "cancelled-mid-producer" },
+        );
+
+        // Wait for the producer to finish and store its result.
+        await delay(150);
+
+        // Verify the result was still stored.
+        const results = await wrappedBulk([{ id: "mid-abort" }]);
+        const entries = results as Exclude<(typeof results)[number], Error>[];
+        assert.equal(entries[0]?.content, "slow-mid-abort");
+        assert.equal(slowProducer.mock.callCount(), 1);
+      } finally {
+        await cache.close();
+      }
+    });
+
+    it("should pass signal through to the producer for uncacheable requests", async () => {
+      const store = new MemoryStore();
+      const cache = new Cache(store);
+
+      try {
+        const controller = new AbortController();
+        let receivedSignal: AbortSignal | undefined;
+
+        const signalCapturingProducer = mock.fn(
+          async (
+            reqs: readonly { id: string }[],
+            opts?: { signal?: AbortSignal },
+          ) => {
+            receivedSignal = opts?.signal;
+            return reqs.map((r) => ({
+              content: `c-${r.id}`,
+              directives: { freshUntilAge: 1 },
+            }));
+          },
+        );
+
+        const wrappedBulk = wrapBulkProducer(
+          cache,
+          { isCacheable: () => false },
+          signalCapturingProducer,
+        );
+
+        await wrappedBulk(
+          [{ id: "signal-test" }],
+          { signal: controller.signal },
+        );
+        assert.equal(receivedSignal, controller.signal);
+      } finally {
+        await cache.close();
+      }
+    });
+
+    it("should still return cache hits even when signal is provided", async () => {
+      const store = new MemoryStore();
+      const cache = new Cache(store);
+
+      try {
+        const producer = mock.fn(
+          async (reqs: readonly { id: string }[]) =>
+            reqs.map((r) => ({
+              content: `fresh-${r.id}`,
+              directives: { freshUntilAge: 10 },
+            })),
+        );
+
+        const wrappedBulk = wrapBulkProducer(
+          cache,
+          { collapseOverlappingRequestsTime: 0 },
+          producer,
+        );
+
+        // Populate cache
+        await wrappedBulk([{ id: "hit-a" }, { id: "hit-b" }]);
+        assert.equal(producer.mock.callCount(), 1);
+
+        // Second call with signal should still get cache hits
+        const controller = new AbortController();
+        const results = await wrappedBulk(
+          [{ id: "hit-a" }, { id: "hit-b" }],
+          { signal: controller.signal },
+        );
+
+        const entries = results as Exclude<(typeof results)[number], Error>[];
+        assert.equal(entries[0]?.content, "fresh-hit-a");
+        assert.equal(entries[1]?.content, "fresh-hit-b");
+        assert.equal(producer.mock.callCount(), 1);
+      } finally {
+        await cache.close();
+      }
+    });
+
+    it("should not treat abort errors as cache read failures eligible for fallback", async () => {
+      const store = new MemoryStore();
+      const cache = new Cache(store);
+
+      // Make cache.getMany throw an abort error
+      const originalGetMany = cache.getMany.bind(cache);
+      cache.getMany = async (_reqs, options) => {
+        options?.signal?.throwIfAborted();
+        return originalGetMany(_reqs);
+      };
+
+      try {
+        const producer = mock.fn(
+          async (reqs: readonly { id: string }[]) =>
+            reqs.map((r) => ({
+              content: `c-${r.id}`,
+              directives: { freshUntilAge: 1 },
+            })),
+        );
+
+        const wrappedBulk = wrapBulkProducer(
+          cache,
+          { onCacheReadFailure: "call-producer" },
+          producer,
+        );
+
+        const controller = new AbortController();
+        controller.abort(new Error("aborted-during-getmany"));
+
+        await assert.rejects(
+          async () =>
+            wrappedBulk(
+              [{ id: "test" }],
+              { signal: controller.signal },
+            ),
+          { message: "aborted-during-getmany" },
+        );
+
+        // Should NOT have fallen back to the producer
+        assert.equal(producer.mock.callCount(), 0);
+      } finally {
+        cache.getMany = originalGetMany;
+        await cache.close();
+      }
+    });
+  });
+
   function bulkProducerFromProducer(
     producer: (req: {
       id: string;

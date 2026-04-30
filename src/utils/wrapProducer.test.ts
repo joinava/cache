@@ -289,5 +289,283 @@ describe("wrapProducer", () => {
 
   // eslint-disable-next-line @typescript-eslint/no-floating-promises
   it.skip("collapsing overlapping requests to producer", () => {});
+
+  describe("AbortSignal support", () => {
+    it("should reject immediately with an already-aborted signal", async () => {
+      const controller = new AbortController();
+      controller.abort(new Error("pre-aborted"));
+
+      try {
+        await sut({ id: "myUrl" }, { signal: controller.signal });
+        throw new Error("should have rejected");
+      } catch (e) {
+        expect(e).to.be.instanceOf(Error);
+        expect((e as Error).message).to.eq("pre-aborted");
+      }
+
+      expect(fetcher.mock.callCount()).to.eq(0);
+    });
+
+    it("should reject if signal is aborted before the cache read completes (i.e., before producer is called)", async () => {
+      const controller = new AbortController();
+      let cacheGetResolve: (v: any) => void;
+
+      const mockCache = new Cache<any, AnyValidators, AnyParams, string>(
+        new MemoryStore(),
+      );
+
+      // Make cache.get hang until we resolve it manually, simulating a slow
+      // cache read during which the signal fires.
+      mockCache.get = () =>
+        new Promise((resolve) => {
+          cacheGetResolve = resolve;
+        });
+
+      const producerFn = mock.fn(async () => ({
+        content: "test",
+        directives: { freshUntilAge: 1 },
+      }));
+
+      const sut2 = wrapProducer(
+        mockCache,
+        { collapseOverlappingRequestsTime: 0 },
+        producerFn,
+      );
+
+      const resultPromise = sut2(
+        { id: "abort-during-read" },
+        { signal: controller.signal },
+      );
+
+      await delay(5);
+      controller.abort(new Error("cancelled-during-read"));
+
+      // Resolve the cache read after the abort — the throwIfAborted checkpoint
+      // after the cache read should fire.
+      cacheGetResolve!({ validatable: [] });
+
+      try {
+        await resultPromise;
+        throw new Error("should have rejected");
+      } catch (e) {
+        expect(e).to.be.instanceOf(Error);
+        expect((e as Error).message).to.eq("cancelled-during-read");
+      }
+
+      // Producer should never have been called
+      expect(producerFn.mock.callCount()).to.eq(0);
+
+      await mockCache.close();
+    });
+
+    it("should reject when signal is aborted mid-producer, but still store the producer's result", async () => {
+      const controller = new AbortController();
+
+      const slowFetcher = mock.fn(
+        async () =>
+          new Promise<RequestPairedProducerResult<any, any, any>>(
+            (resolve) => {
+              setTimeout(
+                () =>
+                  resolve({
+                    content: "slow-but-stored",
+                    directives: { freshUntilAge: 10 },
+                  }),
+                100,
+              );
+            },
+          ),
+      );
+
+      const slowSut = wrapProducer(
+        cache,
+        { collapseOverlappingRequestsTime: 0 },
+        slowFetcher,
+      );
+
+      const resultPromise = slowSut(
+        { id: "mid-producer-abort" },
+        { signal: controller.signal },
+      );
+
+      // Abort mid-producer-call — caller should reject immediately.
+      await delay(10);
+      controller.abort(new Error("cancelled-mid-producer"));
+
+      try {
+        await resultPromise;
+        throw new Error("should have rejected");
+      } catch (e) {
+        expect((e as Error).message).to.eq("cancelled-mid-producer");
+      }
+
+      // Wait for the producer to finish and store its result.
+      await delay(150);
+
+      // Verify the result was still stored: a subsequent request should hit.
+      const result = await slowSut({ id: "mid-producer-abort" });
+      expect(result.content).to.eq("slow-but-stored");
+      expect(slowFetcher.mock.callCount()).to.eq(1);
+    });
+
+    it("should pass signal through to the producer for uncacheable requests", async () => {
+      const controller = new AbortController();
+      let receivedSignal: AbortSignal | undefined;
+
+      const signalCapturingFetcher = mock.fn(
+        async (_req: any, opts?: { signal?: AbortSignal }) => {
+          receivedSignal = opts?.signal;
+          return {
+            content: "test",
+            directives: { freshUntilAge: 1 },
+          } satisfies RequestPairedProducerResult<any, any, any>;
+        },
+      );
+
+      const sut2 = wrapProducer(
+        cache,
+        {
+          collapseOverlappingRequestsTime: 0,
+          isCacheable: () => false,
+        },
+        signalCapturingFetcher,
+      );
+
+      await sut2({ id: "signal-test" }, { signal: controller.signal });
+      expect(receivedSignal).to.eq(controller.signal);
+    });
+
+    it("should reject the aborting caller but not the other, and still store the collapsed result", async () => {
+      const controller = new AbortController();
+
+      const slowFetcher = mock.fn(
+        async () =>
+          new Promise<RequestPairedProducerResult<any, any, any>>(
+            (resolve) => {
+              setTimeout(
+                () =>
+                  resolve({
+                    content: "shared-result",
+                    directives: { freshUntilAge: 10 },
+                  }),
+                80,
+              );
+            },
+          ),
+      );
+
+      const collapsingSut = wrapProducer(
+        cache,
+        { collapseOverlappingRequestsTime: 10 },
+        slowFetcher,
+      );
+
+      const req = { id: "collapse-abort-store" };
+
+      const abortablePromise = collapsingSut(req, {
+        signal: controller.signal,
+      });
+      const normalPromise = collapsingSut(req);
+
+      await delay(5);
+      controller.abort(new Error("caller1-aborted"));
+
+      // The aborting caller should reject immediately.
+      try {
+        await abortablePromise;
+        throw new Error("should have rejected");
+      } catch (e) {
+        expect((e as Error).message).to.eq("caller1-aborted");
+      }
+
+      // The non-aborting caller should still get the result.
+      const normalResult = await normalPromise;
+      expect(normalResult.content).to.eq("shared-result");
+
+      // Only one producer call should have been made (collapsed)
+      expect(slowFetcher.mock.callCount()).to.eq(1);
+
+      // And the result should be stored — a third call should hit the cache.
+      await delay(10);
+      const cachedResult = await collapsingSut(req);
+      expect(cachedResult.content).to.eq("shared-result");
+      expect(slowFetcher.mock.callCount()).to.eq(1);
+    });
+
+    it("should still return a cache hit even when signal is provided", async () => {
+      const controller = new AbortController();
+
+      // First, populate the cache
+      await sut({ id: "cached-signal-test" });
+      expect(fetcher.mock.callCount()).to.eq(1);
+
+      // Second call with signal should still get a cache hit
+      const result = await sut(
+        { id: "cached-signal-test" },
+        { signal: controller.signal },
+      );
+      expect(result.content).to.be.a("string");
+      expect(fetcher.mock.callCount()).to.eq(1);
+    });
+
+    it("should not abort usableIfError fallback when signal is aborted", async () => {
+      const controller = new AbortController();
+      controller.abort(new Error("abort-before-call"));
+
+      const errorProducer = mock.fn(async () => {
+        throw new Error("producer-error");
+      });
+      const sut2 = wrapProducer(cache, {}, errorProducer);
+
+      // With an already-aborted signal, the call should reject immediately
+      // (before even checking the cache or calling the producer)
+      try {
+        await sut2({ id: "if-error-abort" }, { signal: controller.signal });
+        throw new Error("should have rejected");
+      } catch (e) {
+        expect((e as Error).message).to.eq("abort-before-call");
+      }
+
+      expect(errorProducer.mock.callCount()).to.eq(0);
+    });
+
+    it("should not treat abort errors as cache read failures eligible for fallback", async () => {
+      const controller = new AbortController();
+      const mockCache = new Cache<null, AnyValidators, AnyParams, string>(
+        new MemoryStore(),
+      );
+
+      // Make cache.get throw an abort error
+      mockCache.get = async (_req, options) => {
+        options?.signal?.throwIfAborted();
+        return { validatable: [] };
+      };
+
+      const producerFn = mock.fn(async () => ({
+        content: null,
+        directives: { freshUntilAge: 1 },
+      }));
+
+      const sut2 = wrapProducer(
+        mockCache,
+        { onCacheReadFailure: "call-producer" },
+        producerFn,
+      );
+
+      controller.abort(new Error("aborted-during-cache-read"));
+
+      try {
+        await sut2({ id: "test" }, { signal: controller.signal });
+        throw new Error("should have rejected");
+      } catch (e) {
+        // Should propagate the abort error, NOT fall back to the producer
+        expect((e as Error).message).to.eq("aborted-during-cache-read");
+      }
+
+      expect(producerFn.mock.callCount()).to.eq(0);
+
+      await mockCache.close();
+    });
+  });
 });
 /* eslint-enable @typescript-eslint/no-explicit-any */

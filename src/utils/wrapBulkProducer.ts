@@ -20,7 +20,12 @@ import {
   requestPairedProducerResultToResources,
   type PartialConsumerRequest,
 } from "./requestPairedProducerUtils.js";
-import { assertUnreachable, defaultLoggersByComponent, zip2 } from "./utils.js";
+import {
+  assertUnreachable,
+  defaultLoggersByComponent,
+  raceWithSignal,
+  zip2,
+} from "./utils.js";
 import {
   isRequestingCacheBypass,
   type WrapProducerOptions,
@@ -38,6 +43,7 @@ export type BulkProducer<
   ErrorType extends Error = Error,
 > = (
   reqs: readonly PartialConsumerRequest<Params, Id>[],
+  options?: { signal?: AbortSignal },
 ) => Promise<
   (RequestPairedProducerResult<Content, Validators, Params, Id> | ErrorType)[]
 >;
@@ -57,6 +63,26 @@ export type BulkProducer<
  *
  * Note that any supplemental resources returned by the producer will be
  * cached but not returned to the caller.
+ *
+ * ## AbortSignal support
+ *
+ * The returned function accepts an optional `{ signal }` parameter. Signal
+ * propagation follows the same model as {@link wrapProducer}:
+ *
+ * - **Uncacheable requests**: the signal is forwarded directly to the producer.
+ *
+ * - **Cacheable requests**: the signal is forwarded to `cache.getMany()`. If
+ *   the signal fires before the cache read completes, the function throws
+ *   without contacting the producer. Once the cache read resolves and the
+ *   producer must be called for cache misses, the signal is **not** forwarded
+ *   to the producer (because those calls go through the
+ *   `collapsedTaskCreator`), but the caller's wait is raced against the signal
+ *   so they can bail out early. The producer's result is always stored. See the
+ *   `wrapProducer` JSDoc for the full rationale.
+ *
+ * - **Background refresh** (stale-while-revalidate): these calls are
+ *   fire-and-forget and never receive a signal, since the caller has already
+ *   been given a (stale) result.
  *
  * @param cache - An instance of the cache class. This is where values returned
  *   by the producer (see below) will actually be stored.
@@ -92,50 +118,59 @@ export function wrapBulkProducer<
   const logTrace = logger.bind(null, "wrap-producer", "trace");
   const logWarning = logger.bind(null, "wrap-producer", "warn");
 
-  const callProducerAndLog: typeof producer = async (reqs) => {
+  const callProducerAndLog = async (
+    reqs: readonly PartialConsumerRequest<Params, Id>[],
+    opts?: { signal?: AbortSignal },
+  ) => {
     logTrace("contacting bulk producer", { reqs });
-    const responses = await producer(reqs);
+    const responses = opts ? await producer(reqs, opts) : await producer(reqs);
     logTrace("got responses from bulk producer", { responses });
     return responses;
   };
 
-  const callProducerAndStore: typeof producer = async (reqs) => {
-    const requestPairedProducerResults = await callProducerAndLog(reqs);
-
-    // Extract all resources to store (main resources + supplemental resources),
-    // but NOT requests that failed.
-    const resourcesToStore = zip2(requestPairedProducerResults, reqs).flatMap(
-      ([result, req]) =>
-        result instanceof Error
-          ? []
-          : requestPairedProducerResultToResources(
-              result,
-              req.id satisfies ReadonlyDeep<Id> as Id,
-            ),
-    );
-
-    logTrace(`attempting to store resources from bulk producer response`, {
-      resourcesToStore,
-    });
-
-    if (resourcesToStore.length === 0) {
-      logTrace(`no resources to store; skipping store`);
-    } else {
-      cache
-        .store(resourcesToStore)
-        .then(() => {
-          logTrace(`successfully stored bulk producer's response`);
-        })
-        .catch((e) => {
-          logTrace(`error storing bulk producer's response`, e);
-        });
-    }
-
-    return requestPairedProducerResults;
-  };
-
+  // This function never forwards the signal to the producer (so it'll run to
+  // completion) and then always fires a (non-awaited) cache.store() after the
+  // producer succeeds. This is critical for the abort-signal design: since
+  // collapsed producer calls can't be cancelled by individual callers [as that
+  // could abort other callers too], we let them finish but then make sure that
+  // the producer's result always flows into the cache, so its work isn't wasted
+  // even when the caller that triggered it has aborted. See the
+  // wrapBulkProducer JSDoc for details.
   const collapsedCallProducerAndStore = collapsedTaskCreator(
-    callProducerAndStore,
+    async (reqs: readonly PartialConsumerRequest<Params, Id>[]) => {
+      const requestPairedProducerResults = await callProducerAndLog(reqs);
+
+      // Extract all resources to store (main resources + supplemental resources),
+      // but NOT requests that failed.
+      const resourcesToStore = zip2(requestPairedProducerResults, reqs).flatMap(
+        ([result, req]) =>
+          result instanceof Error
+            ? []
+            : requestPairedProducerResultToResources(
+                result,
+                req.id satisfies ReadonlyDeep<Id> as Id,
+              ),
+      );
+
+      logTrace(`attempting to store resources from bulk producer response`, {
+        resourcesToStore,
+      });
+
+      if (resourcesToStore.length === 0) {
+        logTrace(`no resources to store; skipping store`);
+      } else {
+        cache
+          .store(resourcesToStore)
+          .then(() => {
+            logTrace(`successfully stored bulk producer's response`);
+          })
+          .catch((e) => {
+            logTrace(`error storing bulk producer's response`, e);
+          });
+      }
+
+      return requestPairedProducerResults;
+    },
     collapseOverlappingRequestsTime * 1000,
     stableStringify,
   );
@@ -145,7 +180,11 @@ export function wrapBulkProducer<
 
   const wrappedBulkProducer = async function (
     reqs: readonly PartialConsumerRequest<Params, Id>[],
+    options?: { signal?: AbortSignal },
   ): Promise<(Entry<Content, Validators, Params, Id> | ErrorType)[]> {
+    const signal = options?.signal;
+    signal?.throwIfAborted();
+
     if (reqs.length === 0) {
       return [];
     }
@@ -175,12 +214,15 @@ export function wrapBulkProducer<
     // Send non-cacheable requests to producer while going to the cache in
     // parallel for the others. NB: we don't await the nonCacheableResultsPromise
     // or do Promise.all() here because we don't want it to block the code below.
+    // Pass signal directly to uncacheable producer calls (not shared/collapsed).
     const [uncacheableProducerResultsPromise, cacheResultsPromise] = [
       nonCacheableRequests.length > 0
-        ? callProducerAndLog(nonCacheableRequests)
+        ? callProducerAndLog(nonCacheableRequests, options)
         : Promise.resolve([]),
       cacheableRequests.length > 0
-        ? cache.getMany(cacheableRequests).catch((e) => {
+        ? cache.getMany(cacheableRequests, options).catch((e: unknown) => {
+            signal?.throwIfAborted();
+
             switch (onCacheReadFailure) {
               case "throw":
                 throw e;
@@ -197,6 +239,9 @@ export function wrapBulkProducer<
 
     // Handle cacheable requests.
     const cacheResults = await cacheResultsPromise;
+
+    signal?.throwIfAborted();
+
     const requestsWithCacheResults = zip2(cacheableRequests, cacheResults);
     const requestsWithUsableResults = requestsWithCacheResults
       .filter(([_, res]) => res.usable)
@@ -259,15 +304,24 @@ export function wrapBulkProducer<
     // throw, there's no way for us to handle it according to the contract of
     // this function except by rethrowing (as we don't know that the thrown
     // value will be an `ErrorType`)
+    //
+    // The collapsed call doesn't receive the signal directly (the underlying
+    // task may be shared with other callers), but we race the caller's wait
+    // against the signal so they can bail out. The producer keeps running and
+    // stores its result via callProducerAndStore.
     const producerResults =
       requestsNeedingProducerNow.length > 0
-        ? await collapsedCallProducerAndStore(
-            requestsNeedingProducerNow.map(([req]) => req),
+        ? await raceWithSignal(
+            collapsedCallProducerAndStore(
+              requestsNeedingProducerNow.map(([req]) => req),
+            ),
+            signal,
           )
         : [];
 
     // Start background refresh but don't await on it;
-    // swallow any errors rather than crashing.
+    // swallow any errors rather than crashing. No signal here since this is
+    // fire-and-forget background work.
     if (requestsWithUsableWhileRevalidateResults.length > 0) {
       collapsedCallProducerAndStore(
         requestsWithUsableWhileRevalidateResults.map(([req]) => req),
@@ -298,8 +352,9 @@ export function wrapBulkProducer<
       }),
       ...zip2(
         nonCacheableRequests,
-        await uncacheableProducerResultsPromise.then((res) =>
-          res.map((producerResult, i) =>
+        await uncacheableProducerResultsPromise.then((res) => {
+          signal?.throwIfAborted();
+          return res.map((producerResult, i) =>
             producerResult instanceof Error
               ? producerResult
               : primaryNormalizedResultResourceFromRequestPairedProducerResult(
@@ -308,8 +363,8 @@ export function wrapBulkProducer<
                   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
                   nonCacheableRequests[i]!.id satisfies ReadonlyDeep<Id> as Id,
                 ),
-          ),
-        ),
+          );
+        }),
       ),
     ];
 
