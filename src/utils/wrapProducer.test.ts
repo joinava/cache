@@ -7,6 +7,7 @@ import { MemoryStore } from "../index.js";
 import type {
   AnyParams,
   AnyValidators,
+  CacheSpec,
   RequestPairedProducerResult,
 } from "../types/index.js";
 import wrapProducer from "./wrapProducer.js";
@@ -225,7 +226,8 @@ describe("wrapProducer", () => {
 
   describe("the onCacheReadFailure setting", async () => {
     const err = new Error("Cache get error 2");
-    let mockCache: Cache<null, AnyValidators, AnyParams, string>;
+    type BasicCacheSpec = CacheSpec<string, unknown>;
+    let mockCache: Cache<BasicCacheSpec, AnyValidators, AnyParams>;
 
     beforeEach(() => {
       mockCache = new Cache(new MemoryStore());
@@ -309,8 +311,9 @@ describe("wrapProducer", () => {
     it("should reject if signal is aborted before the cache read completes (i.e., before producer is called)", async () => {
       const controller = new AbortController();
       let cacheGetResolve: (v: any) => void;
+      type BasicCacheSpec = CacheSpec<string, unknown>;
 
-      const mockCache = new Cache<any, AnyValidators, AnyParams, string>(
+      const mockCache = new Cache<BasicCacheSpec, AnyValidators, AnyParams>(
         new MemoryStore(),
       );
 
@@ -363,18 +366,16 @@ describe("wrapProducer", () => {
 
       const slowFetcher = mock.fn(
         async () =>
-          new Promise<RequestPairedProducerResult<any, any, any>>(
-            (resolve) => {
-              setTimeout(
-                () =>
-                  resolve({
-                    content: "slow-but-stored",
-                    directives: { freshUntilAge: 10 },
-                  }),
-                100,
-              );
-            },
-          ),
+          new Promise<RequestPairedProducerResult<any, any, any>>((resolve) => {
+            setTimeout(
+              () =>
+                resolve({
+                  content: "slow-but-stored",
+                  directives: { freshUntilAge: 10 },
+                }),
+              100,
+            );
+          }),
       );
 
       const slowSut = wrapProducer(
@@ -440,18 +441,16 @@ describe("wrapProducer", () => {
 
       const slowFetcher = mock.fn(
         async () =>
-          new Promise<RequestPairedProducerResult<any, any, any>>(
-            (resolve) => {
-              setTimeout(
-                () =>
-                  resolve({
-                    content: "shared-result",
-                    directives: { freshUntilAge: 10 },
-                  }),
-                80,
-              );
-            },
-          ),
+          new Promise<RequestPairedProducerResult<any, any, any>>((resolve) => {
+            setTimeout(
+              () =>
+                resolve({
+                  content: "shared-result",
+                  directives: { freshUntilAge: 10 },
+                }),
+              80,
+            );
+          }),
       );
 
       const collapsingSut = wrapProducer(
@@ -531,8 +530,12 @@ describe("wrapProducer", () => {
 
     it("should not treat abort errors as cache read failures eligible for fallback", async () => {
       const controller = new AbortController();
-      const mockCache = new Cache<null, AnyValidators, AnyParams, string>(
-        new MemoryStore(),
+      const mockCache = new Cache<
+        CacheSpec<string, unknown>,
+        AnyValidators,
+        AnyParams
+      >(
+        new MemoryStore<CacheSpec<string, unknown>, AnyValidators, AnyParams>(),
       );
 
       // Make cache.get throw an abort error

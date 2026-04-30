@@ -1,11 +1,15 @@
-import type { Jsonify } from "type-fest";
+import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
+import type { CacheSpec, SpecForId } from "../../types/00_CacheSpec.js";
+import type { StoreGetManyResult } from "../../types/06_Store.js";
 import {
   type AnyParams,
   type AnyValidators,
   type Entry,
+  type EntryForId,
   type NormalizedParams,
   type Store,
   type StoreEntryInput,
+  type StoreGetManyRequest,
 } from "../../types/index.js";
 import type { JsonOf } from "../../utils/utils.js";
 import { jsonStringify } from "../../utils/utils.js";
@@ -31,11 +35,10 @@ type FullCacheKey<ResourceId extends string> = JsonOf<
  * much more often than new data is stored (which should be the case).
  */
 export default class MemoryStore<
-  Content,
+  Spec extends CacheSpec = CacheSpec,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
-  Id extends string = string,
-> implements Store<Content, Validators, Params, Id> {
+> implements Store<Spec, Validators, Params> {
   /**
    * This map stores metadata about each distinct `ResourceId` (i.e., primary
    * cache key) that's stored. Specifically...
@@ -58,7 +61,7 @@ export default class MemoryStore<
    *   to be able to find all of those.
    */
   private readonly resourceMetadataMap = new Map<
-    Id,
+    Spec["id"],
     { varyKeysSets: VaryKeys[]; entryVariantKeys: VariantKey[] }
   >();
 
@@ -70,8 +73,8 @@ export default class MemoryStore<
    * for that resource id without having to parse the cache key.
    */
   private readonly entriesMap: ExpiringEntryMap<
-    FullCacheKey<Id>,
-    [Entry<Content, Validators, Params, Id>, Id]
+    FullCacheKey<Spec["id"]>,
+    [Entry<Spec, Validators, Params>, Spec["id"]]
   >;
 
   private readonly fallbackDeleteAfter: number;
@@ -102,7 +105,7 @@ export default class MemoryStore<
   constructor(opts?: {
     numItemsLimit?: number;
     fallbackDeleteAfter?: number;
-    onItemEviction?: (entry: Entry<Content, Validators, Params, Id>) => void;
+    onItemEviction?: (entry: Entry<Spec, Validators, Params>) => void;
   }) {
     const { numItemsLimit, onItemEviction, fallbackDeleteAfter } = opts ?? {};
 
@@ -118,8 +121,8 @@ export default class MemoryStore<
   }
 
   private onItemEviction(
-    entry: Entry<Content, Validators, Params, Id>,
-    resourceId: Id,
+    entry: Entry<Spec, Validators, Params>,
+    resourceId: Spec["id"],
   ) {
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     const metadata = this.resourceMetadataMap.get(resourceId)!;
@@ -134,20 +137,27 @@ export default class MemoryStore<
     }
   }
 
-  public async get(id: Id, normalizedParams: NormalizedParams<Params>) {
+  public async get<Id extends Spec["id"]>(
+    id: Id,
+    normalizedParams: NormalizedParams<Params>,
+  ): Promise<Entry<SpecForId<Spec, Id>, Validators, Params>[]> {
     return this.#getOneSync(id, normalizedParams);
   }
 
-  public async getMany(
-    requests: readonly {
-      readonly id: Id;
-      readonly params: Readonly<NormalizedParams<Params>>;
-    }[],
-  ) {
-    return requests.map((it) => this.#getOneSync(it.id, it.params));
+  public async getMany<
+    const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
+  >(
+    requests: Reqs,
+  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
+    return isNonEmptyArray(requests)
+      ? mapNonEmpty(requests, (it) => this.#getOneSync(it.id, it.params))
+      : ([] as StoreGetManyResult<Spec, Reqs, Validators, Params>);
   }
 
-  #getOneSync(id: Id, normalizedParams: NormalizedParams<Params>) {
+  #getOneSync<Id extends Spec["id"]>(
+    id: Id,
+    normalizedParams: NormalizedParams<Params>,
+  ): EntryForId<Spec, Validators, Params, Id>[] {
     const resourceMetadata = this.resourceMetadataMap.get(id);
 
     if (!resourceMetadata) {
@@ -162,22 +172,23 @@ export default class MemoryStore<
 
       const cacheKey = makeCacheKey(id, variantKey);
       const variantResult = this.entriesMap.get(cacheKey);
-      return variantResult ? [variantResult[0]] : [];
+      return variantResult
+        ? ([variantResult[0]] satisfies Entry<
+            Spec,
+            Validators,
+            Params
+          >[] as unknown as EntryForId<Spec, Validators, Params, Id>[])
+        : [];
     });
   }
 
   public async store(
-    entriesWithTimes: readonly StoreEntryInput<
-      Content,
-      Validators,
-      Params,
-      Id
-    >[],
+    entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
   ) {
     await Promise.all(entriesWithTimes.map(async (it) => this.storeOne(it)));
   }
 
-  private async storeOne(it: StoreEntryInput<Content, Validators, Params, Id>) {
+  private async storeOne(it: StoreEntryInput<Spec, Validators, Params>) {
     const { entry, maxStoreForSeconds: deleteAfter } = it;
     const { id } = entry;
 
@@ -215,7 +226,7 @@ export default class MemoryStore<
     this.entriesMap.set(cacheKey, [entry, id], finalDeleteAfterSeconds * 1000);
   }
 
-  public async delete(id: Id) {
+  public async delete(id: Spec["id"]) {
     const resourceMetadata = this.resourceMetadataMap.get(id);
     if (!resourceMetadata) {
       return;
@@ -242,7 +253,12 @@ function makeCacheKey<Id extends string>(
   id: Id,
   variantKey: VariantKey,
 ): FullCacheKey<Id> {
-  return jsonStringify([id, variantKey] as const);
+  // Help TS realize that Jsonifying id will result in a string.
+  // Without this, we get `Jsonify<NotJsonableToNull<Id>>`, which
+  // TS doesn't reduce to string.
+  return jsonStringify([id, variantKey]) satisfies JsonOf<
+    [unknown, VariantKey]
+  > as JsonOf<[Id, VariantKey]>;
 }
 
 /**

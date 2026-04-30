@@ -2,18 +2,35 @@ import { maxBy } from "es-toolkit";
 import type { ColumnType } from "kysely";
 import { Kysely, PostgresDialect } from "kysely";
 import type { Pool } from "pg";
-import type { Jsonify, Tagged } from "type-fest";
-import type { DateString, JsonOf, JSONWithUndefined } from "type-party";
+import type { Tagged } from "type-fest";
+import type {
+  DateString,
+  Jsonify,
+  JsonOf,
+  JSONWithUndefined,
+} from "type-party";
 import { parseDateString } from "type-party/runtime/dates.js";
 import { entryUtils } from "../../index.js";
+import type { CacheSpec, SpecForId } from "../../types/00_CacheSpec.js";
 import type { AnyParams } from "../../types/01_Params.js";
 import type { AnyValidators } from "../../types/02_Validators.js";
 import type {
   Entry,
+  JsonifiedEntry,
   NormalizedParams,
+  NormalizedProducerDirectives,
   NormalizedVary,
 } from "../../types/06_Normalization.js";
-import type { Logger, Store, StoreEntryInput } from "../../types/index.js";
+import type { StoreGetManyResult } from "../../types/06_Store.js";
+import type {
+  EntryForId,
+  Logger,
+  ProducerDirectives,
+  Store,
+  StoreEntryInput,
+  StoreGetManyRequest,
+  Vary,
+} from "../../types/index.js";
 import type { Bind2 } from "../../types/utils.js";
 import {
   defaultLoggersByComponent,
@@ -29,23 +46,19 @@ type CacheTableName = Tagged<string, "CacheTableName">;
 /**
  * Type representing the entry in the cache table. It's basically the same as
  * the Entry type, but the date is a string since that's what it ends up as
- * after roundtripping through JSON. I tried using Jsonify from type-fest, but
- * it didn't seem to work - deserialize function thought there was no date key.
+ * after roundtripping through JSON.
  */
 type TableEntry<
-  Content extends JSONWithUndefined,
+  Spec extends PostgresStoreCompatibleSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
-  Id extends string,
-> = Omit<Entry<Content, Validators, Params, Id>, "date"> & {
-  date: DateString;
-};
+  Id extends Spec["id"] = Spec["id"],
+> = JsonifiedEntry<SpecForId<Spec, Id>, Validators, Params>;
 
 type CacheTables<
-  Content extends JSONWithUndefined,
+  Spec extends PostgresStoreCompatibleSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
-  Id extends string,
 > = {
   [key in CacheTableName]: {
     // TODO: should be <Id, Id, never>, but kysely looses the tag at some point.
@@ -56,9 +69,9 @@ type CacheTables<
       never
     >;
     entry: ColumnType<
-      TableEntry<Content, Validators, Params, Id>,
-      JsonOf<Entry<Content, Validators, Params, Id>>,
-      JsonOf<Entry<Content, Validators, Params, Id>>
+      TableEntry<Spec, Validators, Params>,
+      JsonOf<TableEntry<Spec, Validators, Params>>,
+      JsonOf<TableEntry<Spec, Validators, Params>>
     >;
   };
 };
@@ -86,6 +99,13 @@ export type PostgresStoreSupportedParams = {
 };
 
 /**
+ * The constraint that PostgresStore places on a `Spec`'s `content`: must be
+ * JSON-serializable (potentially with undefined values present, since those
+ * are stripped on serialization).
+ */
+export type PostgresStoreCompatibleSpec = CacheSpec<string, JSONWithUndefined>;
+
+/**
  * This class implements a store for cache entries, backed by Postgres. For
  * details on each method, see the Store interface.
  *
@@ -97,18 +117,17 @@ export type PostgresStoreSupportedParams = {
  * on the vary column. We rely on Postgres to be fast enough for our needs.
  */
 export default class PostgresStore<
-  Content extends JSONWithUndefined,
+  Spec extends PostgresStoreCompatibleSpec = PostgresStoreCompatibleSpec,
   Validators extends AnyValidators = AnyValidators,
   Params extends PostgresStoreSupportedParams = PostgresStoreSupportedParams,
-  Id extends string = string,
-> implements Store<Content, Validators, Params, Id> {
+> implements Store<Spec, Validators, Params> {
   /** Object containing info about the schema and table name */
   private readonly tableNameData: {
     schemaName: string;
     tableName: string;
     qualifiedName: CacheTableName;
   };
-  private readonly db: Kysely<CacheTables<Content, Validators, Params, Id>>;
+  private readonly db: Kysely<CacheTables<Spec, Validators, Params>>;
   /** Promise that resolves when the required tables are initialized */
   private ensureInitializedPromise: Promise<void>;
 
@@ -148,11 +167,11 @@ export default class PostgresStore<
       : this.ensureInitialized();
   }
 
-  async get(
+  async get<Id extends Spec["id"]>(
     id: Id,
     params: Readonly<NormalizedParams<Params>>,
     options?: { signal?: AbortSignal },
-  ): Promise<Entry<Content, Validators, Params, Id>[]> {
+  ): Promise<EntryForId<Spec, Validators, Params, Id>[]> {
     const signal = options?.signal;
     signal?.throwIfAborted();
 
@@ -176,28 +195,43 @@ export default class PostgresStore<
 
     signal?.throwIfAborted();
 
-    const entries = result.map((it) => this.deserializeEntry(it.entry));
+    const entries = result.map((it) =>
+      this.deserializeEntry(
+        it.entry satisfies TableEntry<
+          Spec,
+          Validators,
+          Params,
+          Spec["id"]
+        > as unknown as TableEntry<Spec, Validators, Params, Id>,
+      ),
+    );
+
     this.logTrace("returning entries from postgres query", entries);
     return entries;
   }
 
-  async getMany(
-    requests: readonly {
-      readonly id: Id;
-      readonly params: Readonly<NormalizedParams<Params>>;
-    }[],
+  async getMany<
+    const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
+  >(
+    requests: Reqs,
     options?: { signal?: AbortSignal },
-  ): Promise<Array<Entry<Content, Validators, Params, Id>[]>> {
+  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
     this.logTrace("querying for multiple entries", {
       requestCount: requests.length,
     });
 
-    // For PostgresStore, we'll use the naive implementation until we have time to optimize it
-    return naiveGetMany(this, requests, undefined, options);
+    // For PostgresStore, we'll use the naive implementation until we have time
+    // to optimize it.
+    return naiveGetMany<Spec, Validators, Params, Reqs>(
+      this,
+      requests,
+      undefined,
+      options,
+    );
   }
 
   async store(
-    entries: readonly StoreEntryInput<Content, Validators, Params, Id>[],
+    entries: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): Promise<void> {
     this.logTrace("storing entries", entries);
     await this.ensureInitializedPromise;
@@ -217,14 +251,22 @@ export default class PostgresStore<
           // vary; if not, we need to choose the one with the newest birth date.
           keepMaxPerGroup({
             items: entries,
-            groupBy: (it) =>
-              jsonStringify([it.entry.id, this.serializeVary(it.entry.vary)]),
+            groupBy: (it) => {
+              const { id, vary } = it.entry;
+              const key = [id, this.serializeVary(vary)] as const;
+              return jsonStringify(key) satisfies JsonOf<
+                Jsonify<[unknown, JsonOf<NormalizedVary<Params>>]>
+              > as unknown as JsonOf<[string, JsonOf<NormalizedVary<Params>>]>;
+            },
             maxBy: (it) => entryUtils.birthDate(it.entry).getTime(),
-          }).map((it) => ({
-            resource_id: it.entry.id,
-            vary: this.serializeVary(it.entry.vary),
-            entry: this.serializeEntry(it.entry),
-          })),
+          }).map((it) => {
+            const { id, vary } = it.entry;
+            return {
+              resource_id: id,
+              vary: this.serializeVary(vary),
+              entry: this.serializeEntry(it.entry),
+            };
+          }),
         )
         .onConflict((oc) =>
           // should this use a conflict on primary key instead? not sure what's the performance difference
@@ -240,7 +282,7 @@ export default class PostgresStore<
     }
   }
 
-  async delete(id: Id): Promise<void> {
+  async delete(id: Spec["id"]): Promise<void> {
     this.logTrace("deleting entries for id", id);
     await this.ensureInitialized();
 
@@ -334,21 +376,50 @@ export default class PostgresStore<
     }
   }
 
-  private serializeEntry(entry: Entry<Content, Validators, Params, Id>) {
-    return jsonStringify(entry);
+  private serializeEntry(entry: Entry<Spec, Validators, Params>) {
+    return jsonStringify(entry) satisfies
+      | JsonOf<Jsonify<Entry<Spec, Validators, Params>>>
+      | undefined as JsonOf<
+      JsonifiedEntry<SpecForId<Spec, Spec["id"]>, Validators, Params>
+    >;
   }
 
-  private serializeVary(vary: NormalizedVary<Params>) {
-    return jsonStringify(vary);
+  private serializeVary(
+    vary: NormalizedVary<Params>,
+  ): JsonOf<NormalizedVary<Params>> {
+    // NormalizedVary is a legal Json
+    return jsonStringify(vary) satisfies
+      | JsonOf<Jsonify<NormalizedVary<Params>>>
+      | undefined as JsonOf<NormalizedVary<Params>>;
   }
 
-  private deserializeEntry(
-    entry: TableEntry<Content, Validators, Params, Id>,
-  ): Entry<Content, Validators, Params, Id> {
+  private deserializeEntry<Id extends Spec["id"]>(
+    entry: TableEntry<Spec, Validators, Params, Id>,
+  ): EntryForId<Spec, Validators, Params, Id> {
+    const _ = entry satisfies JsonifiedEntry<
+      SpecForId<Spec, Id>,
+      Validators,
+      Params
+    > as unknown as JsonifiedEntry<
+      PostgresStoreCompatibleSpec,
+      AnyValidators,
+      AnyParams
+    >;
+
     return {
-      ...entry,
-      date: parseDateString(entry.date),
-    };
+      id: _.id,
+      content: _.content,
+      vary: _.vary satisfies Vary<AnyParams> as NormalizedVary<Params>,
+      validators: _.validators satisfies AnyValidators as Partial<Validators>,
+      directives:
+        _.directives satisfies ProducerDirectives as NormalizedProducerDirectives,
+      initialAge: _.initialAge,
+      date: parseDateString(_.date satisfies string as unknown as DateString),
+    } satisfies Entry<
+      PostgresStoreCompatibleSpec,
+      Validators,
+      Params
+    > as EntryForId<Spec, Validators, Params, Id>;
   }
 }
 

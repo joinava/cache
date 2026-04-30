@@ -9,6 +9,11 @@ import type { AnyParams } from "./01_Params.js";
  * We use partial for the params because, even if the Params type indicates that
  * some parameter is required, the semantics of params explicitly preclude
  * required params. See {@link AnyParams}.
+ *
+ * `Id` is constrained at the call site to whatever ids the cache supports
+ * (i.e., the union of `id` types in the cache's `Spec`). Specific call sites
+ * may further narrow it (e.g., to a single id literal type when the caller
+ * knows the requested id), which is what enables per-id content typing.
  */
 export type ConsumerRequest<
   Params extends AnyParams,

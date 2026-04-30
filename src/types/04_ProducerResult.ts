@@ -1,3 +1,4 @@
+import type { CacheSpec, SpecForId } from "./00_CacheSpec.js";
 import type { AnyParams } from "./01_Params.js";
 import type { AnyValidators } from "./02_Validators.js";
 
@@ -6,49 +7,98 @@ import type { AnyValidators } from "./02_Validators.js";
  * for saving in the cache. It includes content (the actual cached value)
  * along with various pieces of metadata that control caching behavior.
  *
- * T: the type of the content
- * U: the type of its potential validators
- * V: the type of request parameters (see HTTP cache model docs).
+ * Spec: the cache key shape (an id type paired with the corresponding content
+ *   type, optionally as a union of such pairs to allow the cache to handle
+ *   different content types per id; see {@link CacheSpec}).
+ * Validators: the type of its potential validators
+ * Params: the type of request parameters (see HTTP cache model docs).
+ *
+ * Note that, when `Spec` is a union, supplemental resources may correspond to
+ * any spec variant -- not just the same variant as the primary resource. So,
+ * e.g., a producer that fetches a Story collection by id can return a result
+ * whose primary resource is the collection (`Story[]`) and whose supplemental
+ * resources are the individual `Story`s.
  */
 export type ProducerResult<
-  T,
+  Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
-  Id extends string = string,
-> = ProducerResultResource<T, Validators, Params, Id> & {
-  supplementalResources?: ProducerResultResource<T, Validators, Params, Id>[];
-};
+> = _ProducerResult<Spec, Spec, Validators, Params>;
+
+type _ProducerResult<
+  Spec extends CacheSpec,
+  // Just a duplicate of Spec supplied by the public ProducerResult type, so
+  // that the supplementalResources field can get all the spec variants _before_
+  // distribution (while allowing us to preserve the fundamental structure of
+  // the type, for better compatibility with the ProducerResultResource type).
+  AllSpecs extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = Spec extends unknown
+  ? ProducerResultResourceObject<
+      Spec["id"],
+      Spec["content"],
+      Params,
+      Validators
+    > & {
+      supplementalResources?: ProducerResultResource<
+        AllSpecs,
+        Validators,
+        Params
+      >[];
+    }
+  : never;
 
 /**
  * A ProducerResultResource is the producer's representation, at some point in
  * time, of a single, cacheable resource. It includes the id of that resource,
  * its content, and the various caching related metadata/directives.
  *
+ * When `Spec` is a union, this type is a discriminated union over the spec
+ * variants: each variant's `id` is paired with the corresponding `content`,
+ * so TypeScript will reject mismatched (id, content) pairs.
+ *
  * ProducerResultResources, once normalized
  * {@see {@link NormalizedProducerResultResource}}, are the key data that
  * returned from the Cache and read/written to the Store.
  */
 export type ProducerResultResource<
-  T,
+  Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
-  Id extends string = string,
+> = Spec extends unknown
+  ? ProducerResultResourceObject<
+      Spec["id"],
+      Spec["content"],
+      Params,
+      Validators
+    >
+  : never;
+
+// Core producerResultResource fields factored out of the Spec distribution
+// nonsense, so we can easily intersect in extra properties. Rarely used
+// directly, as it doesn't take a Spec to gaurantee that the id and content
+// uphold any correlation specified by that Spec.
+export type ProducerResultResourceObject<
+  Id extends string,
+  Content extends unknown,
+  Params extends AnyParams,
+  Validators extends AnyValidators,
 > = {
   id: Id;
+  content: Content;
   vary?: Vary<Params>;
-
-  content: T;
 
   // Age of content at the moment its sent by this producer -- in seconds!
   // Will be non-zero when this producer is itself a cache [since it's been
-  // holding the content for some period of time], or it could be non-zero to
-  // reflect that some time passed while it was being retreived [network latency].
-  // Defaults to 0 if not provided.
+  // holding the content for some period of time], or it could be non-zero
+  // to reflect that some time passed while it was being retreived [network
+  // latency]. Defaults to 0 if not provided.
   initialAge?: number;
 
-  // The moment that this ProducerResultResource was created. Per comment above,
-  // this may be different from when the resource's current state was fetched
-  // from the origin, if initialAge is non-zero.
+  // The moment that this ProducerResultResource was created. Per comment
+  // above, this may be different from when the resource's current state
+  // was fetched from the origin, if initialAge is non-zero.
   date?: Date;
 
   // producer cache control directives.
@@ -57,6 +107,19 @@ export type ProducerResultResource<
   // validation infos. Will be interpreted as an empty object if not provided.
   validators?: Partial<Validators>;
 };
+
+/**
+ * Convenience: a `ProducerResultResource` narrowed to those spec variants
+ * whose id is compatible with `RequestedId`. Used by code paths (e.g.,
+ * `RequestPairedProducerResult`) where the id of the result is fixed by an
+ * earlier consumer request.
+ */
+export type ProducerResultResourceForId<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  RequestedId extends Spec["id"],
+> = ProducerResultResource<SpecForId<Spec, RequestedId>, Validators, Params>;
 
 // The vary object holds a set of param (name, value) pairs that the producer
 // used to create the result. These form a secondary cache key for the resource,

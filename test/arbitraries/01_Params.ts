@@ -1,4 +1,5 @@
 import fc from "fast-check";
+import type { JSON } from "type-party";
 import type { AnyParamValue, AnyParams } from "../../src/types/01_Params.js";
 
 /**
@@ -7,6 +8,7 @@ import type { AnyParamValue, AnyParams } from "../../src/types/01_Params.js";
  */
 export const AnyParamValueArb: fc.Arbitrary<AnyParamValue> = fc
   .jsonValue()
+  .map((v) => v as JSON)
   .filter((value) => value !== null);
 
 /**

@@ -1,9 +1,14 @@
 import pg from "pg";
 
 import fc from "fast-check";
-import PostgresStore from "../src/stores/PostgresStore/PostgresStore.js";
+import type { JSON } from "type-party";
+import PostgresStore, {
+  type PostgresStoreSupportedParams,
+} from "../src/stores/PostgresStore/PostgresStore.js";
 import {
   type AnyParams,
+  type AnyValidators,
+  type CacheSpec,
   type NormalizedVary,
   type ProducerDirectives,
 } from "../src/types/index.js";
@@ -162,7 +167,11 @@ export function postgresStoreFixture() {
     // Use a new schema name for each store instance so that tests can run in
     // parallel without interfering with each other.
     const tableName = `cache-test-${Math.random()}`.replace(/\./g, "_");
-    const postgresStore = new PostgresStore(postgres, {
+    const postgresStore = new PostgresStore<
+      CacheSpec<string, JSON>,
+      AnyValidators,
+      PostgresStoreSupportedParams
+    >(postgres, {
       schemaName: "cache",
       tableName,
     });

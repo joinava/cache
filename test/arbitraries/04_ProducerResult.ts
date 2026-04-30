@@ -1,4 +1,5 @@
 import fc from "fast-check";
+import type { CacheSpec } from "../../src/types/00_CacheSpec.js";
 import type { AnyParams } from "../../src/types/01_Params.js";
 import type { AnyValidators } from "../../src/types/02_Validators.js";
 import type {
@@ -77,7 +78,7 @@ export const ProducerResultResourceArb = <
   validatorsArb: fc.Arbitrary<Validators>,
   paramsArb: fc.Arbitrary<Params>,
   idArb: fc.Arbitrary<Id>,
-): fc.Arbitrary<ProducerResultResource<T, Validators, Params, Id>> =>
+): fc.Arbitrary<ProducerResultResource<CacheSpec<Id, T>, Validators, Params>> =>
   fc.record(
     {
       id: idArb,
@@ -89,7 +90,9 @@ export const ProducerResultResourceArb = <
       validators: validatorsArb,
     },
     { requiredKeys: ["id", "content", "directives"] },
-  );
+  ) as fc.Arbitrary<
+    ProducerResultResource<CacheSpec<Id, T>, Validators, Params>
+  >;
 
 /**
  * Fast-check arbitrary for generating ProducerResult objects.
@@ -105,7 +108,7 @@ export const ProducerResultArb = <
   validatorsArb: fc.Arbitrary<Validators>,
   paramsArb: fc.Arbitrary<Params>,
   idArb: fc.Arbitrary<Id>,
-): fc.Arbitrary<ProducerResult<T, Validators, Params, Id>> => {
+): fc.Arbitrary<ProducerResult<CacheSpec<Id, T>, Validators, Params>> => {
   const resourceArb = ProducerResultResourceArb(
     contentArb,
     validatorsArb,

@@ -1,8 +1,9 @@
 import { default as debug } from "debug";
 
 import pLimit from "p-limit";
+import type { CacheSpec, SpecForId } from "../types/00_CacheSpec.js";
 import type { Entry, NormalizedParams } from "../types/06_Normalization.js";
-import type { Store } from "../types/06_Store.js";
+import type { Store, StoreGetManyResult } from "../types/06_Store.js";
 import type { AnyParams, AnyValidators } from "../types/index.js";
 import { components, type Logger } from "../types/index.js";
 export type { JsonOf } from "type-party";
@@ -102,32 +103,45 @@ export const zip2 = <T, U>(a: readonly T[], b: readonly U[]): [T, U][] => {
  * @param store The store instance to use for retrieving entries
  * @param requests Array of requests, each containing an id and params
  * @param maxConcurrency Maximum number of concurrent requests (default: 10)
- * @returns A promise that resolves to a Map of ids to Entry arrays
+ * @returns A promise that resolves to a tuple-typed array, where each output
+ *  slot holds the matching entries for the corresponding input request, with
+ *  content narrowed to the spec variants compatible with that request's id.
  */
 export async function naiveGetMany<
-  T,
+  Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
-  Id extends string,
->(
-  store: Store<T, Validators, Params, Id>,
-  requests: readonly {
-    readonly id: Id;
+  const Reqs extends readonly {
+    readonly id: Spec["id"];
     readonly params: Readonly<NormalizedParams<Params>>;
   }[],
+>(
+  store: Store<Spec, Validators, Params>,
+  requests: Reqs,
   maxConcurrency = 10,
   options?: { signal?: AbortSignal },
-): Promise<Array<Entry<T, Validators, Params, Id>[]>> {
+): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
   options?.signal?.throwIfAborted();
 
   const limit = pLimit(maxConcurrency);
 
   // Process all requests with controlled concurrency
-  const promises = requests.map(async (request) => {
-    return limit(async () => store.get(request.id, request.params, options));
-  });
+  const promises = requests.map(async (request) =>
+    limit(async () => store.get(request.id, request.params, options)),
+  );
 
-  return Promise.all(promises);
+  const res = await Promise.all(promises);
+  return res satisfies Entry<
+    SpecForId<Spec, Spec["id"]>,
+    Validators,
+    Params
+  >[][] as {
+    -readonly [K in keyof Reqs]: Entry<
+      SpecForId<Spec, Reqs[K]["id"]>,
+      Validators,
+      Params
+    >[];
+  };
 }
 
 // Highly incomplete code for interoperating with raw HTTP responses,

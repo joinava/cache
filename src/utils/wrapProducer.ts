@@ -5,7 +5,8 @@ import type { PublicInterface } from "type-party";
 import type Cache from "../Cache.js";
 import type { CacheLookupResult } from "../Cache.js";
 import { publishCacheResult } from "../diagnostics.js";
-import type { NormalizedProducerResult } from "../types/06_Normalization.js";
+import type { CacheSpec, SpecForId } from "../types/00_CacheSpec.js";
+import type { MultiIdTypeRequestPairedProducer } from "../types/05_RequestPairedProducer.js";
 import type {
   AnyParams,
   AnyValidators,
@@ -129,6 +130,10 @@ export type WrapProducerOptions<V extends AnyParams> = {
  * Note that any supplemental resources returned by the producer will be
  * cached but not returned to the caller.
  *
+ * The wrapped function is generic over the specific id of an incoming request
+ * so that the result's content type is narrowed (when `Spec` is a union of
+ * cache key shapes) to the variants compatible with that id.
+ *
  * ## AbortSignal support
  *
  * The returned function accepts an optional `{ signal }` parameter. The signal
@@ -170,14 +175,13 @@ export type WrapProducerOptions<V extends AnyParams> = {
  *   needs to decide whether to contact its origin.
  */
 export default function wrapProducer<
-  Id extends string,
-  Content,
+  Spec extends CacheSpec,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 >(
-  cache: PublicInterface<Cache<Content, Validators, Params, Id>>,
+  cache: PublicInterface<Cache<Spec, Validators, Params>>,
   options: WrapProducerOptions<Params> | undefined,
-  producer: RequestPairedProducer<Content, Validators, Params, Id>,
+  producer: RequestPairedProducer<Spec, Validators, Params>,
 ) {
   const {
     cacheName,
@@ -189,6 +193,16 @@ export default function wrapProducer<
 
   const logTrace = logger.bind(null, "wrap-producer", "trace");
   const logWarning = logger.bind(null, "wrap-producer", "warn");
+
+  // Coerce the user-facing `RequestPairedProducer` -- which is the loose
+  // non-generic shape in single-id-type mode -- to the strict generic
+  // `MultiIdTypeRequestPairedProducer` used by all internal plumbing. The
+  // cast is sound: in single-id-type mode `Spec` has only one variant, so
+  // any valid loose result is also a valid result for an arbitrary `Id
+  // extends Spec["id"]`; in multi-id-type mode the user-facing type *is*
+  // already this shape and the cast is the identity.
+  const multiIdProducer =
+    producer as MultiIdTypeRequestPairedProducer<Spec, Validators, Params>;
 
   // Suppose the caller is requesting a resource, and we're already in the
   // process of requesting that resource from the producer (or storing the
@@ -246,12 +260,14 @@ export default function wrapProducer<
   // similar situation with directives, which must also match.
   //
   // Of course, we can only use this IF THE REQUEST IS CACHEABLE.
-  const callProducerAndLog = async (
+  const callProducerAndLog = async <Id extends Spec["id"]>(
     req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
     opts?: { signal?: AbortSignal },
   ) => {
     logTrace("contacting producer", req);
-    const resp = opts ? await producer(req, opts) : await producer(req);
+    const resp = opts
+      ? await multiIdProducer(req, opts)
+      : await multiIdProducer(req);
     logTrace("got response from producer", resp);
     return resp;
   };
@@ -265,7 +281,7 @@ export default function wrapProducer<
   // flows into the cache -- ensuring it isn't wasted even when the caller that
   // triggered it has aborted.
   const collapsedCallProducerAndStore = collapsedTaskCreator(
-    async (
+    async <Id extends Spec["id"]>(
       req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
       opts?: { signal?: AbortSignal },
     ) => {
@@ -295,10 +311,10 @@ export default function wrapProducer<
   const normalizeVaryBound = (vary: Vary<Params>) =>
     normalizeVary(cache.normalizeParamName, cache.normalizeParamValue, vary);
 
-  const wrappedProducer = async function (
+  const wrappedProducer = async function <Id extends Spec["id"]>(
     req: PartialConsumerRequest<Params, Id>,
     options?: { signal?: AbortSignal },
-  ): Promise<NormalizedProducerResult<Content, Validators, Params>> {
+  ) {
     const signal = options?.signal;
     signal?.throwIfAborted();
 
@@ -348,10 +364,10 @@ export default function wrapProducer<
             // Pretend the cache returned no results so that we'll fall through to
             // the producer
             return { validatable: [] } satisfies CacheLookupResult<
-              Content,
+              SpecForId<Spec, Id>,
               Validators,
               Params
-            > as CacheLookupResult<Content, Validators, Params>;
+            > as CacheLookupResult<SpecForId<Spec, Id>, Validators, Params>;
           default:
             assertUnreachable(onCacheReadFailure);
         }

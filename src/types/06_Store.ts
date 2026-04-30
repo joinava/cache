@@ -1,6 +1,11 @@
+import type { CacheSpec } from "./00_CacheSpec.js";
 import type { AnyParams } from "./01_Params.js";
 import type { AnyValidators } from "./02_Validators.js";
-import type { Entry, NormalizedParams } from "./06_Normalization.js";
+import type {
+  Entry,
+  EntryForId,
+  NormalizedParams,
+} from "./06_Normalization.js";
 
 /**
  * NB: The store shouldn't mutate its input here at all, but we can't use
@@ -9,12 +14,11 @@ import type { Entry, NormalizedParams } from "./06_Normalization.js";
  * all `T` (even though we know it clearly should be).
  */
 export type StoreEntryInput<
-  T,
+  Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
-  Id extends string = string,
 > = {
-  readonly entry: Entry<T, Validators, Params, Id>;
+  readonly entry: Entry<Spec, Validators, Params>;
   readonly maxStoreForSeconds: number;
 };
 
@@ -23,12 +27,16 @@ export type StoreEntryInput<
  * which are instances responsible for actually storing/querying cache entries
  * (on disk, in memory, in a database, etc). The type params have the same
  * meanings as in the ProducerResult type.
+ *
+ * `Spec` is the union of cache key shapes the store can hold; see
+ * {@link CacheSpec}. The `get`/`getMany` methods are generic over the
+ * specific id of an incoming request so that the returned entries' content
+ * types are narrowed to those compatible with that id.
  */
 export type Store<
-  T,
+  Spec extends CacheSpec,
   Validators extends AnyValidators,
   in out Params extends AnyParams,
-  in out Id extends string = string,
 > = {
   /**
    * This method returns stored cache entries -- regardless of whether they're
@@ -69,11 +77,11 @@ export type Store<
    * @param params The request parameters, with both the names and values of the
    *   params normalized.
    */
-  get(
+  get<Id extends Spec["id"]>(
     id: Id,
     params: Readonly<NormalizedParams<Params>>,
     options?: { signal?: AbortSignal },
-  ): Promise<Entry<T, Validators, Params, Id>[]>;
+  ): Promise<EntryForId<Spec, Validators, Params, Id>[]>;
 
   /**
    * This method returns stored cache entries for multiple resources in a single
@@ -86,16 +94,17 @@ export type Store<
    * Stores may optimize this operation by batching queries or using bulk
    * operations when possible.
    *
+   * The returned arrays' element types are narrowed per-request: each output
+   * slot's entries are typed against the spec variants compatible with the
+   * corresponding input request's id.
+   *
    * @param requests Array of requests, each containing an id and params for the
    *   resource whose cache entries should be returned.
    */
-  getMany(
-    requests: readonly {
-      readonly id: Id;
-      readonly params: Readonly<NormalizedParams<Params>>;
-    }[],
+  getMany<const Reqs extends readonly StoreGetManyRequest<Spec, Params>[]>(
+    requests: Reqs,
     options?: { signal?: AbortSignal },
-  ): Promise<Array<Entry<T, Validators, Params, Id>[]>>;
+  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>>;
 
   /**
    * This method stores a list of cache entries. This method's return promise
@@ -103,7 +112,7 @@ export type Store<
    * defined.
    */
   store(
-    entries: readonly StoreEntryInput<T, Validators, Params, Id>[],
+    entries: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): Promise<void>;
 
   /**
@@ -113,7 +122,7 @@ export type Store<
    * `POST /x` request has to invalidate all stored variants of `GET /x`,
    * whether they had `Content-Language: en-US` or `Content-Language: de-DE`.
    */
-  delete(id: Id): Promise<void>;
+  delete(id: Spec["id"]): Promise<void>;
 
   /**
    * This method should lead the store to free any resources that it's managing,
@@ -131,4 +140,38 @@ export type Store<
    * a default timeout.
    */
   close?(timeout?: number): Promise<void>;
+};
+
+/**
+ * The shape of a single request passed to {@link Store.getMany}.
+ *
+ * Exposed as a named type to keep the `getMany` signature readable and to make
+ * it easy for store implementations to type their own helpers.
+ *
+ * Note: this type is intentionally NOT distributive over `Spec`. The id in a
+ * single request can be any of the ids supported by the cache; the per-id
+ * narrowing of returned content is done by the generic `Reqs` parameter on
+ * the `Store.getMany` signature, which uses each request's literal `id` to
+ * pick the matching `Spec` variant.
+ */
+export type StoreGetManyRequest<
+  Spec extends CacheSpec,
+  Params extends AnyParams,
+> = {
+  readonly id: Spec["id"];
+  readonly params: Readonly<NormalizedParams<Params>>;
+};
+
+export type StoreGetManyResult<
+  Spec extends CacheSpec,
+  Reqs extends readonly { id: Spec["id"] }[],
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = {
+  -readonly [K in keyof Reqs]: EntryForId<
+    Spec,
+    Validators,
+    Params,
+    Reqs[K]["id"]
+  >[];
 };

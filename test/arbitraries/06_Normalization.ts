@@ -1,5 +1,6 @@
 import fc from "fast-check";
 import type { ReadonlyDeep } from "type-fest";
+import type { CacheSpec } from "../../src/types/00_CacheSpec.js";
 import type { AnyParams } from "../../src/types/01_Params.js";
 import type { AnyValidators } from "../../src/types/02_Validators.js";
 import type {
@@ -89,7 +90,9 @@ export const NormalizedProducerResultResourceArb = <
   validatorsArb: fc.Arbitrary<Validators>,
   paramsArb: fc.Arbitrary<Params>,
   idArb: fc.Arbitrary<Id>,
-): fc.Arbitrary<NormalizedProducerResultResource<T, Validators, Params, Id>> =>
+): fc.Arbitrary<
+  NormalizedProducerResultResource<CacheSpec<Id, T>, Validators, Params>
+> =>
   fc.record({
     id: idArb,
     vary: NormalizedVaryArb(paramsArb),
@@ -120,7 +123,9 @@ export const NormalizedProducerResultArb = <
   validatorsArb: fc.Arbitrary<Validators>,
   paramsArb: fc.Arbitrary<Params>,
   idArb: fc.Arbitrary<Id>,
-): fc.Arbitrary<NormalizedProducerResult<T, Validators, Params, Id>> => {
+): fc.Arbitrary<
+  NormalizedProducerResult<CacheSpec<Id, T>, Validators, Params>
+> => {
   const resourceArb = NormalizedProducerResultResourceArb(
     contentArb,
     validatorsArb,

@@ -1,9 +1,9 @@
-import type { Simplify, Tagged } from "type-fest";
-
+import type { Tagged } from "type-fest";
+import type { Jsonify } from "type-party";
+import type { CacheSpec, SpecForId } from "./00_CacheSpec.js";
 import type { AnyParams, AnyParamValue } from "./01_Params.js";
 import type { AnyValidators } from "./02_Validators.js";
-import type { ProducerResultResource, Vary } from "./04_ProducerResult.js";
-import type { ProducerDirectives } from "./index.js";
+import type { Vary } from "./04_ProducerResult.js";
 
 /**
  * @fileoverview When the Cache asks the store to check for cached results that
@@ -85,15 +85,23 @@ export type NormalizedConsumerMaxStale = Tagged<
 >;
 
 export type NormalizedProducerResult<
-  T,
+  Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
-  Id extends string = string,
-> = NormalizedProducerResultResource<T, Validators, Params, Id> & {
-  supplementalResources?:
-    | NormalizedProducerResultResource<T, Validators, Params, Id>[]
-    | undefined;
-};
+> = Spec extends unknown
+  ? // Intersect _within_ the Spec distribution to help TS follow the difference between
+    // this type and NormalizedProducerResultResource.
+    _NormalizedProducerResultResource<
+      Spec["id"],
+      Spec["content"],
+      Params,
+      Validators
+    > & {
+      supplementalResources?:
+        | NormalizedProducerResultResource<Spec, Validators, Params>[]
+        | undefined;
+    }
+  : never;
 
 /**
  * This represents the final shape of a producer's result for a resource, ready
@@ -101,16 +109,31 @@ export type NormalizedProducerResult<
  *
  * A normalized NormalizedProducerResultResource _must_ have the `vary` object
  * filled in with normalized! values.
+ *
+ * When `Spec` is a union, this distributes per-variant: each variant's `id`
+ * is paired with its corresponding `content`.
  */
 export type NormalizedProducerResultResource<
-  T,
+  Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
-  Id extends string = string,
-> = Omit<
-  ProducerResultResource<T, Validators, Params, Id>,
-  "vary" | "validators" | "directives" | "initialAge" | "date"
-> & {
+> = Spec extends unknown
+  ? _NormalizedProducerResultResource<
+      Spec["id"],
+      Spec["content"],
+      Params,
+      Validators
+    >
+  : never;
+
+type _NormalizedProducerResultResource<
+  Id extends string,
+  Content extends unknown,
+  Params extends AnyParams,
+  Validators extends AnyValidators,
+> = {
+  id: Id;
+  content: Content;
   vary: NormalizedVary<Params>;
   validators: Partial<Validators>;
   directives: NormalizedProducerDirectives;
@@ -123,17 +146,42 @@ export type NormalizedProducerResultResource<
  * for brevity, and is named with reference to the colloquial term "cache entry".
  */
 export type Entry<
-  Content,
+  Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
-  Id extends string = string,
-> = NormalizedProducerResultResource<Content, Validators, Params, Id>;
+> = NormalizedProducerResultResource<Spec, Validators, Params>;
+
+export type JsonifiedEntry<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = Spec extends unknown
+  ? Jsonify<
+      _NormalizedProducerResultResource<
+        Spec["id"],
+        Spec["content"],
+        Params,
+        Validators
+      >
+    >
+  : never;
+
+/**
+ * Convenience: an `Entry` narrowed to those spec variants whose id is
+ * compatible with `RequestedId`.
+ */
+export type EntryForId<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  RequestedId extends Spec["id"],
+> = Entry<SpecForId<Spec, RequestedId>, Validators, Params>;
 
 export type NormalizedProducerDirectives = Tagged<
-  Simplify<
-    Omit<ProducerDirectives, "maxStale"> & {
-      maxStale?: NormalizedProducerMaxStale;
-    }
-  >,
+  {
+    freshUntilAge: number;
+    maxStale?: NormalizedProducerMaxStale;
+    storeFor?: number;
+  },
   "NormalizedProducerDirectives"
 >;
