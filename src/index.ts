@@ -9,6 +9,11 @@ export { default as Cache } from "./Cache.js";
 export { default as MemoryStore } from "./stores/MemoryStore/MemoryStore.js";
 export { default as PostgresStore } from "./stores/PostgresStore/PostgresStore.js";
 export type { PostgresStoreSupportedParams } from "./stores/PostgresStore/PostgresStore.js";
+export {
+  default as SqliteStore,
+  type SqliteStoreCompatibleSpec,
+  type SqliteStoreSupportedParams,
+} from "./stores/SqliteStore/SqliteStore.js";
 export * from "./types/index.js";
 export { default as collapsedTaskCreator } from "./utils/collapsedTaskCreator.js";
 export {
