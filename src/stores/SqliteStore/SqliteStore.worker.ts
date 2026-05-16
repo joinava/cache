@@ -171,7 +171,10 @@ async function initializeWithRetry(
     try {
       return initialize(data);
     } catch (error) {
-      if (!isDatabaseLockedError(error) || Date.now() >= deadline) {
+      if (
+        (!isDatabaseLockedError(error) && !isNoSuchTableError(error)) ||
+        Date.now() >= deadline
+      ) {
         throw error;
       }
       attempt += 1;
@@ -373,6 +376,10 @@ function getManyMatchingEntryJson(
 
 function isDatabaseLockedError(error: unknown): boolean {
   return error instanceof Error && /database is locked/i.test(error.message);
+}
+
+function isNoSuchTableError(error: unknown): boolean {
+  return error instanceof Error && /no such table/i.test(error.message);
 }
 
 function chunks<T>(items: readonly T[], size: number): T[][] {
