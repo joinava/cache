@@ -25,6 +25,7 @@ export type {
 export type {
   Entry,
   EntryForId,
+  JsonifiedEntry,
   NormalizedConsumerMaxStale,
   NormalizedParams,
   NormalizedProducerDirectives,

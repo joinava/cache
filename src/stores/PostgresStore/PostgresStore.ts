@@ -221,7 +221,9 @@ export default class PostgresStore<
     });
 
     // For PostgresStore, we'll use the naive implementation until we have time
-    // to optimize it.
+    // to optimize it. Technically, all these calls should probably be wrapped
+    // in a transaction, so that concurrent deletes can't lead us to returning
+    // partial/incosistent state, but that doesn't really matter for this cache.
     return naiveGetMany<Spec, Validators, Params, Reqs>(
       this,
       requests,
@@ -284,7 +286,7 @@ export default class PostgresStore<
 
   async delete(id: Spec["id"]): Promise<void> {
     this.logTrace("deleting entries for id", id);
-    await this.ensureInitialized();
+    await this.ensureInitializedPromise;
 
     try {
       await this.db
