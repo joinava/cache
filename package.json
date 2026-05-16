@@ -34,7 +34,6 @@
     "es-toolkit": "^1.43.0",
     "kysely": "^0.28.3",
     "lru_map": "^0.4.1",
-    "murmurhash-native": "^3.5.1",
     "p-limit": "^6.2.0",
     "pg": "^8.16.3",
     "piscina": "^5.1.4",
