@@ -196,25 +196,25 @@ function initialize(data: WorkerInitData): SqliteStoreWorkerContext {
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
       `);
-
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS cache_entries (
-          resource_id TEXT NOT NULL,
-          variant_key TEXT NOT NULL,
-          vary TEXT NOT NULL,
-          entry TEXT NOT NULL,
-          expires_at INTEGER,
-          PRIMARY KEY (resource_id, variant_key)
-        ) STRICT;
-
-        CREATE INDEX IF NOT EXISTS cache_entries_resource_id_idx
-          ON cache_entries(resource_id);
-
-        CREATE INDEX IF NOT EXISTS cache_entries_expires_at_idx
-          ON cache_entries(expires_at)
-          WHERE expires_at IS NOT NULL;
-      `);
     }
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS cache_entries (
+        resource_id TEXT NOT NULL,
+        variant_key TEXT NOT NULL,
+        vary TEXT NOT NULL,
+        entry TEXT NOT NULL,
+        expires_at INTEGER,
+        PRIMARY KEY (resource_id, variant_key)
+      ) STRICT;
+
+      CREATE INDEX IF NOT EXISTS cache_entries_resource_id_idx
+        ON cache_entries(resource_id);
+
+      CREATE INDEX IF NOT EXISTS cache_entries_expires_at_idx
+        ON cache_entries(expires_at)
+        WHERE expires_at IS NOT NULL;
+    `);
   } catch (error) {
     db.close();
     throw error;
