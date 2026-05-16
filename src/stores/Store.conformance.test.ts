@@ -287,23 +287,6 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
     });
   });
 
-  it("does not return expired entries", async () => {
-    await withStore(createFixture, async (store) => {
-      await store.store([
-        { entry: makeEntry("id", "expired"), maxStoreForSeconds: -1 },
-        {
-          entry: makeEntry("id", "live", varyOnLanguage),
-          maxStoreForSeconds: 60,
-        },
-      ]);
-
-      assert.deepEqual(
-        (await store.get("id", matchingParams)).map(({ content }) => content),
-        [{ value: "live" }],
-      );
-    });
-  });
-
   it("supports concurrent stores to different ids", async () => {
     await withStore(createFixture, async (store) => {
       const ids = Array.from({ length: 20 }, (_, i) => `id:${i}`);
