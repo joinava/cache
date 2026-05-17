@@ -92,6 +92,51 @@ export function normalizeProducerDirectives(directives: ProducerDirectives) {
   });
 }
 
+/**
+ * Re-hydrates a {@link NormalizedProducerDirectives} object after a JSON
+ * serialization roundtrip. `JSON.stringify` (and `safe-stable-stringify`)
+ * converts `Infinity` to `null`, which would otherwise turn a producer's
+ * `freshUntilAge: Infinity` (i.e. "never expires") into a `null` value that
+ * arithmetic comparisons treat as `0`, making the entry immediately stale.
+ *
+ * Store implementations that serialize entries as JSON should call this
+ * helper on the parsed `directives` object when reading entries back, so
+ * that `Infinity` values for `freshUntilAge`, `storeFor`, and each field of
+ * `maxStale` are restored correctly.
+ *
+ * The input type is intentionally permissive so this can be applied to the
+ * raw output of `JSON.parse`, where the affected numeric fields will be
+ * `null` rather than the `number` claimed by the type system.
+ */
+export function restoreInfinityInDirectives(
+  directives: Readonly<{
+    freshUntilAge: number | null;
+    storeFor?: number | null;
+    maxStale?: {
+      withoutRevalidation: number | null;
+      whileRevalidate: number | null;
+      ifError: number | null;
+    };
+  }>,
+): NormalizedProducerDirectives {
+  const restore = (n: number | null) => (n === null ? Infinity : n);
+  const { maxStale, freshUntilAge, storeFor } = directives;
+
+  return instantiateTaggedType<NormalizedProducerDirectives>({
+    freshUntilAge: restore(freshUntilAge),
+    ...(storeFor === undefined ? {} : { storeFor: restore(storeFor) }),
+    ...(maxStale != null
+      ? {
+          maxStale: instantiateTaggedType<NormalizedProducerMaxStale>({
+            withoutRevalidation: restore(maxStale.withoutRevalidation),
+            whileRevalidate: restore(maxStale.whileRevalidate),
+            ifError: restore(maxStale.ifError),
+          }),
+        }
+      : {}),
+  });
+}
+
 export function normalizeParams<Params extends AnyParams>(
   normalizeParamName: NormalizeParamName<Params>,
   normalizeParamValue: NormalizeParamValue<Params>,

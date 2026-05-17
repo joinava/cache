@@ -144,6 +144,32 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
     });
   });
 
+  it("roundtrips Infinity values in directives as Infinity", async () => {
+    await withStore(createFixture, async (store) => {
+      const entry = makeEntry("id", "infinite", varyOnFormat, {
+        directives: {
+          freshUntilAge: Infinity,
+          storeFor: Infinity,
+          maxStale: {
+            withoutRevalidation: Infinity,
+            whileRevalidate: Infinity,
+            ifError: Infinity,
+          },
+        } as NormalizedProducerDirectives,
+      });
+
+      await store.store([{ entry, maxStoreForSeconds: 60 }]);
+      const result = await store.get("id", matchingParams);
+
+      assert.equal(result.length, 1);
+      assert.equal(result[0]?.directives.freshUntilAge, Infinity);
+      assert.equal(result[0]?.directives.storeFor, Infinity);
+      assert.equal(result[0]?.directives.maxStale?.withoutRevalidation, Infinity);
+      assert.equal(result[0]?.directives.maxStale?.whileRevalidate, Infinity);
+      assert.equal(result[0]?.directives.maxStale?.ifError, Infinity);
+    });
+  });
+
   it("only returns entries matching the requested id", async () => {
     await withStore(createFixture, async (store) => {
       await store.store([
