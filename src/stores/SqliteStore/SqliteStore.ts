@@ -18,19 +18,18 @@ import type {
   Entry,
   JsonifiedEntry,
   NormalizedParams,
-  NormalizedProducerDirectives,
   NormalizedVary,
 } from "../../types/06_Normalization.js";
 import type { StoreGetManyResult } from "../../types/06_Store.js";
 import type {
   EntryForId,
   Logger,
-  ProducerDirectives,
   Store,
   StoreEntryInput,
   StoreGetManyRequest,
   Vary,
 } from "../../types/index.js";
+import { restoreInfinityInDirectives } from "../../utils/normalization.js";
 import { birthDate } from "../../utils/normalizedProducerResultResourceHelpers.js";
 import { resultVariantKey } from "../../utils/varyHelpers.js";
 import type {
@@ -350,8 +349,7 @@ export default class SqliteStore<
       content: _.content,
       vary: _.vary satisfies Vary<AnyParams> as NormalizedVary<Params>,
       validators: _.validators satisfies AnyValidators as Partial<Validators>,
-      directives:
-        _.directives satisfies ProducerDirectives as NormalizedProducerDirectives,
+      directives: restoreInfinityInDirectives(_.directives),
       initialAge: _.initialAge,
       date: parseDateString(_.date satisfies string as DateString),
     } satisfies Entry<

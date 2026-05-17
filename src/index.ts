@@ -22,13 +22,21 @@ export {
   type ProducerBranch,
   type ProducerByIdTypeBuilder,
 } from "./utils/producerByIdType.js";
+export { restoreInfinityInDirectives } from "./utils/normalization.js";
 export { naiveGetMany } from "./utils/utils.js";
 export { wrapBulkProducer } from "./utils/wrapBulkProducer.js";
 export { default as wrapProducer } from "./utils/wrapProducer.js";
 export type { CacheResultOutcome } from "./utils/wrapProducer.js";
 
-// Diagnostics channel for cache result events
-export { cacheResultChannel, type CacheResultMessage } from "./diagnostics.js";
+// Diagnostics channels
+export {
+  CACHE_RESULT_CHANNEL_NAME,
+  cacheResultChannel,
+  type CacheResultMessage,
+  DROPPED_DIRECTIVE_CHANNEL_NAME,
+  droppedDirectiveChannel,
+  type DroppedDirectiveMessage,
+} from "./diagnostics.js";
 
 export const entryUtils = { birthDate, age, isValidatable, isFresh };
 

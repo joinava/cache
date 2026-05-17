@@ -1,9 +1,11 @@
+import fc from "fast-check";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
+import { NormalizedProducerDirectivesArb } from "../../test/arbitraries/06_Normalization.js";
 import { postgresStoreFixture } from "../../test/fixtures.js";
 import type {
   AnyValidators,
@@ -141,6 +143,131 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       assert.deepEqual(result[0]?.directives, entry.directives);
       assert.equal(result[0]?.initialAge, entry.initialAge);
       assert.equal(result[0]?.date.getTime(), entry.date.getTime());
+    });
+  });
+
+  it("roundtrips any storable normalized entry identically", async () => {
+    await withStore(createFixture, async (store) => {
+      // Both `fc.record` and `fc.dictionary` produce null-prototype objects,
+      // which are not `assert.deepEqual` to the regular-prototype objects that
+      // `JSON.parse` returns. Recursively reparent so JSON-based stores can
+      // roundtrip the input unchanged.
+      const reparent = <T>(value: T): T => {
+        if (Array.isArray(value)) return value.map(reparent) as unknown as T;
+        if (value && typeof value === "object" && !(value instanceof Date)) {
+          return Object.fromEntries(
+            Object.entries(value).map(([k, v]) => [k, reparent(v)]),
+          ) as T;
+        }
+        return value;
+      };
+
+      // Generate a NormalizedVary made of primitive (string|number|boolean)
+      // values or null, matching what PostgresStore/SqliteStore can store. The
+      // request params we build below from this vary are then guaranteed to
+      // match the variant.
+      const primitiveParamValueArb = fc.oneof(
+        fc.string(),
+        fc.integer(),
+        fc.boolean(),
+      );
+
+      const varyArb = fc
+        .dictionary(
+          fc.string({ minLength: 1 }),
+          fc.oneof(primitiveParamValueArb, fc.constant(null)),
+        )
+        .map((d) => reparent({ ...d }) as NormalizedVary<TestParams>);
+
+      const contentArb = fc
+        .tuple(
+          fc.string(),
+          fc.option(
+            fc.record({
+              count: fc.integer(),
+              labels: fc.array(fc.string()),
+            }),
+            { nil: undefined },
+          ),
+        )
+        .map(([value, nested]): TestContent =>
+          nested !== undefined
+            ? { value, nested: reparent(nested) }
+            : { value },
+        );
+
+      const validatorsArb = fc
+        .dictionary(fc.string({ minLength: 1 }), fc.string())
+        .map((d) => ({ ...d }) as Record<string, string>);
+
+      const entryArb: fc.Arbitrary<Entry<TestSpec, AnyValidators, TestParams>> =
+        fc.record({
+          // Use a unique id per generated entry to avoid runs colliding.
+          id: fc.uuid(),
+          vary: varyArb,
+          content: contentArb,
+          initialAge: fc.nat(),
+          // fc.date() can produce Invalid Date; filter those out since they
+          // don't roundtrip meaningfully through any serialization.
+          date: fc.date().filter((d) => !Number.isNaN(d.getTime())),
+          directives: NormalizedProducerDirectivesArb.map(reparent),
+          validators: validatorsArb,
+        });
+
+      await fc.assert(
+        fc.asyncProperty(entryArb, async (entry) => {
+          // Build request params that will exactly match this entry's variant:
+          // include every non-null vary entry as a param with the same value;
+          // omit keys whose vary value is null.
+          const params = Object.fromEntries(
+            Object.entries(entry.vary).filter(([, v]) => v !== null),
+          ) as NormalizedParams<TestParams>;
+
+          await store.delete(entry.id);
+          await store.store([{ entry, maxStoreForSeconds: Infinity }]);
+          const result = await store.get(entry.id, params);
+
+          assert.equal(result.length, 1, "expected exactly one matching entry");
+          const got = result[0];
+          assert.ok(got);
+          assert.equal(got.id, entry.id);
+          assert.deepEqual(got.vary, entry.vary);
+          assert.deepEqual(got.content, entry.content);
+          assert.deepEqual(got.validators, entry.validators);
+          assert.deepEqual(got.directives, entry.directives);
+          assert.equal(got.initialAge, entry.initialAge);
+          assert.equal(got.date.getTime(), entry.date.getTime());
+
+          await store.delete(entry.id);
+        }),
+        { numRuns: 100 },
+      );
+    });
+  });
+
+  it("roundtrips Infinity values in directives as Infinity", async () => {
+    await withStore(createFixture, async (store) => {
+      const entry = makeEntry("id", "infinite", varyOnFormat, {
+        directives: {
+          freshUntilAge: Infinity,
+          storeFor: Infinity,
+          maxStale: {
+            withoutRevalidation: Infinity,
+            whileRevalidate: Infinity,
+            ifError: Infinity,
+          },
+        } as NormalizedProducerDirectives,
+      });
+
+      await store.store([{ entry, maxStoreForSeconds: 60 }]);
+      const result = await store.get("id", matchingParams);
+
+      assert.equal(result.length, 1);
+      assert.equal(result[0]?.directives.freshUntilAge, Infinity);
+      assert.equal(result[0]?.directives.storeFor, Infinity);
+      assert.equal(result[0]?.directives.maxStale?.withoutRevalidation, Infinity);
+      assert.equal(result[0]?.directives.maxStale?.whileRevalidate, Infinity);
+      assert.equal(result[0]?.directives.maxStale?.ifError, Infinity);
     });
   });
 

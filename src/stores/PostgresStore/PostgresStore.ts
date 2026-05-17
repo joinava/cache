@@ -18,20 +18,19 @@ import type {
   Entry,
   JsonifiedEntry,
   NormalizedParams,
-  NormalizedProducerDirectives,
   NormalizedVary,
 } from "../../types/06_Normalization.js";
 import type { StoreGetManyResult } from "../../types/06_Store.js";
 import type {
   EntryForId,
   Logger,
-  ProducerDirectives,
   Store,
   StoreEntryInput,
   StoreGetManyRequest,
   Vary,
 } from "../../types/index.js";
 import type { Bind2 } from "../../types/utils.js";
+import { restoreInfinityInDirectives } from "../../utils/normalization.js";
 import {
   defaultLoggersByComponent,
   jsonStringify,
@@ -413,8 +412,7 @@ export default class PostgresStore<
       content: _.content,
       vary: _.vary satisfies Vary<AnyParams> as NormalizedVary<Params>,
       validators: _.validators satisfies AnyValidators as Partial<Validators>,
-      directives:
-        _.directives satisfies ProducerDirectives as NormalizedProducerDirectives,
+      directives: restoreInfinityInDirectives(_.directives),
       initialAge: _.initialAge,
       date: parseDateString(_.date satisfies string as unknown as DateString),
     } satisfies Entry<

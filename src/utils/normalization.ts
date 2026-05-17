@@ -1,5 +1,6 @@
 import type { ReadonlyDeep } from "type-fest";
 import { instantiateTaggedType } from "type-party/runtime/tagged-types.js";
+import { publishDroppedDirective } from "../diagnostics.js";
 import type { CacheSpec } from "../types/00_CacheSpec.js";
 import {
   type Entry,
@@ -81,13 +82,97 @@ export function normalizeProducerResultResource<
 }
 
 export function normalizeProducerDirectives(directives: ProducerDirectives) {
-  const { maxStale, freshUntilAge, ...otherDirectives } = directives;
+  const { maxStale, freshUntilAge, storeFor } = directives;
+
+  // `freshUntilAge` is required, so a NaN value here is a programmer error on
+  // the producer side that we can't sensibly recover from -- there's no safe
+  // default freshness lifetime to fall back to. Throw so the bug surfaces.
+  if (Number.isNaN(freshUntilAge)) {
+    throw new TypeError(
+      "Invalid producer directive: freshUntilAge cannot be NaN",
+    );
+  }
+
+  // `storeFor` is optional: drop it on NaN (with a diagnostic) so the cache
+  // falls back to its usual "store for as long as the entry could be useful"
+  // behavior. `Math.max(0, storeFor)` clamps `-Infinity` (and other negatives)
+  // to 0.
+  let normalizedStoreFor: number | undefined;
+  if (storeFor !== undefined) {
+    if (Number.isNaN(storeFor)) {
+      publishDroppedDirective({ directive: "storeFor", reason: "contains-NaN" });
+    } else {
+      normalizedStoreFor = Math.max(0, storeFor);
+    }
+  }
+
+  // `maxStale` is optional. If any of its three required thresholds is NaN,
+  // the whole object is meaningless, so drop it entirely (with a diagnostic).
+  // The cache already has well-defined behavior for "producer didn't specify
+  // maxStale": the consumer's policy controls.
+  let normalizedMaxStale: NormalizedProducerMaxStale | undefined;
+  if (maxStale != null) {
+    if (
+      Number.isNaN(maxStale.withoutRevalidation) ||
+      Number.isNaN(maxStale.whileRevalidate) ||
+      Number.isNaN(maxStale.ifError)
+    ) {
+      publishDroppedDirective({ directive: "maxStale", reason: "contains-NaN" });
+    } else {
+      normalizedMaxStale = normalizeProducerMaxStale(maxStale);
+    }
+  }
 
   return instantiateTaggedType<NormalizedProducerDirectives>({
-    ...otherDirectives,
     freshUntilAge: Math.max(freshUntilAge, 0),
+    ...(normalizedStoreFor !== undefined
+      ? { storeFor: normalizedStoreFor }
+      : {}),
+    ...(normalizedMaxStale != null ? { maxStale: normalizedMaxStale } : {}),
+  });
+}
+
+/**
+ * Re-hydrates a {@link NormalizedProducerDirectives} object after a JSON
+ * serialization roundtrip. `JSON.stringify` (and `safe-stable-stringify`)
+ * converts `Infinity` to `null`, which would otherwise turn a producer's
+ * `freshUntilAge: Infinity` (i.e. "never expires") into a `null` value that
+ * arithmetic comparisons treat as `0`, making the entry immediately stale.
+ *
+ * Store implementations that serialize entries as JSON should call this
+ * helper on the parsed `directives` object when reading entries back, so
+ * that `Infinity` values for `freshUntilAge`, `storeFor`, and each field of
+ * `maxStale` are restored correctly.
+ *
+ * The input type is intentionally permissive so this can be applied to the
+ * raw output of `JSON.parse`, where the affected numeric fields will be
+ * `null` rather than the `number` claimed by the type system.
+ */
+export function restoreInfinityInDirectives(
+  directives: Readonly<{
+    freshUntilAge: number | null;
+    storeFor?: number | null;
+    maxStale?: {
+      withoutRevalidation: number | null;
+      whileRevalidate: number | null;
+      ifError: number | null;
+    };
+  }>,
+): NormalizedProducerDirectives {
+  const restore = (n: number | null) => (n === null ? Infinity : n);
+  const { maxStale, freshUntilAge, storeFor } = directives;
+
+  return instantiateTaggedType<NormalizedProducerDirectives>({
+    freshUntilAge: restore(freshUntilAge),
+    ...(storeFor === undefined ? {} : { storeFor: restore(storeFor) }),
     ...(maxStale != null
-      ? { maxStale: normalizeProducerMaxStale(maxStale) }
+      ? {
+          maxStale: instantiateTaggedType<NormalizedProducerMaxStale>({
+            withoutRevalidation: restore(maxStale.withoutRevalidation),
+            whileRevalidate: restore(maxStale.whileRevalidate),
+            ifError: restore(maxStale.ifError),
+          }),
+        }
       : {}),
   });
 }
