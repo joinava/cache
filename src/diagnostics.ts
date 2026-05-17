@@ -46,6 +46,52 @@ export function publishCacheResult(message: CacheResultMessage): void {
   cacheResultChannel.publish(message);
 }
 
+/**
+ * Name of the diagnostics channel that fires when normalization silently drops
+ * an optional producer directive because it contained an invalid value (e.g.
+ * `NaN`). Subscribers can use these events to surface producer-side bugs that
+ * would otherwise be invisible.
+ *
+ * Note: this channel does NOT fire when a required directive is invalid
+ * (e.g. `freshUntilAge: NaN`); those cases throw instead.
+ */
+export const DROPPED_DIRECTIVE_CHANNEL_NAME = "@zingage/cache:dropped-directive";
+
+/**
+ * The message type published to the dropped-directive diagnostics channel.
+ */
+export type DroppedDirectiveMessage = {
+  /**
+   * Which optional producer directive was dropped. For `maxStale`, the whole
+   * object is dropped even if only one of its fields was invalid, because a
+   * `maxStale` with a missing threshold is not meaningful.
+   */
+  directive: "storeFor" | "maxStale";
+  /** Why the directive was dropped. */
+  reason: "contains-NaN";
+};
+
+/**
+ * The diagnostics channel for dropped-directive events.
+ * @internal
+ */
+export const droppedDirectiveChannel = diagnosticsChannel.channel(
+  DROPPED_DIRECTIVE_CHANNEL_NAME,
+) as TypedChannel<
+  DroppedDirectiveMessage,
+  typeof DROPPED_DIRECTIVE_CHANNEL_NAME
+>;
+
+/**
+ * Publishes a dropped-directive event to the diagnostics channel.
+ * @internal
+ */
+export function publishDroppedDirective(
+  message: DroppedDirectiveMessage,
+): void {
+  droppedDirectiveChannel.publish(message);
+}
+
 type TypedChannel<T, Name extends string> = Omit<
   Channel,
   "publish" | "subscribe"
