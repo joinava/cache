@@ -53,6 +53,9 @@ export type InputHasher<Input, Spec extends CacheSpec> = (
  * Options for {@link wrapComputingProducer} / {@link wrapBulkComputingProducer}.
  *
  * Identical to {@link WrapProducerOptions}, except:
+ * - `cache` (required) is the {@link Cache} instance to read from / write to.
+ *   It lives in the options object (rather than as a separate argument like
+ *   `wrapProducer`'s `cache`) so the whole configuration is one value.
  * - `hashInput` (required) derives the cache id from the input.
  * - `isCacheable`, if provided, receives the **input** rather than an id, since
  *   the input — not the opaque hash — is what a caller can meaningfully decide
@@ -61,8 +64,10 @@ export type InputHasher<Input, Spec extends CacheSpec> = (
 export type WrapComputingProducerOptions<
   Input,
   Spec extends CacheSpec,
+  Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 > = Omit<WrapProducerOptions<Params>, "isCacheable"> & {
+  cache: PublicInterface<Cache<Spec, Validators, Params>>;
   hashInput: InputHasher<Input, Spec>;
   isCacheable?(this: void, input: Input): boolean;
 };
@@ -179,8 +184,7 @@ class InputRegistry<Input> {
  *
  * See the module docs for when to use this vs. {@link wrapProducer}.
  *
- * @param cache - Where produced values are stored.
- * @param options - See {@link WrapComputingProducerOptions}.
+ * @param options - See {@link WrapComputingProducerOptions} (includes the `cache`).
  * @param producer - Computes the value from the full input on a cache miss.
  */
 export function wrapComputingProducer<
@@ -189,11 +193,15 @@ export function wrapComputingProducer<
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 >(
-  cache: PublicInterface<Cache<Spec, Validators, Params>>,
-  options: WrapComputingProducerOptions<Input, Spec, Params>,
+  options: WrapComputingProducerOptions<Input, Spec, Validators, Params>,
   producer: ComputingProducer<Input, Spec, Validators, Params>,
 ) {
-  const { hashInput, isCacheable: isInputCacheable, ...wrapOptions } = options;
+  const {
+    cache,
+    hashInput,
+    isCacheable: isInputCacheable,
+    ...wrapOptions
+  } = options;
   const registry = new InputRegistry<Input>();
 
   // `registry.get` runs synchronously before `producer` is invoked, so the
@@ -265,8 +273,7 @@ export function wrapComputingProducer<
  *
  * See the module docs for when to use this vs. {@link wrapBulkProducer}.
  *
- * @param cache - Where produced values are stored.
- * @param options - See {@link WrapComputingProducerOptions}.
+ * @param options - See {@link WrapComputingProducerOptions} (includes the `cache`).
  * @param producer - Computes the values for the missed inputs on a cache miss.
  */
 export function wrapBulkComputingProducer<
@@ -276,11 +283,15 @@ export function wrapBulkComputingProducer<
   Params extends AnyParams = AnyParams,
   ErrorType extends Error = Error,
 >(
-  cache: PublicInterface<Cache<Spec, Validators, Params>>,
-  options: WrapComputingProducerOptions<Input, Spec, Params>,
+  options: WrapComputingProducerOptions<Input, Spec, Validators, Params>,
   producer: BulkComputingProducer<Input, Spec, Validators, Params, ErrorType>,
 ) {
-  const { hashInput, isCacheable: isInputCacheable, ...wrapOptions } = options;
+  const {
+    cache,
+    hashInput,
+    isCacheable: isInputCacheable,
+    ...wrapOptions
+  } = options;
   const registry = new InputRegistry<Input>();
 
   // Each `registry.get` runs synchronously (while mapping) before `producer`

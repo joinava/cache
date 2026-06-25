@@ -51,8 +51,7 @@ describe("wrapComputingProducer", () => {
       result(input.text.toUpperCase()),
     );
     const compute = wrapComputingProducer<Input, Spec>(
-      cache,
-      { hashInput },
+      { cache, hashInput },
       producer,
     );
 
@@ -71,8 +70,7 @@ describe("wrapComputingProducer", () => {
       result(input.text.toUpperCase()),
     );
     const compute = wrapComputingProducer<Input, Spec>(
-      cache,
-      { hashInput },
+      { cache, hashInput },
       producer,
     );
 
@@ -84,8 +82,8 @@ describe("wrapComputingProducer", () => {
   it("supports an async hashInput", async () => {
     const producer = mock.fn(async (input: Input) => result(input.text));
     const compute = wrapComputingProducer<Input, Spec>(
-      cache,
       {
+        cache,
         hashInput: async (input) => {
           await delay(1);
           return `computed:${input.text}`;
@@ -109,8 +107,7 @@ describe("wrapComputingProducer", () => {
       return result(input.text);
     });
     const compute = wrapComputingProducer<Input, Spec>(
-      cache,
-      { hashInput, collapseOverlappingRequestsTime: 0 },
+      { cache, hashInput, collapseOverlappingRequestsTime: 0 },
       producer,
     );
 
@@ -128,8 +125,7 @@ describe("wrapComputingProducer", () => {
     // registered" on the second call instead of producing a result.
     const producer = mock.fn(async (input: Input) => result(input.text));
     const compute = wrapComputingProducer<Input, Spec>(
-      cache,
-      { hashInput, isCacheable: (input) => input.text !== "skip" },
+      { cache, hashInput, isCacheable: (input) => input.text !== "skip" },
       producer,
     );
 
@@ -155,8 +151,7 @@ describe("wrapBulkComputingProducer", () => {
       inputs.map((input) => result(input.text.toUpperCase())),
     );
     const compute = wrapBulkComputingProducer<Input, Spec>(
-      cache,
-      { hashInput },
+      { cache, hashInput },
       producer,
     );
 
@@ -184,8 +179,7 @@ describe("wrapBulkComputingProducer", () => {
       inputs.map((input) => result(input.text)),
     );
     const compute = wrapBulkComputingProducer<Input, Spec>(
-      cache,
-      { hashInput },
+      { cache, hashInput },
       producer,
     );
 
@@ -199,8 +193,7 @@ describe("wrapBulkComputingProducer", () => {
       inputs.map((input) => result(input.text.toUpperCase())),
     );
     const compute = wrapBulkComputingProducer<Input, Spec>(
-      cache,
-      { hashInput },
+      { cache, hashInput },
       producer,
     );
 
