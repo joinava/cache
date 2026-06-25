@@ -140,7 +140,9 @@ export default class MemoryStore<
   public async get<Id extends Spec["id"]>(
     id: Id,
     normalizedParams: NormalizedParams<Params>,
+    options?: { signal?: AbortSignal },
   ): Promise<Entry<SpecForId<Spec, Id>, Validators, Params>[]> {
+    options?.signal?.throwIfAborted();
     return this.#getOneSync(id, normalizedParams);
   }
 
@@ -148,7 +150,9 @@ export default class MemoryStore<
     const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
   >(
     requests: Reqs,
+    options?: { signal?: AbortSignal },
   ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
+    options?.signal?.throwIfAborted();
     return isNonEmptyArray(requests)
       ? mapNonEmpty(requests, (it) => this.#getOneSync(it.id, it.params))
       : ([] as StoreGetManyResult<Spec, Reqs, Validators, Params>);

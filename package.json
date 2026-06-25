@@ -25,6 +25,8 @@
     "test": "node --test  \"./dist/**/*.test.js\"",
     "test:watch": "pnpm test --watch",
     "test:ci": "NODE_OPTIONS=\"--test-reporter=junit --test-reporter-destination=./test-report.xml --test-reporter=spec --test-reporter-destination=stdout\" pnpm run test",
+    "test:docker": "docker compose up -d --wait && REDIS_URL=redis://localhost:${REDIS_PORT:-6380} DATABASE_HOST=localhost DATABASE_PORT=${DATABASE_PORT:-5433} DATABASE_USER=${DATABASE_USER:-cache} DATABASE_PASSWORD=${DATABASE_PASSWORD:-cache} DATABASE_NAME=${DATABASE_NAME:-cache} pnpm run test",
+    "test:docker:down": "docker compose down",
     "dev": "pnpm run tsc:watch",
     "lint": "oxlint",
     "load-env": "dotenvx run --ignore=MISSING_ENV_FILE",
@@ -42,6 +44,14 @@
     "type-fest": "^5.4.1",
     "type-party": "^0.10.1"
   },
+  "peerDependencies": {
+    "ioredis": "^5"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@dotenvx/dotenvx": "^1.51.4",
     "@types/chai": "^5.2.2",
@@ -51,6 +61,7 @@
     "chai": "^5.2.1",
     "debug": "^4.4.1",
     "fast-check": "^4.2.0",
+    "ioredis": "^5.9.1",
     "oxlint": "^1.62.0",
     "oxlint-tsgolint": "^0.22.1",
     "pipeline-segment": "^0.0.6",
