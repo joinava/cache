@@ -1,3 +1,4 @@
+import pLimit from "p-limit";
 import type { ReadonlyDeep } from "type-fest";
 import type { PublicInterface } from "type-party";
 
@@ -13,7 +14,7 @@ import type {
   RequestPairedProducerResult,
 } from "../types/index.js";
 import type { PartialConsumerRequest } from "./requestPairedProducerUtils.js";
-import { wrapBulkProducer, type BulkProducer } from "./wrapBulkProducer.js";
+import { wrapBulkProducer } from "./wrapBulkProducer.js";
 import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
 
 /**
@@ -236,19 +237,6 @@ export function wrapComputingProducer<
     Params
   >(hashInput);
 
-  // `registry.get` runs synchronously before `producer` is invoked, so the
-  // input is read while still registered (see InputRegistry docs). The cast
-  // bridges the explicit signature to the `RequestPairedProducer` conditional
-  // type, which is opaque while `Spec` is an unresolved generic — the same
-  // coercion `wrapProducer` performs internally.
-  const internalProducer = (async <Id extends Spec["id"]>(
-    req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
-    producerOptions?: { signal?: AbortSignal },
-  ) => {
-    const input = registry.get(req.id);
-    return hashSupplementals(await producer(input, producerOptions));
-  }) as unknown as RequestPairedProducer<Spec, Validators, Params>;
-
   const wrapped = wrapProducer<Spec, Validators, Params>(
     cache,
     {
@@ -259,7 +247,18 @@ export function wrapComputingProducer<
         ? { isCacheable: (id: string) => isInputCacheable(registry.get(id)) }
         : {}),
     },
-    internalProducer,
+    // `registry.get` runs synchronously before `producer` is invoked, so the
+    // input is read while still registered (see InputRegistry docs). The cast
+    // bridges the explicit signature to the `RequestPairedProducer` conditional
+    // type, which is opaque while `Spec` is an unresolved generic — the same
+    // coercion `wrapProducer` performs internally.
+    (async <Id extends Spec["id"]>(
+      req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
+      producerOptions?: { signal?: AbortSignal },
+    ) => {
+      const input = registry.get(req.id);
+      return hashSupplementals(await producer(input, producerOptions));
+    }) as unknown as RequestPairedProducer<Spec, Validators, Params>,
   );
 
   const wrappedComputingProducer = async (
@@ -332,22 +331,6 @@ export function wrapBulkComputingProducer<
     Params
   >(hashInput);
 
-  // Each `registry.get` runs synchronously (while mapping) before `producer`
-  // is invoked, so every input is read while still registered.
-  const internalProducer: BulkProducer<Spec, Validators, Params, ErrorType> = (
-    reqs,
-    producerOptions,
-  ) => {
-    const inputs = reqs.map((req) => registry.get(req.id));
-    return producer(inputs, producerOptions).then((results) =>
-      Promise.all(
-        results.map(async (result) =>
-          result instanceof Error ? result : hashSupplementals(result),
-        ),
-      ),
-    );
-  };
-
   const wrapped = wrapBulkProducer<Spec, Validators, Params, ErrorType>(
     cache,
     {
@@ -358,7 +341,18 @@ export function wrapBulkComputingProducer<
         ? { isCacheable: (id: string) => isInputCacheable(registry.get(id)) }
         : {}),
     },
-    internalProducer,
+    // Each `registry.get` runs synchronously (while mapping) before `producer`
+    // is invoked, so every input is read while still registered.
+    (reqs, producerOptions) => {
+      const inputs = reqs.map((req) => registry.get(req.id));
+      return producer(inputs, producerOptions).then((results) =>
+        Promise.all(
+          results.map(async (result) =>
+            result instanceof Error ? result : hashSupplementals(result),
+          ),
+        ),
+      );
+    },
   );
 
   const wrappedBulkComputingProducer = async (
@@ -397,6 +391,10 @@ export function wrapBulkComputingProducer<
   return wrappedBulkComputingProducer;
 }
 
+// Cap concurrent supplemental-input hashing so a result with many supplementals
+// (and a possibly-async `hashInput`) doesn't flood the event loop.
+const SUPPLEMENTAL_HASH_CONCURRENCY = 10;
+
 /**
  * Builds the function that turns a {@link ComputingProducerResult} into the
  * plain {@link RequestPairedProducerResult} the underlying producer machinery
@@ -412,6 +410,8 @@ function makeSupplementalHasher<
   Validators extends AnyValidators,
   Params extends AnyParams,
 >(hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>) {
+  // One limiter shared across every call of the returned hasher.
+  const limit = pLimit(SUPPLEMENTAL_HASH_CONCURRENCY);
   return async (
     result: ComputingProducerResult<Input, Spec, Validators, Params>,
   ): Promise<RequestPairedProducerResult<Spec, Validators, Params>> => {
@@ -425,10 +425,12 @@ function makeSupplementalHasher<
     }
 
     const hashed = await Promise.all(
-      supplementalResources.map(async (resource) => {
-        const { input, ...rest } = resource;
-        return { ...rest, id: await Promise.resolve(hashInput(input)) };
-      }),
+      supplementalResources.map((resource) =>
+        limit(async () => {
+          const { input, ...rest } = resource;
+          return { ...rest, id: await Promise.resolve(hashInput(input)) };
+        }),
+      ),
     );
 
     return {
