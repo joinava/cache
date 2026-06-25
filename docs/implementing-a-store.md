@@ -48,3 +48,21 @@ To handle this, call the exported `restoreInfinityInDirectives` helper on the pa
 
 - All the [`vary`-related helper functions](../src/utils/varyHelpers.ts)
 - [`restoreInfinityInDirectives`](../src/utils/normalization.ts) for JSON-based stores, as described above
+
+## Store-specific notes for `RedisStore`
+
+The `RedisStore` mirrors the `MemoryStore` design with one twist: for each `id` it keeps a Set of the distinct vary-key-name arrays it's seen (`cache:{<id>}:varyKeySets`) plus a *sorted set* of the variant keys that have been stored, scored by their epoch-ms expiry (`cache:{<id>}:variantKeys`). The entry blobs sit in flat keys (`cache:{<id>}:v:<variantKey>`) with their own per-key TTL via `SET PX`. All three share a `{<id>}` Cluster hashtag so they always land on the same slot.
+
+A few behaviors are worth knowing about if you're tuning a system that uses this store:
+
+- **No cross-process LWW.** Within a single `store([…])` call, duplicate `(id, variantKey)` entries collapse to the newest by `birthDate`, matching the other stores. Across concurrent `store()` calls from different processes there is no guaranteed ordering — last writer wins by Redis's command order, not by `birthDate`. Callers that need strict ordering should serialize writes themselves.
+
+- **Self-pruning index.** Each `store()` call ends with a `ZREMRANGEBYSCORE variantKeys 0 <now>`, which drops every index member whose underlying variant TTL has already passed. The `variantKeys` ZSET only ever holds members whose blob is still potentially-live — even if a producer accidentally varies on a high-cardinality param (a request timestamp, a per-user UUID), the index doesn't compound forever; old members fall off as their scores expire.
+
+- **Self-healing index.** If Redis's `maxmemory-policy` evicts an entry blob outside the ZSET's knowledge (so its score is still in the future), the next `get()` sees the gap (an `MGET` returning `null`) and runs a tiny Lua script — `EXISTS` then `ZREM` — to prune the dead reference. The script is atomic on the shard, so a concurrent `store()` re-creating that variant cannot have its index entry removed by an in-flight self-heal.
+
+- **Hot id with many variants.** The `{<id>}` hashtag means all of a single id's reads and writes land on one Cluster shard. For most workloads this is fine and lets `MGET` stay slot-local. For a hot id with many per-user variants under high traffic, that shard can become a bottleneck; the workaround is to front the RedisStore with a separate `MemoryStore` for that resource, or to run multiple `RedisStore` instances pointed at separate Redis clusters with caller-side routing.
+
+- **Cluster failover mid-pipeline.** `getMany` across many ids can span multiple Cluster slots. Mid-failover, ioredis's `MOVED` handling kicks in per-command, but a pipeline as a whole may yield mixed results. The Cache class's default `onCacheReadFailure: "call-producer"` already routes around this; the store does not attempt to transparently retry across failover.
+
+- **Clock source for expiry scores.** Expiry scores in `variantKeys` are computed on the application server (`Date.now() + ttlMs`), while `ZREMRANGEBYSCORE` runs on the Redis server. Mild clock drift between the two is harmless: the read path doesn't consult `variantKeys`, so an early-pruned member just means a slightly-earlier-than-strict invalidation. If you need monotonic correctness in a multi-app-server setup, run NTP.

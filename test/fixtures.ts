@@ -1,3 +1,4 @@
+import { Redis } from "ioredis";
 import pg from "pg";
 
 import fc from "fast-check";
@@ -5,6 +6,9 @@ import type { JSON } from "type-party";
 import PostgresStore, {
   type PostgresStoreSupportedParams,
 } from "../src/stores/PostgresStore/PostgresStore.js";
+import RedisStore, {
+  type RedisStoreSupportedParams,
+} from "../src/stores/RedisStore/RedisStore.js";
 import {
   type AnyParams,
   type AnyValidators,
@@ -153,6 +157,56 @@ export function dummyEntryData(
       date: producedAt,
     },
   );
+}
+
+export function redisStoreFixture() {
+  // Use a fresh keyPrefix per fixture so parallel tests don't trample each
+  // other. Tests are responsible for FLUSHing or DELing their own keys via
+  // the cleanup callback, but the prefix is the belt to the cleanup's
+  // suspenders.
+  const keyPrefix = `cache-test-${Math.random().toString(36).slice(2)}`;
+  const redis = new Redis(
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    process.env["REDIS_URL"]!,
+    {
+      // Fail fast if Redis isn't responding rather than retrying forever.
+      maxRetriesPerRequest: 3,
+    },
+  );
+
+  const redisStore = new RedisStore<
+    CacheSpec<string, JSON>,
+    AnyValidators,
+    RedisStoreSupportedParams
+  >(redis, { keyPrefix });
+
+  return {
+    redis,
+    redisStore,
+    keyPrefix,
+    async cleanup() {
+      // Delete all keys this fixture wrote, regardless of which test left
+      // them behind. Use SCAN so we don't risk KEYS' blocking behavior on
+      // shared Redis instances.
+      const stream = redis.scanStream({ match: `${keyPrefix}:*`, count: 500 });
+      const keys: string[] = [];
+      await new Promise<void>((resolve, reject) => {
+        stream.on("data", (batch: string[]) => {
+          keys.push(...batch);
+        });
+        stream.on("end", () => resolve());
+        stream.on("error", reject);
+      });
+      if (keys.length > 0) {
+        const CHUNK = 1000;
+        for (let i = 0; i < keys.length; i += CHUNK) {
+          await redis.del(...keys.slice(i, i + CHUNK));
+        }
+      }
+      await redisStore[Symbol.asyncDispose]();
+      redis.disconnect();
+    },
+  };
 }
 
 export function postgresStoreFixture() {

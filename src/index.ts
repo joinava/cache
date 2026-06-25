@@ -10,6 +10,12 @@ export { default as MemoryStore } from "./stores/MemoryStore/MemoryStore.js";
 export { default as PostgresStore } from "./stores/PostgresStore/PostgresStore.js";
 export type { PostgresStoreSupportedParams } from "./stores/PostgresStore/PostgresStore.js";
 export {
+  default as RedisStore,
+  type RedisStoreClient,
+  type RedisStoreCompatibleSpec,
+  type RedisStoreSupportedParams,
+} from "./stores/RedisStore/RedisStore.js";
+export {
   default as SqliteStore,
   type SqliteStoreCompatibleSpec,
   type SqliteStoreSupportedParams,

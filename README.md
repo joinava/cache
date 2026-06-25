@@ -10,7 +10,7 @@ Still, you must understand a number of concepts from HTTP's caching model in ord
 
 ### Backing stores
 
-The `Cache` class can only function with a "backing store" that actually holds the cache's entries. There is a common `Store` interface (see the [types file](./src/types/06_Store.ts)) that all stores must implement. We currently have three backing stores, one that [holds items in memory](./src/stores/MemoryStore/MemoryStore.ts); one that [stores items in Postgres](./src/stores/PostgresStore/PostgresStore.ts); and one that [uses Sqlite](./src/stores/SqliteStore/SqliteStore.ts).
+The `Cache` class can only function with a "backing store" that actually holds the cache's entries. There is a common `Store` interface (see the [types file](./src/types/06_Store.ts)) that all stores must implement. We currently have four backing stores: one that [holds items in memory](./src/stores/MemoryStore/MemoryStore.ts); one that [stores items in Postgres](./src/stores/PostgresStore/PostgresStore.ts); one that [uses Sqlite](./src/stores/SqliteStore/SqliteStore.ts); and one [backed by Redis](./src/stores/RedisStore/RedisStore.ts).
 
 Note that not all backing stores will be able to store all kinds of data, although it's recommended that general-purpose stores be able to store any data that's JSON-serializable. Store implementations can communicate the type of data they support by adding a constraint on their first type parameter, e.g., a store with the signature `class MyStore<Spec extends CacheSpec<string, string[]>, ...>` is indicating that it can only store string arrays. Trying to use a store with a `Cache` instance parameterized for entries of different types will yield a type error.
 
@@ -80,6 +80,8 @@ Each `.when(...)` call infers its own narrowed id type from the supplied type gu
 
 - [`PostgresStore.ts`](./src/stores/PostgresStore/PostgresStore.ts): a store for retaining cached data in Postgres.
 
+- [`RedisStore.ts`](./src/stores/RedisStore/RedisStore.ts): a store for retaining cached data in Redis. Takes an injected `ioredis` client (`Redis` or `Cluster`); the caller owns the client's lifecycle, TLS, and AUTH configuration. Variants for the same `id` are co-located on one Cluster shard via a `{<id>}` hashtag, so the store's `MGET`-based read path stays slot-local.
+
 The package provides **five** functions for wrapping a producer with a cache. They split along two axes — single vs. bulk, and "lookup" vs. "compute":
 
 - [`wrapProducer.ts`](./src/utils/wrapProducer.ts) — **`wrapProducer`**: the package's most important export, arguably. It takes a producer (i.e., a function that returns some data to cache) and a `Cache` instance, and it returns an equivalent function that will use a cached value when a suitable one is available, but otherwise call through to the underlying producer and store its return value for future requests.
@@ -91,3 +93,16 @@ The package provides **five** functions for wrapping a producer with a cache. Th
 - [`wrapComputingProducer.ts`](./src/utils/wrapComputingProducer.ts) — **`wrapComputingProducer`** and **`wrapBulkComputingProducer`**: the "compute" counterparts to the two above, for when the cached value is not an entity looked up by id but an expensive-to-compute **function of some input** — value = `f(input)`, reused whenever the same input recurs (e.g. an LLM extraction over a chunk of text). Here a hash of the input is the natural cache key, but the producer wants the original, un-hashed input to do the work. You pass a single options object (the `cache` lives in it too) with a `hashInput` function (which may return any `string` subtype — e.g. `` `extract:${string}` `` — so the resulting spec composes safely with others), plus a producer that takes the full input; the wrapper derives the cache id from the hash, keeps the input around (reference-counted, so it survives request collapsing without leaking) just long enough to hand it to the producer on a miss, and otherwise behaves like `wrapProducer`/`wrapBulkProducer`. A computing producer may also return `supplementalResources`, but keyed by the **input** they'd be computed from (not a bare id) — the wrapper hashes those inputs, so a later `compute(thatInput)` is a hit.
 
 - Also in [`wrapComputingProducer.ts`](./src/utils/wrapComputingProducer.ts) — **`computingProducerByInputType`**: the computing analog of `producerByIdType`, for a *heterogeneous* computing cache. You declare a union of `ComputingVariant<Input, Content>` and add a branch per variant with `.when(guard, produce)`; because each branch's `produce` is authored against a single, narrowed input, the types enforce that it returns that variant's content and that any cross-type `supplementalResources` pair a variant's input with that variant's content (so "computing a collection also caches its individual items" is checked end to end). `.build()` returns an ordinary computing producer to hand to `wrapComputingProducer`. See the file's module doc for more on the "lookup vs. compute" distinction.
+
+## Running the tests
+
+Most of the suite runs without any infrastructure. The `PostgresStore` and `RedisStore` conformance suites need real Postgres and Redis instances respectively; they're skipped automatically when their environment variables (`DATABASE_HOST`/etc. for Postgres, `REDIS_URL` for Redis) aren't set.
+
+For local development, a `docker-compose.yml` is provided that brings up both. The included `test:docker` script starts the services, points the tests at them, and runs the full suite:
+
+```bash
+pnpm run test:docker        # starts services + runs tests with env wired up
+pnpm run test:docker:down   # stops the services when you're done
+```
+
+The defaults bind to non-default host ports (Redis 6380, Postgres 5433) to avoid colliding with locally-running Redis/Postgres instances. Override via `REDIS_PORT` / `DATABASE_PORT` / `DATABASE_USER` / `DATABASE_PASSWORD` / `DATABASE_NAME` if you want different settings.
