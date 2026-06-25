@@ -163,6 +163,80 @@ class InputRegistry<Input> {
   }
 }
 
+/** Shared options for {@link wrapComputingProducer} / {@link wrapBulkComputingProducer}. */
+type ComputingProducerOptions<
+  Input,
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = Omit<WrapProducerOptions<Params>, "isCacheable"> & {
+  cache: PublicInterface<Cache<Spec, Validators, Params>>;
+  hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>;
+  isCacheable?(this: void, input: Input): boolean;
+};
+
+/**
+ * Shared setup for both computing wrappers: splits out the cache and hashing,
+ * builds the input registry and supplemental hasher, and adapts the
+ * input-based `isCacheable` to the id-based one `wrapProducer` expects.
+ */
+function computingProducerSetup<
+  Input,
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+>(
+  options: ComputingProducerOptions<Input, Spec, Validators, Params>,
+): {
+  cache: PublicInterface<Cache<Spec, Validators, Params>>;
+  hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>;
+  registry: InputRegistry<Input>;
+  hashSupplementals: (
+    result: ComputingProducerResult<Input, Spec, Validators, Params>,
+  ) => Promise<RequestPairedProducerResult<Spec, Validators, Params>>;
+  baseOptions: WrapProducerOptions<Params>;
+} {
+  const {
+    cache,
+    hashInput,
+    isCacheable: isInputCacheable,
+    ...wrapOptions
+  } = options;
+  const registry = new InputRegistry<Input>();
+  const hashSupplementals = makeSupplementalHasher<
+    Input,
+    Spec,
+    Validators,
+    Params
+  >(hashInput);
+  const baseOptions: WrapProducerOptions<Params> = {
+    ...wrapOptions,
+    // `registry.get` runs synchronously inside `wrapProducer`'s `isCacheable`
+    // check, while the id is still registered.
+    ...(isInputCacheable
+      ? { isCacheable: (id: string) => isInputCacheable(registry.get(id)) }
+      : {}),
+  };
+  return { cache, hashInput, registry, hashSupplementals, baseOptions };
+}
+
+/**
+ * Builds the consumer request for a derived id. The cast bridges to
+ * `PartialConsumerRequest`, whose id/directives are `ReadonlyDeep`-wrapped and
+ * so opaque against the plain types here while the spec is generic — the same
+ * boundary coercion `wrapProducer` uses. The conditional spread avoids passing
+ * `directives: undefined` (rejected under `exactOptionalPropertyTypes`).
+ */
+function buildComputingRequest<Params extends AnyParams, Id extends string>(
+  id: Id,
+  directives: ConsumerDirectives | undefined,
+): PartialConsumerRequest<Params, Id> {
+  return {
+    id,
+    ...(directives ? { directives } : {}),
+  } as PartialConsumerRequest<Params, Id>;
+}
+
 /**
  * Like {@link wrapProducer}, but for a "computing producer" whose value is a
  * function of an `Input` rather than a lookup by id. You provide `hashInput`
@@ -186,29 +260,14 @@ export function wrapComputingProducer<
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 >(
-  options: Omit<WrapProducerOptions<Params>, "isCacheable"> & {
-    cache: PublicInterface<Cache<Spec, Validators, Params>>;
-    hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>;
-    isCacheable?(this: void, input: Input): boolean;
-  },
+  options: ComputingProducerOptions<Input, Spec, Validators, Params>,
   producer: (
     input: Input,
     producerOptions?: { signal?: AbortSignal },
   ) => Promise<ComputingProducerResult<Input, Spec, Validators, Params>>,
 ) {
-  const {
-    cache,
-    hashInput,
-    isCacheable: isInputCacheable,
-    ...wrapOptions
-  } = options;
-  const registry = new InputRegistry<Input>();
-  const hashSupplementals = makeSupplementalHasher<
-    Input,
-    Spec,
-    Validators,
-    Params
-  >(hashInput);
+  const { cache, hashInput, registry, hashSupplementals, baseOptions } =
+    computingProducerSetup<Input, Spec, Validators, Params>(options);
 
   // `registry.get` runs synchronously before `producer` is invoked, so the
   // input is read while still registered (see InputRegistry docs). The cast
@@ -225,12 +284,7 @@ export function wrapComputingProducer<
 
   const wrapped = wrapProducer<Spec, Validators, Params>(
     cache,
-    {
-      ...wrapOptions,
-      ...(isInputCacheable
-        ? { isCacheable: (id: string) => isInputCacheable(registry.get(id)) }
-        : {}),
-    },
+    baseOptions,
     internalProducer,
   );
 
@@ -248,17 +302,10 @@ export function wrapComputingProducer<
 
     registry.acquire(id, input);
     try {
-      // The cast bridges to `PartialConsumerRequest`, whose id/directives are
-      // `ReadonlyDeep`-wrapped and so opaque against the plain types here while
-      // `Spec` is generic — the same boundary coercion `wrapProducer` uses.
-      const request = {
-        id,
-        ...(callOptions?.directives
-          ? { directives: callOptions.directives }
-          : {}),
-      } as PartialConsumerRequest<Params, Spec["id"]>;
-
-      return await wrapped(request, signal ? { signal } : undefined);
+      return await wrapped(
+        buildComputingRequest<Params, Spec["id"]>(id, callOptions?.directives),
+        signal ? { signal } : undefined,
+      );
     } finally {
       registry.release(id);
     }
@@ -289,11 +336,7 @@ export function wrapBulkComputingProducer<
   Params extends AnyParams = AnyParams,
   ErrorType extends Error = Error,
 >(
-  options: Omit<WrapProducerOptions<Params>, "isCacheable"> & {
-    cache: PublicInterface<Cache<Spec, Validators, Params>>;
-    hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>;
-    isCacheable?(this: void, input: Input): boolean;
-  },
+  options: ComputingProducerOptions<Input, Spec, Validators, Params>,
   producer: (
     inputs: readonly Input[],
     producerOptions?: { signal?: AbortSignal },
@@ -301,19 +344,8 @@ export function wrapBulkComputingProducer<
     (ComputingProducerResult<Input, Spec, Validators, Params> | ErrorType)[]
   >,
 ) {
-  const {
-    cache,
-    hashInput,
-    isCacheable: isInputCacheable,
-    ...wrapOptions
-  } = options;
-  const registry = new InputRegistry<Input>();
-  const hashSupplementals = makeSupplementalHasher<
-    Input,
-    Spec,
-    Validators,
-    Params
-  >(hashInput);
+  const { cache, hashInput, registry, hashSupplementals, baseOptions } =
+    computingProducerSetup<Input, Spec, Validators, Params>(options);
 
   // Each `registry.get` runs synchronously (while mapping) before `producer`
   // is invoked, so every input is read while still registered.
@@ -333,12 +365,7 @@ export function wrapBulkComputingProducer<
 
   const wrapped = wrapBulkProducer<Spec, Validators, Params, ErrorType>(
     cache,
-    {
-      ...wrapOptions,
-      ...(isInputCacheable
-        ? { isCacheable: (id: string) => isInputCacheable(registry.get(id)) }
-        : {}),
-    },
+    baseOptions,
     internalProducer,
   );
 
@@ -349,9 +376,9 @@ export function wrapBulkComputingProducer<
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
 
-    // See the single-producer variant for why the awaited hash is cast.
+    // `Promise.resolve` since `hashInput` may be synchronous; cast for the same
+    // reason as the single-producer variant.
     const ids = (await Promise.all(
-      // `Promise.resolve` since `hashInput` may be synchronous.
       inputs.map((input) => Promise.resolve(hashInput(input))),
     )) as Spec["id"][];
     signal?.throwIfAborted();
@@ -361,15 +388,12 @@ export function wrapBulkComputingProducer<
       registry.acquire(id, inputs[index]!);
     });
     try {
-      // See the single-producer variant for why the requests are cast.
-      const requests = ids.map((id) => ({
-        id,
-        ...(callOptions?.directives
-          ? { directives: callOptions.directives }
-          : {}),
-      })) as PartialConsumerRequest<Params, Spec["id"]>[];
-
-      return await wrapped(requests, signal ? { signal } : undefined);
+      return await wrapped(
+        ids.map((id) =>
+          buildComputingRequest<Params, Spec["id"]>(id, callOptions?.directives),
+        ),
+        signal ? { signal } : undefined,
+      );
     } finally {
       ids.forEach((id) => registry.release(id));
     }
@@ -572,17 +596,9 @@ type _ComputingInputBranch<
   Params extends AnyParams,
 > = {
   matches: (input: V["input"]) => boolean;
-  produce: (
-    input: V["input"],
-    options?: { signal?: AbortSignal },
-  ) => Promise<
-    ComputingProducerResult<
-      V["input"],
-      CacheSpec<string, V["content"]>,
-      Validators,
-      Params
-    >
-  >;
+  // Same shape `build()` returns and dispatches to — the dispatch-facing,
+  // id-agnostic producer (not the authoring-facing `ComputingBranchResult`).
+  produce: ComputingInputDispatchProducer<V, Validators, Params>;
 };
 
 /**
