@@ -72,27 +72,13 @@ import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
 const HASH_CONCURRENCY = 10;
 
 /**
- * A supplemental resource returned by a computing producer: like a plain
- * {@link ProducerResultResource}, but identified by the **input** it would be
- * computed from instead of a bare `id`. The wrapper hashes that input to derive
- * the storage id, so the resource is reachable by a later `compute(input)`.
- */
-export type ComputingSupplementalResource<
-  Input,
-  Spec extends CacheSpec,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-> = Spec extends unknown
-  ? Omit<ProducerResultResource<Spec, Validators, Params>, "id"> & {
-      input: Input;
-    }
-  : never;
-
-/**
  * What a computing producer returns: like a plain
  * {@link RequestPairedProducerResult}, but the primary carries no `id` (it's
- * stamped on from the derived hash) and `supplementalResources` are keyed by
- * input (see {@link ComputingSupplementalResource}).
+ * stamped on from the derived hash), and each `supplementalResources` entry is
+ * identified by the **input** it would be computed from rather than a bare `id`
+ * (otherwise it's a plain {@link ProducerResultResource}). The wrapper hashes
+ * each supplemental's input to derive its storage id, so a supplemental is
+ * reachable by a later `compute(input)`.
  */
 export type ComputingProducerResult<
   Input,
@@ -103,12 +89,11 @@ export type ComputingProducerResult<
   RequestPairedProducerResult<Spec, Validators, Params>,
   "id" | "supplementalResources"
 > & {
-  supplementalResources?: ComputingSupplementalResource<
-    Input,
-    Spec,
-    Validators,
-    Params
-  >[];
+  supplementalResources?: (Spec extends unknown
+    ? Omit<ProducerResultResource<Spec, Validators, Params>, "id"> & {
+        input: Input;
+      }
+    : never)[];
 };
 
 /**
