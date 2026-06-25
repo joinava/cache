@@ -28,13 +28,15 @@ export { default as wrapProducer } from "./utils/wrapProducer.js";
 export type { CacheResultOutcome } from "./utils/wrapProducer.js";
 export {
   computingProducerByInputType,
-  wrapBulkComputingProducer,
-  wrapComputingProducer,
   type ComputingProducerByInputTypeBuilder,
   type ComputingVariant,
   type ComputingVariantSupplemental,
   type ContentForVariants,
   type InputForVariants,
+} from "./utils/computingProducerByInputType.js";
+export {
+  wrapBulkComputingProducer,
+  wrapComputingProducer,
 } from "./utils/wrapComputingProducer.js";
 
 // Diagnostics channel for cache result events

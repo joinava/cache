@@ -12,11 +12,13 @@ import type {
 } from "../types/index.js";
 import {
   computingProducerByInputType,
-  wrapBulkComputingProducer,
-  wrapComputingProducer,
   type ComputingVariant,
   type ContentForVariants,
   type InputForVariants,
+} from "./computingProducerByInputType.js";
+import {
+  wrapBulkComputingProducer,
+  wrapComputingProducer,
 } from "./wrapComputingProducer.js";
 
 type Spec = CacheSpec<string, string>;
