@@ -12,7 +12,6 @@ import type {
   RequestPairedProducer,
   RequestPairedProducerResult,
 } from "../types/index.js";
-import { InputRegistry } from "./inputRegistry.js";
 import type { PartialConsumerRequest } from "./requestPairedProducerUtils.js";
 import { wrapBulkProducer, type BulkProducer } from "./wrapBulkProducer.js";
 import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
@@ -104,6 +103,67 @@ export type ComputingProducerResult<
   >[];
 };
 
+/**
+ * A reference-counted registry mapping a derived cache id back to the input it
+ * was hashed from, so the internal producer can recover the input on a miss.
+ *
+ * Reference counting (rather than a plain set/delete) is required because of
+ * request collapsing: several concurrent calls for the same input derive the
+ * same id and may share a single producer call. If the first caller to settle
+ * deleted the entry, a still-in-flight caller (or the shared producer call)
+ * could find it missing. Each call `acquire`s on the way in and `release`s in a
+ * `finally`; the entry is dropped only when the last holder releases it. This
+ * keeps the map bounded (unlike a process-lifetime map), since nothing is
+ * retained past the calls that need it.
+ *
+ * Soundness of "release after the wrapped call settles": the underlying
+ * `wrapProducer`/`wrapBulkProducer` invoke the producer *synchronously* while
+ * the wrapped call is still running (including the fire-and-forget
+ * stale-while-revalidate refresh), and our internal producer reads the input as
+ * its first, synchronous step — so the read always happens before the release.
+ */
+class InputRegistry<Input> {
+  private readonly entries = new Map<
+    string,
+    { input: Input; refCount: number }
+  >();
+
+  acquire(id: string, input: Input): void {
+    const existing = this.entries.get(id);
+    if (existing) {
+      existing.refCount += 1;
+      // Keep the latest input. For a given id the inputs are equal (barring an
+      // astronomically unlikely hash collision), so this is a no-op in practice.
+      existing.input = input;
+    } else {
+      this.entries.set(id, { input, refCount: 1 });
+    }
+  }
+
+  get(id: string): Input {
+    const entry = this.entries.get(id);
+    if (entry === undefined) {
+      throw new Error(
+        `wrapComputingProducer: no input is registered for cache id "${id}". ` +
+          "The producer was invoked for a key this wrapper did not produce, " +
+          "which should be impossible (it would indicate a hash collision or a bug).",
+      );
+    }
+    return entry.input;
+  }
+
+  release(id: string): void {
+    const entry = this.entries.get(id);
+    if (entry === undefined) {
+      return;
+    }
+    entry.refCount -= 1;
+    if (entry.refCount <= 0) {
+      this.entries.delete(id);
+    }
+  }
+}
+
 /** Shared options for {@link wrapComputingProducer} / {@link wrapBulkComputingProducer}. */
 type ComputingProducerOptions<
   Input,
@@ -115,51 +175,6 @@ type ComputingProducerOptions<
   hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>;
   isCacheable?(this: void, input: Input): boolean;
 };
-
-/**
- * Shared setup for both computing wrappers: splits out the cache and hashing,
- * builds the input registry and supplemental hasher, and adapts the
- * input-based `isCacheable` to the id-based one `wrapProducer` expects.
- */
-function computingProducerSetup<
-  Input,
-  Spec extends CacheSpec,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
->(
-  options: ComputingProducerOptions<Input, Spec, Validators, Params>,
-): {
-  cache: PublicInterface<Cache<Spec, Validators, Params>>;
-  hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>;
-  registry: InputRegistry<Input>;
-  hashSupplementals: (
-    result: ComputingProducerResult<Input, Spec, Validators, Params>,
-  ) => Promise<RequestPairedProducerResult<Spec, Validators, Params>>;
-  baseOptions: WrapProducerOptions<Params>;
-} {
-  const {
-    cache,
-    hashInput,
-    isCacheable: isInputCacheable,
-    ...wrapOptions
-  } = options;
-  const registry = new InputRegistry<Input>();
-  const hashSupplementals = makeSupplementalHasher<
-    Input,
-    Spec,
-    Validators,
-    Params
-  >(hashInput);
-  const baseOptions: WrapProducerOptions<Params> = {
-    ...wrapOptions,
-    // `registry.get` runs synchronously inside `wrapProducer`'s `isCacheable`
-    // check, while the id is still registered.
-    ...(isInputCacheable
-      ? { isCacheable: (id: string) => isInputCacheable(registry.get(id)) }
-      : {}),
-  };
-  return { cache, hashInput, registry, hashSupplementals, baseOptions };
-}
 
 /**
  * Builds the consumer request for a derived id. The cast bridges to
@@ -207,8 +222,19 @@ export function wrapComputingProducer<
     producerOptions?: { signal?: AbortSignal },
   ) => Promise<ComputingProducerResult<Input, Spec, Validators, Params>>,
 ) {
-  const { cache, hashInput, registry, hashSupplementals, baseOptions } =
-    computingProducerSetup<Input, Spec, Validators, Params>(options);
+  const {
+    cache,
+    hashInput,
+    isCacheable: isInputCacheable,
+    ...wrapOptions
+  } = options;
+  const registry = new InputRegistry<Input>();
+  const hashSupplementals = makeSupplementalHasher<
+    Input,
+    Spec,
+    Validators,
+    Params
+  >(hashInput);
 
   // `registry.get` runs synchronously before `producer` is invoked, so the
   // input is read while still registered (see InputRegistry docs). The cast
@@ -225,7 +251,14 @@ export function wrapComputingProducer<
 
   const wrapped = wrapProducer<Spec, Validators, Params>(
     cache,
-    baseOptions,
+    {
+      ...wrapOptions,
+      // `registry.get` runs synchronously inside `wrapProducer`'s `isCacheable`
+      // check, while the id is still registered.
+      ...(isInputCacheable
+        ? { isCacheable: (id: string) => isInputCacheable(registry.get(id)) }
+        : {}),
+    },
     internalProducer,
   );
 
@@ -285,8 +318,19 @@ export function wrapBulkComputingProducer<
     (ComputingProducerResult<Input, Spec, Validators, Params> | ErrorType)[]
   >,
 ) {
-  const { cache, hashInput, registry, hashSupplementals, baseOptions } =
-    computingProducerSetup<Input, Spec, Validators, Params>(options);
+  const {
+    cache,
+    hashInput,
+    isCacheable: isInputCacheable,
+    ...wrapOptions
+  } = options;
+  const registry = new InputRegistry<Input>();
+  const hashSupplementals = makeSupplementalHasher<
+    Input,
+    Spec,
+    Validators,
+    Params
+  >(hashInput);
 
   // Each `registry.get` runs synchronously (while mapping) before `producer`
   // is invoked, so every input is read while still registered.
@@ -306,7 +350,14 @@ export function wrapBulkComputingProducer<
 
   const wrapped = wrapBulkProducer<Spec, Validators, Params, ErrorType>(
     cache,
-    baseOptions,
+    {
+      ...wrapOptions,
+      // `registry.get` runs synchronously inside `wrapBulkProducer`'s
+      // `isCacheable` check, while the id is still registered.
+      ...(isInputCacheable
+        ? { isCacheable: (id: string) => isInputCacheable(registry.get(id)) }
+        : {}),
+    },
     internalProducer,
   );
 
