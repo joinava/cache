@@ -311,15 +311,16 @@ export function wrapBulkComputingProducer<
       registry.acquire(id, inputs[index]!);
     });
     try {
-      // See the single-producer variant for why the requests are cast.
-      const requests = ids.map((id) => ({
-        id,
-        ...(callOptions?.directives
-          ? { directives: callOptions.directives }
-          : {}),
-      })) as PartialConsumerRequest<Params, Spec["id"]>[];
-
-      return await wrapped(requests, signal ? { signal } : undefined);
+      return await wrapped(
+        // See the single-producer variant for why the requests are cast.
+        ids.map((id) => ({
+          id,
+          ...(callOptions?.directives
+            ? { directives: callOptions.directives }
+            : {}),
+        })) as PartialConsumerRequest<Params, Spec["id"]>[],
+        signal ? { signal } : undefined,
+      );
     } finally {
       ids.forEach((id) => registry.release(id));
     }
