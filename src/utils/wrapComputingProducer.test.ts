@@ -37,6 +37,46 @@ const contentOf = (
   return entry.content;
 };
 
+// --- Multi-spec (heterogeneous / union CacheSpec) fixtures ---
+//
+// A computing producer dispatches on its *input*, not on the id, so — unlike a
+// plain multi-id-type producer (which needs `producerByIdType`) — it can just
+// return the union of variant results directly.
+type Story = { id: string; title: string };
+type MultiSpec =
+  | CacheSpec<`story:${string}`, Story>
+  | CacheSpec<`collection:${string}`, Story[]>;
+type MultiInput =
+  | { kind: "story"; id: string }
+  | { kind: "collection"; ids: string[] };
+
+const hashMultiInput = (input: MultiInput): MultiSpec["id"] =>
+  input.kind === "story"
+    ? `story:${input.id}`
+    : `collection:${input.ids.join(",")}`;
+
+const computeMulti = (
+  input: MultiInput,
+): RequestPairedProducerResult<MultiSpec, AnyValidators, AnyParams> =>
+  input.kind === "story"
+    ? {
+        content: { id: input.id, title: `Story ${input.id}` },
+        directives: { freshUntilAge: 100 },
+      }
+    : {
+        content: input.ids.map((id) => ({ id, title: `Story ${id}` })),
+        directives: { freshUntilAge: 100 },
+      };
+
+const multiContentOf = (
+  entry: Entry<MultiSpec, AnyValidators, AnyParams> | Error,
+): Story | Story[] => {
+  if (entry instanceof Error) {
+    throw entry;
+  }
+  return entry.content;
+};
+
 describe("wrapComputingProducer", () => {
   let cache: Cache<Spec>;
 
@@ -201,5 +241,75 @@ describe("wrapBulkComputingProducer", () => {
     const results = await compute([{ text: "a" }, { text: "b" }]);
     expect(results.map(contentOf)).to.deep.eq(["A", "B"]);
     expect(producer.mock.callCount()).to.eq(1);
+  });
+});
+
+describe("computing producers with a multi-spec (union) cache", () => {
+  let cache: Cache<MultiSpec>;
+
+  beforeEach(() => {
+    cache = new Cache(new MemoryStore());
+  });
+
+  afterEach(async () => cache.close());
+
+  it("caches and returns the right content type per input variant", async () => {
+    const producer = mock.fn(async (input: MultiInput) => computeMulti(input));
+    const compute = wrapComputingProducer<MultiInput, MultiSpec>(
+      { cache, hashInput: hashMultiInput },
+      producer,
+    );
+
+    const story = await compute({ kind: "story", id: "1" });
+    expect(story.content).to.deep.eq({ id: "1", title: "Story 1" });
+
+    const collection = await compute({
+      kind: "collection",
+      ids: ["1", "2"],
+    });
+    expect(collection.content).to.deep.eq([
+      { id: "1", title: "Story 1" },
+      { id: "2", title: "Story 2" },
+    ]);
+
+    // The two variants are keyed separately (different derived ids).
+    expect(producer.mock.callCount()).to.eq(2);
+
+    // Repeats of each are served from the cache.
+    await compute({ kind: "story", id: "1" });
+    await compute({ kind: "collection", ids: ["1", "2"] });
+    expect(producer.mock.callCount()).to.eq(2);
+  });
+
+  it("partitions a mixed-variant bulk batch and aligns results", async () => {
+    const producer = mock.fn(async (inputs: readonly MultiInput[]) =>
+      inputs.map((input) => computeMulti(input)),
+    );
+    const compute = wrapBulkComputingProducer<MultiInput, MultiSpec>(
+      { cache, hashInput: hashMultiInput },
+      producer,
+    );
+
+    // Prime the story.
+    await compute([{ kind: "story", id: "a" }]);
+    expect(producer.mock.callCount()).to.eq(1);
+
+    // Mixed batch: the story hits; the collection misses.
+    const results = await compute([
+      { kind: "story", id: "a" },
+      { kind: "collection", ids: ["x", "y"] },
+    ]);
+    expect(producer.mock.callCount()).to.eq(2);
+    expect(producer.mock.calls[1]?.arguments[0]).to.deep.eq([
+      { kind: "collection", ids: ["x", "y"] },
+    ]);
+
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- fixed-length result
+    expect(multiContentOf(results[0]!)).to.deep.eq({ id: "a", title: "Story a" });
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- fixed-length result
+    expect(multiContentOf(results[1]!)).to.deep.eq([
+      { id: "x", title: "Story x" },
+      { id: "y", title: "Story y" },
+    ]);
   });
 });
