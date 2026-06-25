@@ -8,6 +8,7 @@ import type {
   AnyValidators,
   ConsumerDirectives,
   ConsumerRequest,
+  ProducerResultResource,
   RequestPairedProducer,
   RequestPairedProducerResult,
 } from "../types/index.js";
@@ -36,84 +37,70 @@ import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
  * `wrapBulkProducer` (same caching, request-collapsing, stale-while-revalidate,
  * abort, and diagnostics behavior; see {@link WrapProducerOptions}).
  *
+ * ## Supplemental resources are keyed by input, not id
+ *
+ * Like plain producers, a computing producer can return `supplementalResources`
+ * — values it produced as a byproduct that are worth caching — and a union
+ * `CacheSpec` lets those be a different content type than the primary (the
+ * classic "computing a collection also yields its individual items" case). The
+ * one twist that follows from keys being input-hashes: a supplemental is
+ * identified by the **input** it would be computed from, not a bare id. The
+ * wrapper hashes each supplemental's input the same way it hashes the primary
+ * input, so a later `compute(thatInput)` finds it as a cache hit. (A bare id
+ * would be unreachable, since computing lookups only ever go through
+ * `hashInput`.)
+ *
+ * ## What the types can't check
+ *
+ * For a union `CacheSpec`, the type system can't verify that `hashInput` maps
+ * each input variant to an id whose spec variant matches the content the
+ * producer pairs with that input — `hashInput` and the producer are separate
+ * functions. Keeping them coherent per input variant is the caller's
+ * responsibility, exactly as for multi-id-type plain producers (which is why
+ * `producerByIdType` exists).
+ *
  * @module
  */
 
 /**
- * Derives the cache id for a computing producer from its input. May be sync or
- * async (e.g. to offload a large hash to a worker pool). Returns the cache's
- * `id` type, so callers can mint a branded key type from the hash and have the
- * type system prove the right input fields went into it.
+ * A supplemental resource returned by a computing producer: like a plain
+ * {@link ProducerResultResource}, but identified by the **input** it would be
+ * computed from instead of a bare `id`. The wrapper hashes that input to derive
+ * the storage id, so the resource is reachable by a later `compute(input)`.
  */
-export type InputHasher<Input, Spec extends CacheSpec> = (
-  input: Input,
-) => Spec["id"] | Promise<Spec["id"]>;
-
-/**
- * Options for {@link wrapComputingProducer} / {@link wrapBulkComputingProducer}.
- *
- * Identical to {@link WrapProducerOptions}, except:
- * - `cache` (required) is the {@link Cache} instance to read from / write to.
- *   It lives in the options object (rather than as a separate argument like
- *   `wrapProducer`'s `cache`) so the whole configuration is one value.
- * - `hashInput` (required) derives the cache id from the input.
- * - `isCacheable`, if provided, receives the **input** rather than an id, since
- *   the input — not the opaque hash — is what a caller can meaningfully decide
- *   cacheability from.
- */
-export type WrapComputingProducerOptions<
+type ComputingSupplementalResource<
   Input,
   Spec extends CacheSpec,
-  Validators extends AnyValidators = AnyValidators,
-  Params extends AnyParams = AnyParams,
-> = Omit<WrapProducerOptions<Params>, "isCacheable"> & {
-  cache: PublicInterface<Cache<Spec, Validators, Params>>;
-  hashInput: InputHasher<Input, Spec>;
-  isCacheable?(this: void, input: Input): boolean;
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = Spec extends unknown
+  ? Omit<ProducerResultResource<Spec, Validators, Params>, "id"> & {
+      input: Input;
+    }
+  : never;
+
+/**
+ * What a computing producer returns: like a plain
+ * {@link RequestPairedProducerResult}, but the primary carries no `id` (it's
+ * stamped on from the derived hash) and `supplementalResources` are keyed by
+ * input (see {@link ComputingSupplementalResource}).
+ */
+type ComputingProducerResult<
+  Input,
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = Omit<
+  RequestPairedProducerResult<Spec, Validators, Params>,
+  "id" | "supplementalResources"
+> & {
+  supplementalResources?: ComputingSupplementalResource<
+    Input,
+    Spec,
+    Validators,
+    Params
+  >[];
 };
-
-/**
- * Per-call options for the function returned by {@link wrapComputingProducer} /
- * {@link wrapBulkComputingProducer}: the consumer-side cache directives (e.g.
- * `maxAge` to bypass, `maxStale` to tolerate staleness) and an abort signal.
- */
-export type ComputingProducerCallOptions = {
-  directives?: ConsumerDirectives;
-  signal?: AbortSignal;
-};
-
-/**
- * A producer for {@link wrapComputingProducer}: computes the value from the
- * full `Input` (never an id). Returns the same {@link RequestPairedProducerResult}
- * shape as a plain producer — the cache id is stamped on from the request, so
- * the result must not include one.
- */
-export type ComputingProducer<
-  Input,
-  Spec extends CacheSpec,
-  Validators extends AnyValidators = AnyValidators,
-  Params extends AnyParams = AnyParams,
-> = (
-  input: Input,
-  options?: { signal?: AbortSignal },
-) => Promise<RequestPairedProducerResult<Spec, Validators, Params>>;
-
-/**
- * The bulk analogue of {@link ComputingProducer}: computes values for an array
- * of inputs, returning a result (or `ErrorType`) per input, aligned by index.
- */
-export type BulkComputingProducer<
-  Input,
-  Spec extends CacheSpec,
-  Validators extends AnyValidators = AnyValidators,
-  Params extends AnyParams = AnyParams,
-  ErrorType extends Error = Error,
-> = (
-  inputs: readonly Input[],
-  options?: { signal?: AbortSignal },
-) => Promise<
-  (RequestPairedProducerResult<Spec, Validators, Params> | ErrorType)[]
->;
 
 /**
  * A reference-counted registry mapping a derived cache id back to the input it
@@ -184,8 +171,14 @@ class InputRegistry<Input> {
  *
  * See the module docs for when to use this vs. {@link wrapProducer}.
  *
- * @param options - See {@link WrapComputingProducerOptions} (includes the `cache`).
- * @param producer - Computes the value from the full input on a cache miss.
+ * @param options - The same options as {@link wrapProducer}, plus: `cache` (the
+ *   {@link Cache} to use — in the options object rather than a separate
+ *   argument); `hashInput`, which derives the cache id from the input (sync or
+ *   async, and returns the cache's `id` type so callers can mint a branded key);
+ *   and an `isCacheable` that receives the **input** rather than an opaque id.
+ * @param producer - Computes the value from the full input on a cache miss. See
+ *   {@link ComputingProducerResult} for the return shape (no primary `id`;
+ *   supplemental resources keyed by input).
  */
 export function wrapComputingProducer<
   Input,
@@ -193,8 +186,15 @@ export function wrapComputingProducer<
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 >(
-  options: WrapComputingProducerOptions<Input, Spec, Validators, Params>,
-  producer: ComputingProducer<Input, Spec, Validators, Params>,
+  options: Omit<WrapProducerOptions<Params>, "isCacheable"> & {
+    cache: PublicInterface<Cache<Spec, Validators, Params>>;
+    hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>;
+    isCacheable?(this: void, input: Input): boolean;
+  },
+  producer: (
+    input: Input,
+    producerOptions?: { signal?: AbortSignal },
+  ) => Promise<ComputingProducerResult<Input, Spec, Validators, Params>>,
 ) {
   const {
     cache,
@@ -203,20 +203,25 @@ export function wrapComputingProducer<
     ...wrapOptions
   } = options;
   const registry = new InputRegistry<Input>();
+  const hashSupplementals = makeSupplementalHasher<
+    Input,
+    Spec,
+    Validators,
+    Params
+  >(hashInput);
 
   // `registry.get` runs synchronously before `producer` is invoked, so the
   // input is read while still registered (see InputRegistry docs). The cast
   // bridges the explicit signature to the `RequestPairedProducer` conditional
   // type, which is opaque while `Spec` is an unresolved generic — the same
   // coercion `wrapProducer` performs internally.
-  const internalProducer = (<Id extends Spec["id"]>(
+  const internalProducer = (async <Id extends Spec["id"]>(
     req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
     producerOptions?: { signal?: AbortSignal },
-  ) =>
-    producer(
-      registry.get(req.id),
-      producerOptions,
-    )) as unknown as RequestPairedProducer<Spec, Validators, Params>;
+  ) => {
+    const input = registry.get(req.id);
+    return hashSupplementals(await producer(input, producerOptions));
+  }) as unknown as RequestPairedProducer<Spec, Validators, Params>;
 
   const wrapped = wrapProducer<Spec, Validators, Params>(
     cache,
@@ -231,7 +236,7 @@ export function wrapComputingProducer<
 
   const wrappedComputingProducer = async (
     input: Input,
-    callOptions?: ComputingProducerCallOptions,
+    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal },
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
@@ -273,8 +278,9 @@ export function wrapComputingProducer<
  *
  * See the module docs for when to use this vs. {@link wrapBulkProducer}.
  *
- * @param options - See {@link WrapComputingProducerOptions} (includes the `cache`).
- * @param producer - Computes the values for the missed inputs on a cache miss.
+ * @param options - Same as {@link wrapComputingProducer}'s options.
+ * @param producer - Computes the values for the missed inputs on a cache miss,
+ *   returning a result (or `ErrorType`) per input, aligned by index.
  */
 export function wrapBulkComputingProducer<
   Input,
@@ -283,8 +289,17 @@ export function wrapBulkComputingProducer<
   Params extends AnyParams = AnyParams,
   ErrorType extends Error = Error,
 >(
-  options: WrapComputingProducerOptions<Input, Spec, Validators, Params>,
-  producer: BulkComputingProducer<Input, Spec, Validators, Params, ErrorType>,
+  options: Omit<WrapProducerOptions<Params>, "isCacheable"> & {
+    cache: PublicInterface<Cache<Spec, Validators, Params>>;
+    hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>;
+    isCacheable?(this: void, input: Input): boolean;
+  },
+  producer: (
+    inputs: readonly Input[],
+    producerOptions?: { signal?: AbortSignal },
+  ) => Promise<
+    (ComputingProducerResult<Input, Spec, Validators, Params> | ErrorType)[]
+  >,
 ) {
   const {
     cache,
@@ -293,17 +308,28 @@ export function wrapBulkComputingProducer<
     ...wrapOptions
   } = options;
   const registry = new InputRegistry<Input>();
+  const hashSupplementals = makeSupplementalHasher<
+    Input,
+    Spec,
+    Validators,
+    Params
+  >(hashInput);
 
   // Each `registry.get` runs synchronously (while mapping) before `producer`
   // is invoked, so every input is read while still registered.
   const internalProducer: BulkProducer<Spec, Validators, Params, ErrorType> = (
     reqs,
     producerOptions,
-  ) =>
-    producer(
-      reqs.map((req) => registry.get(req.id)),
-      producerOptions,
+  ) => {
+    const inputs = reqs.map((req) => registry.get(req.id));
+    return producer(inputs, producerOptions).then((results) =>
+      Promise.all(
+        results.map(async (result) =>
+          result instanceof Error ? result : hashSupplementals(result),
+        ),
+      ),
     );
+  };
 
   const wrapped = wrapBulkProducer<Spec, Validators, Params, ErrorType>(
     cache,
@@ -318,7 +344,7 @@ export function wrapBulkComputingProducer<
 
   const wrappedBulkComputingProducer = async (
     inputs: readonly Input[],
-    callOptions?: ComputingProducerCallOptions,
+    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal },
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
@@ -353,4 +379,294 @@ export function wrapBulkComputingProducer<
   wrappedBulkComputingProducer.cache = cache;
 
   return wrappedBulkComputingProducer;
+}
+
+/**
+ * Builds the function that turns a {@link ComputingProducerResult} into the
+ * plain {@link RequestPairedProducerResult} the underlying producer machinery
+ * expects, by hashing each supplemental resource's `input` into its storage id.
+ *
+ * The casts reconstruct the canonical result shape from the computing result
+ * (which differs only by how supplementals are keyed); TS can't track the
+ * distributive transform across the `Omit`/re-add.
+ */
+function makeSupplementalHasher<
+  Input,
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+>(hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>) {
+  return async (
+    result: ComputingProducerResult<Input, Spec, Validators, Params>,
+  ): Promise<RequestPairedProducerResult<Spec, Validators, Params>> => {
+    const { supplementalResources, ...primary } = result;
+    if (!supplementalResources || supplementalResources.length === 0) {
+      return primary as unknown as RequestPairedProducerResult<
+        Spec,
+        Validators,
+        Params
+      >;
+    }
+
+    const hashed = await Promise.all(
+      supplementalResources.map(async (resource) => {
+        const { input, ...rest } = resource;
+        return { ...rest, id: await Promise.resolve(hashInput(input)) };
+      }),
+    );
+
+    return {
+      ...primary,
+      supplementalResources: hashed,
+    } as unknown as RequestPairedProducerResult<Spec, Validators, Params>;
+  };
+}
+
+/**
+ * One variant of a heterogeneous computing cache: pairs an input shape with the
+ * content computed from it. The set of variants is a *union* of these (no
+ * names) — see {@link computingProducerByInputType}.
+ *
+ * There's deliberately no `id` here: a computing cache's id is just
+ * `hashInput(input)`, supplied separately to {@link wrapComputingProducer}, and
+ * can be any `string` subtype (e.g. `` `extract:${string}` ``) so the resulting
+ * spec composes with other specs.
+ */
+export type ComputingVariant<Input = unknown, Content = unknown> = {
+  input: Input;
+  content: Content;
+};
+
+/** The (union) input accepted across a set of computing variants. */
+export type InputForVariants<V extends ComputingVariant> = V["input"];
+
+/** The (union) content produced across a set of computing variants. */
+export type ContentForVariants<V extends ComputingVariant> = V["content"];
+
+/** The content a given input variant produces, selected across the union. */
+type ContentForInput<V extends ComputingVariant, I> = V extends unknown
+  ? I extends V["input"]
+    ? V["content"]
+    : never
+  : never;
+
+/**
+ * A supplemental resource for a {@link computingProducerByInputType} producer:
+ * a discriminated union over the variants, each pairing a variant's `input`
+ * with that *same* variant's `content`. So a supplemental whose `input` is one
+ * variant's input must carry that variant's content — that's what makes
+ * "computing a collection also caches its items" type-safe.
+ */
+export type ComputingVariantSupplemental<
+  V extends ComputingVariant,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+> = V extends unknown
+  ? Omit<
+      ProducerResultResource<CacheSpec<string, V["content"]>, Validators, Params>,
+      "id"
+    > & { input: V["input"] }
+  : never;
+
+/** What a single `.when(...)` branch's `produce` returns. */
+type ComputingBranchResult<
+  V extends ComputingVariant,
+  NarrowedInput,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = Omit<
+  ComputingProducerResult<
+    NarrowedInput,
+    CacheSpec<string, ContentForInput<V, NarrowedInput>>,
+    Validators,
+    Params
+  >,
+  "supplementalResources"
+> & {
+  supplementalResources?: ComputingVariantSupplemental<V, Validators, Params>[];
+};
+
+/**
+ * The producer built by {@link computingProducerByInputType}: an ordinary,
+ * id-agnostic computing producer (its result omits the primary `id` and keys
+ * supplementals by input), so it composes with whatever `string`-subtype id the
+ * cache / `hashInput` use.
+ */
+type ComputingInputDispatchProducer<
+  V extends ComputingVariant,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = (
+  input: V["input"],
+  options?: { signal?: AbortSignal },
+) => Promise<
+  ComputingProducerResult<
+    V["input"],
+    CacheSpec<string, V["content"]>,
+    Validators,
+    Params
+  >
+>;
+
+/**
+ * Error type produced by `.build()` when the chain hasn't covered every input
+ * in `V["input"]`. Surfaces as a TS error wherever the build result is used
+ * (e.g. the `wrapComputingProducer(...)` call site), naming the missing inputs.
+ */
+type _NonExhaustiveComputingBuildError<Missing> = readonly [
+  "computingProducerByInputType: builder is non-exhaustive; missing `.when(...)` branches for these inputs:",
+  Missing,
+];
+
+type _ComputingBuildResult<
+  V extends ComputingVariant,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  Covered extends V["input"],
+> = [Exclude<V["input"], Covered>] extends [never]
+  ? ComputingInputDispatchProducer<V, Validators, Params>
+  : _NonExhaustiveComputingBuildError<Exclude<V["input"], Covered>>;
+
+/**
+ * The fluent builder returned by {@link computingProducerByInputType}. Use
+ * `.when(...)` to add per-input-variant branches; each call infers its own
+ * `NarrowedInput` from the type guard, so the handler's `input` is concrete and
+ * TypeScript fully verifies the input → content correlation (and that any
+ * supplementals pair an input with that input's content). End with `.build()`.
+ *
+ * The phantom `Covered` parameter accumulates the handled inputs so `.build()`
+ * can statically verify the chain is exhaustive for `V["input"]`; a
+ * non-exhaustive chain makes `.build()` return a {@link
+ * _NonExhaustiveComputingBuildError} that isn't assignable to a producer.
+ */
+export type ComputingProducerByInputTypeBuilder<
+  V extends ComputingVariant,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  Covered extends V["input"] = never,
+> = {
+  readonly when: <NarrowedInput extends V["input"]>(
+    matches: (input: V["input"]) => input is NarrowedInput,
+    produce: (
+      input: NarrowedInput,
+      options?: { signal?: AbortSignal },
+    ) => Promise<ComputingBranchResult<V, NarrowedInput, Validators, Params>>,
+  ) => ComputingProducerByInputTypeBuilder<
+    V,
+    Validators,
+    Params,
+    Covered | NarrowedInput
+  >;
+  readonly build: () => _ComputingBuildResult<V, Validators, Params, Covered>;
+};
+
+type _ComputingInputBranch<
+  V extends ComputingVariant,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = {
+  matches: (input: V["input"]) => boolean;
+  produce: (
+    input: V["input"],
+    options?: { signal?: AbortSignal },
+  ) => Promise<ComputingBranchResult<V, V["input"], Validators, Params>>;
+};
+
+/**
+ * Builds a correlated computing producer for a heterogeneous cache by
+ * dispatching on the input variant — the computing analog of `producerByIdType`.
+ *
+ * You declare a `Variants` *union* (each variant pairing an input with its
+ * content) and add a branch per variant with `.when(guard, produce)`. Because
+ * each branch's `produce` is authored against a single, narrowed input, the
+ * type system enforces that it returns that variant's content, and that any
+ * `supplementalResources` pair a variant's input with that variant's content
+ * (so "computing a collection also caches its items" is checked end to end).
+ *
+ * The result is an ordinary computing producer: pass it (with a `hashInput`) to
+ * {@link wrapComputingProducer}, exactly like a hand-written one. As with the
+ * other computing wrappers, `hashInput` (input → id) is supplied separately and
+ * is the caller's responsibility to keep coherent with the variants — the types
+ * correlate input → content, not input → id. (The id can be any `string`
+ * subtype; the producer is id-agnostic, so it composes with a branded cache.)
+ *
+ * Branches are tried in declaration order; if none matches at runtime the
+ * producer rejects.
+ *
+ * ```ts
+ * type Variants =
+ *   | ComputingVariant<StoryInput, Story>
+ *   | ComputingVariant<CollInput, Story[]>;
+ *
+ * const compute = wrapComputingProducer(
+ *   { cache, hashInput },
+ *   computingProducerByInputType<Variants>()
+ *     .when((i): i is StoryInput => i.kind === "story", async (i) => ({ content: makeStory(i.id) }))
+ *     .when((i): i is CollInput => i.kind === "collection", async (i) => ({
+ *        content: i.ids.map(makeStory),
+ *        supplementalResources: i.ids.map((id) => ({ input: { kind: "story", id }, content: makeStory(id) })),
+ *     }))
+ *     .build(),
+ * );
+ * ```
+ */
+export function computingProducerByInputType<
+  V extends ComputingVariant,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+>(): ComputingProducerByInputTypeBuilder<V, Validators, Params> {
+  // Internal mutable list of accumulated branches; `.when(...)` appends and
+  // returns the same builder. The narrowed input type is erased here
+  // (`V["input"]` is the safe upper bound) — it was verified at each `.when`.
+  const branches: _ComputingInputBranch<V, Validators, Params>[] = [];
+
+  const builder = {
+    when(
+      matches: _ComputingInputBranch<V, Validators, Params>["matches"],
+      produce: _ComputingInputBranch<V, Validators, Params>["produce"],
+    ) {
+      branches.push({ matches, produce });
+      return builder;
+    },
+
+    build() {
+      const dispatch: ComputingInputDispatchProducer<V, Validators, Params> =
+        async (input, options) => {
+          for (const branch of branches) {
+            if (branch.matches(input)) {
+              // The guard confirmed `input` is in this branch's narrowed input,
+              // so `produce` is valid for it and its result is valid for the
+              // union spec (which is id-agnostic).
+              return (await branch.produce(
+                input,
+                options,
+              )) as unknown as ComputingProducerResult<
+                V["input"],
+                CacheSpec<string, V["content"]>,
+                Validators,
+                Params
+              >;
+            }
+          }
+          throw new Error(
+            `computingProducerByInputType: no branch matched the input ${JSON.stringify(input)}`,
+          );
+        };
+
+      // Runtime value is always a producer; in the non-exhaustive case the user
+      // gets a TS error at the consuming call site naming the missing inputs.
+      return dispatch as unknown as _ComputingBuildResult<
+        V,
+        Validators,
+        Params,
+        never
+      >;
+    },
+  };
+
+  return builder as unknown as ComputingProducerByInputTypeBuilder<
+    V,
+    Validators,
+    Params
+  >;
 }

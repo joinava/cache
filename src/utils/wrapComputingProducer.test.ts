@@ -9,11 +9,14 @@ import type {
   AnyValidators,
   CacheSpec,
   Entry,
-  RequestPairedProducerResult,
 } from "../types/index.js";
 import {
+  computingProducerByInputType,
   wrapBulkComputingProducer,
   wrapComputingProducer,
+  type ComputingVariant,
+  type ContentForVariants,
+  type InputForVariants,
 } from "./wrapComputingProducer.js";
 
 type Spec = CacheSpec<string, string>;
@@ -21,9 +24,7 @@ type Input = { text: string };
 
 const hashInput = (input: Input): string => `computed:${input.text}`;
 
-const result = (
-  content: string,
-): RequestPairedProducerResult<Spec, AnyValidators, AnyParams> => ({
+const result = (content: string) => ({
   content,
   directives: { freshUntilAge: 100 },
 });
@@ -31,46 +32,6 @@ const result = (
 const contentOf = (
   entry: Entry<Spec, AnyValidators, AnyParams> | Error,
 ): string => {
-  if (entry instanceof Error) {
-    throw entry;
-  }
-  return entry.content;
-};
-
-// --- Multi-spec (heterogeneous / union CacheSpec) fixtures ---
-//
-// A computing producer dispatches on its *input*, not on the id, so — unlike a
-// plain multi-id-type producer (which needs `producerByIdType`) — it can just
-// return the union of variant results directly.
-type Story = { id: string; title: string };
-type MultiSpec =
-  | CacheSpec<`story:${string}`, Story>
-  | CacheSpec<`collection:${string}`, Story[]>;
-type MultiInput =
-  | { kind: "story"; id: string }
-  | { kind: "collection"; ids: string[] };
-
-const hashMultiInput = (input: MultiInput): MultiSpec["id"] =>
-  input.kind === "story"
-    ? `story:${input.id}`
-    : `collection:${input.ids.join(",")}`;
-
-const computeMulti = (
-  input: MultiInput,
-): RequestPairedProducerResult<MultiSpec, AnyValidators, AnyParams> =>
-  input.kind === "story"
-    ? {
-        content: { id: input.id, title: `Story ${input.id}` },
-        directives: { freshUntilAge: 100 },
-      }
-    : {
-        content: input.ids.map((id) => ({ id, title: `Story ${id}` })),
-        directives: { freshUntilAge: 100 },
-      };
-
-const multiContentOf = (
-  entry: Entry<MultiSpec, AnyValidators, AnyParams> | Error,
-): Story | Story[] => {
   if (entry instanceof Error) {
     throw entry;
   }
@@ -97,7 +58,6 @@ describe("wrapComputingProducer", () => {
 
     const first = await compute({ text: "hello" });
     expect(first.content).to.eq("HELLO");
-    // The producer receives the full input object, never the derived id.
     expect(producer.mock.calls[0]?.arguments[0]).to.deep.eq({ text: "hello" });
 
     const second = await compute({ text: "hello" });
@@ -138,10 +98,6 @@ describe("wrapComputingProducer", () => {
   });
 
   it("keeps the input registered for concurrent un-collapsed calls (reference counting)", async () => {
-    // With collapsing disabled, both concurrent calls invoke the producer
-    // separately; the registry must keep the input until BOTH have read it.
-    // A naive set/delete would let the first finisher evict the entry before
-    // the second's producer read, throwing "no input registered".
     const producer = mock.fn(async (input: Input) => {
       await delay(20);
       return result(input.text);
@@ -159,10 +115,6 @@ describe("wrapComputingProducer", () => {
   });
 
   it("does not cache when isCacheable(input) is false (and re-registers the input each call)", async () => {
-    // Two sequential uncacheable calls both reach the producer via the
-    // registry, so this also proves the input is re-registered after the first
-    // call released it — a leaked-or-dropped entry would throw "no input
-    // registered" on the second call instead of producing a result.
     const producer = mock.fn(async (input: Input) => result(input.text));
     const compute = wrapComputingProducer<Input, Spec>(
       { cache, hashInput, isCacheable: (input) => input.text !== "skip" },
@@ -174,6 +126,34 @@ describe("wrapComputingProducer", () => {
     expect(first.content).to.eq("skip");
     expect(second.content).to.eq("skip");
     expect(producer.mock.callCount()).to.eq(2);
+  });
+
+  it("stores supplementals under their input's hash, so a later compute() hits", async () => {
+    const producer = mock.fn(async (input: Input) => ({
+      content: input.text.toUpperCase(),
+      directives: { freshUntilAge: 100 },
+      supplementalResources:
+        input.text === "primary"
+          ? [
+              {
+                input: { text: "side" },
+                content: "SIDE",
+                directives: { freshUntilAge: 100 },
+              },
+            ]
+          : [],
+    }));
+    const compute = wrapComputingProducer<Input, Spec>(
+      { cache, hashInput },
+      producer,
+    );
+
+    await compute({ text: "primary" });
+    expect(producer.mock.callCount()).to.eq(1);
+
+    const side = await compute({ text: "side" });
+    expect(side.content).to.eq("SIDE");
+    expect(producer.mock.callCount()).to.eq(1);
   });
 });
 
@@ -195,12 +175,10 @@ describe("wrapBulkComputingProducer", () => {
       producer,
     );
 
-    // Prime "b".
     await compute([{ text: "b" }]);
     expect(producer.mock.callCount()).to.eq(1);
     expect(producer.mock.calls[0]?.arguments[0]).to.deep.eq([{ text: "b" }]);
 
-    // a, b, c -> only a and c miss; results stay aligned to input order.
     const results = await compute([
       { text: "a" },
       { text: "b" },
@@ -244,8 +222,31 @@ describe("wrapBulkComputingProducer", () => {
   });
 });
 
-describe("computing producers with a multi-spec (union) cache", () => {
-  let cache: Cache<MultiSpec>;
+// --- computingProducerByInputType: heterogeneous, correlated variants ---
+
+type Story = { id: string; title: string };
+type StoryInput = { kind: "story"; id: string };
+type CollInput = { kind: "collection"; ids: string[] };
+type Variants =
+  | ComputingVariant<StoryInput, Story>
+  | ComputingVariant<CollInput, Story[]>;
+type VInput = InputForVariants<Variants>;
+type VContent = ContentForVariants<Variants>;
+// A branded id subtype: the resulting cache spec is `CacheSpec<`extract:${string}`, …>`,
+// which composes safely with other specs (and exercises id-agnostic assignability).
+type VSpec = CacheSpec<`extract:${string}`, VContent>;
+
+const makeStory = (id: string): Story => ({ id, title: `Story ${id}` });
+const isStory = (input: VInput): input is StoryInput => input.kind === "story";
+const isCollection = (input: VInput): input is CollInput =>
+  input.kind === "collection";
+const hashVariant = (input: VInput): VSpec["id"] =>
+  input.kind === "story"
+    ? `extract:story:${input.id}`
+    : `extract:collection:${input.ids.join(",")}`;
+
+describe("computingProducerByInputType", () => {
+  let cache: Cache<VSpec>;
 
   beforeEach(() => {
     cache = new Cache(new MemoryStore());
@@ -253,63 +254,89 @@ describe("computing producers with a multi-spec (union) cache", () => {
 
   afterEach(async () => cache.close());
 
-  it("caches and returns the right content type per input variant", async () => {
-    const producer = mock.fn(async (input: MultiInput) => computeMulti(input));
-    const compute = wrapComputingProducer<MultiInput, MultiSpec>(
-      { cache, hashInput: hashMultiInput },
-      producer,
+  it("dispatches by input variant and returns the right content per variant", async () => {
+    const produce = computingProducerByInputType<Variants>()
+      .when(isStory, async (input) => ({
+        content: makeStory(input.id),
+        directives: { freshUntilAge: 100 },
+      }))
+      .when(isCollection, async (input) => ({
+        content: input.ids.map(makeStory),
+        directives: { freshUntilAge: 100 },
+      }))
+      .build();
+    const compute = wrapComputingProducer(
+      { cache, hashInput: hashVariant },
+      produce,
     );
 
     const story = await compute({ kind: "story", id: "1" });
-    expect(story.content).to.deep.eq({ id: "1", title: "Story 1" });
+    expect(story.content).to.deep.eq(makeStory("1"));
 
-    const collection = await compute({
-      kind: "collection",
-      ids: ["1", "2"],
-    });
-    expect(collection.content).to.deep.eq([
-      { id: "1", title: "Story 1" },
-      { id: "2", title: "Story 2" },
-    ]);
-
-    // The two variants are keyed separately (different derived ids).
-    expect(producer.mock.callCount()).to.eq(2);
-
-    // Repeats of each are served from the cache.
-    await compute({ kind: "story", id: "1" });
-    await compute({ kind: "collection", ids: ["1", "2"] });
-    expect(producer.mock.callCount()).to.eq(2);
+    const collection = await compute({ kind: "collection", ids: ["1", "2"] });
+    expect(collection.content).to.deep.eq([makeStory("1"), makeStory("2")]);
   });
 
-  it("partitions a mixed-variant bulk batch and aligns results", async () => {
-    const producer = mock.fn(async (inputs: readonly MultiInput[]) =>
-      inputs.map((input) => computeMulti(input)),
+  it("populates cross-type supplementals: computing a collection caches its stories", async () => {
+    const storyProduce = mock.fn(async (input: StoryInput) => ({
+      content: makeStory(input.id),
+      directives: { freshUntilAge: 100 },
+    }));
+    const collectionProduce = mock.fn(async (input: CollInput) => ({
+      content: input.ids.map(makeStory),
+      directives: { freshUntilAge: 100 },
+      supplementalResources: input.ids.map((id) => ({
+        input: { kind: "story" as const, id },
+        content: makeStory(id),
+        directives: { freshUntilAge: 100 },
+      })),
+    }));
+    const produce = computingProducerByInputType<Variants>()
+      .when(isStory, storyProduce)
+      .when(isCollection, collectionProduce)
+      .build();
+    const compute = wrapComputingProducer(
+      { cache, hashInput: hashVariant },
+      produce,
     );
-    const compute = wrapBulkComputingProducer<MultiInput, MultiSpec>(
-      { cache, hashInput: hashMultiInput },
-      producer,
-    );
 
-    // Prime the story.
-    await compute([{ kind: "story", id: "a" }]);
-    expect(producer.mock.callCount()).to.eq(1);
+    await compute({ kind: "collection", ids: ["1", "2"] });
+    expect(collectionProduce.mock.callCount()).to.eq(1);
 
-    // Mixed batch: the story hits; the collection misses.
-    const results = await compute([
-      { kind: "story", id: "a" },
-      { kind: "collection", ids: ["x", "y"] },
-    ]);
-    expect(producer.mock.callCount()).to.eq(2);
-    expect(producer.mock.calls[1]?.arguments[0]).to.deep.eq([
-      { kind: "collection", ids: ["x", "y"] },
-    ]);
-
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- fixed-length result
-    expect(multiContentOf(results[0]!)).to.deep.eq({ id: "a", title: "Story a" });
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- fixed-length result
-    expect(multiContentOf(results[1]!)).to.deep.eq([
-      { id: "x", title: "Story x" },
-      { id: "y", title: "Story y" },
-    ]);
+    // Each story was cached as a supplemental keyed by its (story) input, so a
+    // later compute() for that story is a hit and never invokes storyProduce.
+    const s1 = await compute({ kind: "story", id: "1" });
+    expect(s1.content).to.deep.eq(makeStory("1"));
+    const s2 = await compute({ kind: "story", id: "2" });
+    expect(s2.content).to.deep.eq(makeStory("2"));
+    expect(storyProduce.mock.callCount()).to.eq(0);
   });
 });
+
+// Compile-time correlation checks: these `.when(...)` branches must fail to
+// type-check, proving the input → content (and supplemental) correlation.
+
+computingProducerByInputType<Variants>().when(
+  isStory,
+  // @ts-expect-error -- the story branch's `produce` must return Story content, not Story[]
+  async (input) => ({
+    content: [makeStory(input.id)],
+    directives: { freshUntilAge: 1 },
+  }),
+);
+
+computingProducerByInputType<Variants>().when(
+  isCollection,
+  // @ts-expect-error -- a story-input supplemental must carry Story content, not Story[]
+  async (input) => ({
+    content: input.ids.map(makeStory),
+    directives: { freshUntilAge: 1 },
+    supplementalResources: [
+      {
+        input: { kind: "story" as const, id: "x" },
+        content: [makeStory("x")],
+        directives: { freshUntilAge: 1 },
+      },
+    ],
+  }),
+);
