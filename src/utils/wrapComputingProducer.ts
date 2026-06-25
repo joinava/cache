@@ -362,18 +362,16 @@ function makeSupplementalHasher<
       >;
     }
 
-    const hashed = await Promise.all(
-      supplementalResources.map((resource) =>
-        limit(async () => {
-          const { input, ...rest } = resource;
-          return { ...rest, id: await Promise.resolve(hashInput(input)) };
-        }),
-      ),
-    );
-
     return {
       ...primary,
-      supplementalResources: hashed,
+      supplementalResources: await Promise.all(
+        supplementalResources.map((resource) =>
+          limit(async () => {
+            const { input, ...rest } = resource;
+            return { ...rest, id: await Promise.resolve(hashInput(input)) };
+          }),
+        ),
+      ),
     } as unknown as RequestPairedProducerResult<Spec, Validators, Params>;
   };
 }
