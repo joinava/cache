@@ -27,6 +27,18 @@ export { naiveGetMany } from "./utils/utils.js";
 export { wrapBulkProducer } from "./utils/wrapBulkProducer.js";
 export { default as wrapProducer } from "./utils/wrapProducer.js";
 export type { CacheResultOutcome } from "./utils/wrapProducer.js";
+export {
+  computingProducerByInputType,
+  type ComputingProducerByInputTypeBuilder,
+  type ComputingVariant,
+  type ComputingVariantSupplemental,
+  type ContentForVariants,
+  type InputForVariants,
+} from "./utils/computingProducerByInputType.js";
+export {
+  wrapBulkComputingProducer,
+  wrapComputingProducer,
+} from "./utils/wrapComputingProducer.js";
 
 // Diagnostics channels
 export {
