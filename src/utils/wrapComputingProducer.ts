@@ -194,19 +194,20 @@ export function wrapComputingProducer<
 
     registry.acquire(id, input);
     try {
-      // The cast bridges to `PartialConsumerRequest`, whose id/directives are
-      // `ReadonlyDeep`-wrapped and so opaque against the plain types here while
-      // `Spec` is generic — the same boundary coercion `wrapProducer` uses. The
-      // conditional spread avoids `directives: undefined` (rejected under
-      // `exactOptionalPropertyTypes`).
-      const request = {
-        id,
-        ...(callOptions?.directives
-          ? { directives: callOptions.directives }
-          : {}),
-      } as PartialConsumerRequest<Params, Spec["id"]>;
-
-      return await wrapped(request, signal ? { signal } : undefined);
+      return await wrapped(
+        // The cast bridges to `PartialConsumerRequest`, whose id/directives are
+        // `ReadonlyDeep`-wrapped and so opaque against the plain types here
+        // while `Spec` is generic — the same boundary coercion `wrapProducer`
+        // uses. The conditional spread avoids `directives: undefined` (rejected
+        // under `exactOptionalPropertyTypes`).
+        {
+          id,
+          ...(callOptions?.directives
+            ? { directives: callOptions.directives }
+            : {}),
+        } as PartialConsumerRequest<Params, Spec["id"]>,
+        signal ? { signal } : undefined,
+      );
     } finally {
       registry.release(id);
     }
