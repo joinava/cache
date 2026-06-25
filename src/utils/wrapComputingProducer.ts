@@ -50,14 +50,15 @@ import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
  * would be unreachable, since computing lookups only ever go through
  * `hashInput`.)
  *
- * ## What the types can't check
+ * ## Correlating input to content
  *
- * For a union `CacheSpec`, the type system can't verify that `hashInput` maps
- * each input variant to an id whose spec variant matches the content the
- * producer pairs with that input — `hashInput` and the producer are separate
- * functions. Keeping them coherent per input variant is the caller's
- * responsibility, exactly as for multi-id-type plain producers (which is why
- * `producerByIdType` exists).
+ * For a union `CacheSpec`, `wrapComputingProducer` alone can't verify that
+ * `hashInput` and the `producer` agree on a content type per input variant —
+ * they're separate functions, so that coherence is the caller's responsibility
+ * (just as a hand-written multi-id-type plain producer's would be). When you
+ * want it enforced, build the producer with {@link computingProducerByInputType}
+ * — the computing analog of `producerByIdType` — which dispatches per input
+ * variant and checks input → content (and supplementals) end to end.
  *
  * @module
  */
@@ -596,8 +597,6 @@ type _ComputingInputBranch<
   Params extends AnyParams,
 > = {
   matches: (input: V["input"]) => boolean;
-  // Same shape `build()` returns and dispatches to — the dispatch-facing,
-  // id-agnostic producer (not the authoring-facing `ComputingBranchResult`).
   produce: ComputingInputDispatchProducer<V, Validators, Params>;
 };
 
