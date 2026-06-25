@@ -560,6 +560,12 @@ export type ComputingProducerByInputTypeBuilder<
   readonly build: () => _ComputingBuildResult<V, Validators, Params, Covered>;
 };
 
+// The erased internal branch type for the `branches` array: the narrowed input
+// is widened back to the union, and the result is the dispatch-facing
+// (id-agnostic) `ComputingProducerResult` that `build()` returns — not the
+// authoring-facing `ComputingBranchResult` (whose correlated supplemental union
+// only makes sense paired with a *narrowed* input). Per-branch correlation is
+// enforced by the public generic `when`, not here.
 type _ComputingInputBranch<
   V extends ComputingVariant,
   Validators extends AnyValidators,
@@ -569,7 +575,14 @@ type _ComputingInputBranch<
   produce: (
     input: V["input"],
     options?: { signal?: AbortSignal },
-  ) => Promise<ComputingBranchResult<V, V["input"], Validators, Params>>;
+  ) => Promise<
+    ComputingProducerResult<
+      V["input"],
+      CacheSpec<string, V["content"]>,
+      Validators,
+      Params
+    >
+  >;
 };
 
 /**
@@ -634,18 +647,9 @@ export function computingProducerByInputType<
         async (input, options) => {
           for (const branch of branches) {
             if (branch.matches(input)) {
-              // The guard confirmed `input` is in this branch's narrowed input,
-              // so `produce` is valid for it and its result is valid for the
-              // union spec (which is id-agnostic).
-              return (await branch.produce(
-                input,
-                options,
-              )) as unknown as ComputingProducerResult<
-                V["input"],
-                CacheSpec<string, V["content"]>,
-                Validators,
-                Params
-              >;
+              // The guard confirmed `input` belongs to this branch; its
+              // `produce` already returns the dispatch-facing result type.
+              return branch.produce(input, options);
             }
           }
           throw new Error(
