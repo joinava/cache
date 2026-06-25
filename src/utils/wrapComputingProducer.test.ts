@@ -1,6 +1,7 @@
 import { expect } from "chai";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { setTimeout as delay } from "timers/promises";
+import type { ReadonlyDeep } from "type-fest";
 
 import Cache from "../Cache.js";
 import { MemoryStore } from "../index.js";
@@ -284,7 +285,7 @@ describe("computingProducerByInputType", () => {
       content: makeStory(input.id),
       directives: { freshUntilAge: 100 },
     }));
-    const collectionProduce = mock.fn(async (input: CollInput) => ({
+    const collectionProduce = mock.fn(async (input: ReadonlyDeep<CollInput>) => ({
       content: input.ids.map(makeStory),
       directives: { freshUntilAge: 100 },
       supplementalResources: input.ids.map((id) => ({

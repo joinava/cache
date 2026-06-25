@@ -65,6 +65,13 @@ import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
  */
 
 /**
+ * Cap on concurrent `hashInput` calls — for both bulk input hashing and
+ * supplemental hashing — so a large batch with a possibly-async `hashInput`
+ * doesn't flood the event loop.
+ */
+const HASH_CONCURRENCY = 10;
+
+/**
  * A supplemental resource returned by a computing producer: like a plain
  * {@link ProducerResultResource}, but identified by the **input** it would be
  * computed from instead of a bare `id`. The wrapper hashes that input to derive
@@ -178,23 +185,6 @@ type ComputingProducerOptions<
 };
 
 /**
- * Builds the consumer request for a derived id. The cast bridges to
- * `PartialConsumerRequest`, whose id/directives are `ReadonlyDeep`-wrapped and
- * so opaque against the plain types here while the spec is generic — the same
- * boundary coercion `wrapProducer` uses. The conditional spread avoids passing
- * `directives: undefined` (rejected under `exactOptionalPropertyTypes`).
- */
-function buildComputingRequest<Params extends AnyParams, Id extends string>(
-  id: Id,
-  directives: ConsumerDirectives | undefined,
-): PartialConsumerRequest<Params, Id> {
-  return {
-    id,
-    ...(directives ? { directives } : {}),
-  } as PartialConsumerRequest<Params, Id>;
-}
-
-/**
  * Like {@link wrapProducer}, but for a "computing producer" whose value is a
  * function of an `Input` rather than a lookup by id. You provide `hashInput`
  * (to derive the cache id from the input) and a producer that receives the full
@@ -218,8 +208,11 @@ export function wrapComputingProducer<
   Params extends AnyParams = AnyParams,
 >(
   options: ComputingProducerOptions<Input, Spec, Validators, Params>,
+  // `input` is `ReadonlyDeep` because the same input object can be handed to
+  // more than one producer call (concurrent callers share it via the registry),
+  // so a producer must not mutate what another might be reading.
   producer: (
-    input: Input,
+    input: ReadonlyDeep<Input>,
     producerOptions?: { signal?: AbortSignal },
   ) => Promise<ComputingProducerResult<Input, Spec, Validators, Params>>,
 ) {
@@ -256,7 +249,9 @@ export function wrapComputingProducer<
       req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
       producerOptions?: { signal?: AbortSignal },
     ) => {
-      const input = registry.get(req.id);
+      // The registry holds the mutable `Input`; widen to `ReadonlyDeep` (sound —
+      // `producer` only reads it) to match the producer's signature.
+      const input = registry.get(req.id) as ReadonlyDeep<Input>;
       return hashSupplementals(await producer(input, producerOptions));
     }) as unknown as RequestPairedProducer<Spec, Validators, Params>,
   );
@@ -275,10 +270,19 @@ export function wrapComputingProducer<
 
     registry.acquire(id, input);
     try {
-      return await wrapped(
-        buildComputingRequest<Params, Spec["id"]>(id, callOptions?.directives),
-        signal ? { signal } : undefined,
-      );
+      // The cast bridges to `PartialConsumerRequest`, whose id/directives are
+      // `ReadonlyDeep`-wrapped and so opaque against the plain types here while
+      // `Spec` is generic — the same boundary coercion `wrapProducer` uses. The
+      // conditional spread avoids `directives: undefined` (rejected under
+      // `exactOptionalPropertyTypes`).
+      const request = {
+        id,
+        ...(callOptions?.directives
+          ? { directives: callOptions.directives }
+          : {}),
+      } as PartialConsumerRequest<Params, Spec["id"]>;
+
+      return await wrapped(request, signal ? { signal } : undefined);
     } finally {
       registry.release(id);
     }
@@ -310,8 +314,11 @@ export function wrapBulkComputingProducer<
   ErrorType extends Error = Error,
 >(
   options: ComputingProducerOptions<Input, Spec, Validators, Params>,
+  // `input`s are `ReadonlyDeep` for the same reason as the single variant: they
+  // can be shared with other producer calls via the registry, so a producer
+  // must not mutate them.
   producer: (
-    inputs: readonly Input[],
+    inputs: readonly ReadonlyDeep<Input>[],
     producerOptions?: { signal?: AbortSignal },
   ) => Promise<
     (ComputingProducerResult<Input, Spec, Validators, Params> | ErrorType)[]
@@ -330,6 +337,8 @@ export function wrapBulkComputingProducer<
     Validators,
     Params
   >(hashInput);
+  // Bound concurrent input hashing (see HASH_CONCURRENCY); shared across calls.
+  const hashLimit = pLimit(HASH_CONCURRENCY);
 
   const wrapped = wrapBulkProducer<Spec, Validators, Params, ErrorType>(
     cache,
@@ -344,7 +353,11 @@ export function wrapBulkComputingProducer<
     // Each `registry.get` runs synchronously (while mapping) before `producer`
     // is invoked, so every input is read while still registered.
     (reqs, producerOptions) => {
-      const inputs = reqs.map((req) => registry.get(req.id));
+      // Widen to `ReadonlyDeep` (sound — `producer` only reads); see the
+      // single-producer variant.
+      const inputs = reqs.map(
+        (req) => registry.get(req.id),
+      ) as readonly ReadonlyDeep<Input>[];
       return producer(inputs, producerOptions).then((results) =>
         Promise.all(
           results.map(async (result) =>
@@ -362,10 +375,10 @@ export function wrapBulkComputingProducer<
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
 
-    // `Promise.resolve` since `hashInput` may be synchronous; cast for the same
-    // reason as the single-producer variant.
+    // Bounded by `hashLimit` (`hashInput` may be sync — p-limit handles that);
+    // cast for the same reason as the single-producer variant.
     const ids = (await Promise.all(
-      inputs.map((input) => Promise.resolve(hashInput(input))),
+      inputs.map((input) => hashLimit(() => hashInput(input))),
     )) as Spec["id"][];
     signal?.throwIfAborted();
 
@@ -374,12 +387,15 @@ export function wrapBulkComputingProducer<
       registry.acquire(id, inputs[index]!);
     });
     try {
-      return await wrapped(
-        ids.map((id) =>
-          buildComputingRequest<Params, Spec["id"]>(id, callOptions?.directives),
-        ),
-        signal ? { signal } : undefined,
-      );
+      // See the single-producer variant for why the requests are cast.
+      const requests = ids.map((id) => ({
+        id,
+        ...(callOptions?.directives
+          ? { directives: callOptions.directives }
+          : {}),
+      })) as PartialConsumerRequest<Params, Spec["id"]>[];
+
+      return await wrapped(requests, signal ? { signal } : undefined);
     } finally {
       ids.forEach((id) => registry.release(id));
     }
@@ -390,10 +406,6 @@ export function wrapBulkComputingProducer<
 
   return wrappedBulkComputingProducer;
 }
-
-// Cap concurrent supplemental-input hashing so a result with many supplementals
-// (and a possibly-async `hashInput`) doesn't flood the event loop.
-const SUPPLEMENTAL_HASH_CONCURRENCY = 10;
 
 /**
  * Builds the function that turns a {@link ComputingProducerResult} into the
@@ -411,7 +423,7 @@ function makeSupplementalHasher<
   Params extends AnyParams,
 >(hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>) {
   // One limiter shared across every call of the returned hasher.
-  const limit = pLimit(SUPPLEMENTAL_HASH_CONCURRENCY);
+  const limit = pLimit(HASH_CONCURRENCY);
   return async (
     result: ComputingProducerResult<Input, Spec, Validators, Params>,
   ): Promise<RequestPairedProducerResult<Spec, Validators, Params>> => {

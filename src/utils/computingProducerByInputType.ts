@@ -1,3 +1,4 @@
+import type { ReadonlyDeep } from "type-fest";
 import type { CacheSpec } from "../types/00_CacheSpec.js";
 import type {
   AnyParams,
@@ -90,7 +91,10 @@ type ComputingInputDispatchProducer<
   Validators extends AnyValidators,
   Params extends AnyParams,
 > = (
-  input: V["input"],
+  // `ReadonlyDeep` for the same reason as the plain wrappers: inputs can be
+  // shared across producer calls via the registry, so a producer must not
+  // mutate them.
+  input: ReadonlyDeep<V["input"]>,
   options?: { signal?: AbortSignal },
 ) => Promise<
   ComputingProducerResult<
@@ -139,9 +143,13 @@ export type ComputingProducerByInputTypeBuilder<
   Covered extends V["input"] = never,
 > = {
   readonly when: <NarrowedInput extends V["input"]>(
+    // `matches` only reads the input to route it, so it keeps the plain
+    // (mutable) type — a `ReadonlyDeep` parameter would make the `input is
+    // NarrowedInput` predicate ill-formed. `produce` (the actual producer) gets
+    // `ReadonlyDeep`, since it may run against an input shared via the registry.
     matches: (input: V["input"]) => input is NarrowedInput,
     produce: (
-      input: NarrowedInput,
+      input: ReadonlyDeep<NarrowedInput>,
       options?: { signal?: AbortSignal },
     ) => Promise<ComputingBranchResult<V, NarrowedInput, Validators, Params>>,
   ) => ComputingProducerByInputTypeBuilder<
@@ -164,7 +172,7 @@ type _ComputingInputBranch<
   Validators extends AnyValidators,
   Params extends AnyParams,
 > = {
-  matches: (input: V["input"]) => boolean;
+  matches: (input: ReadonlyDeep<V["input"]>) => boolean;
   produce: ComputingInputDispatchProducer<V, Validators, Params>;
 };
 
