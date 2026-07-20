@@ -31,8 +31,9 @@ export type CacheResultMessage = {
 };
 
 /**
- * The diagnostics channel for cache result events.
- * @internal
+ * The diagnostics channel for cache result events. Subscribe with
+ * `cacheResultChannel.subscribe((message) => …)` for an inferred
+ * `CacheResultMessage`, or by name via `CACHE_RESULT_CHANNEL_NAME`.
  */
 export const cacheResultChannel = diagnosticsChannel.channel(
   CACHE_RESULT_CHANNEL_NAME,
@@ -72,8 +73,9 @@ export type DroppedDirectiveMessage = {
 };
 
 /**
- * The diagnostics channel for dropped-directive events.
- * @internal
+ * The diagnostics channel for dropped-directive events. Subscribe with
+ * `droppedDirectiveChannel.subscribe((message) => …)` for an inferred
+ * `DroppedDirectiveMessage`, or by name via `DROPPED_DIRECTIVE_CHANNEL_NAME`.
  */
 export const droppedDirectiveChannel = diagnosticsChannel.channel(
   DROPPED_DIRECTIVE_CHANNEL_NAME,
@@ -94,8 +96,9 @@ export function publishDroppedDirective(
 
 type TypedChannel<T, Name extends string> = Omit<
   Channel,
-  "publish" | "subscribe"
+  "publish" | "subscribe" | "unsubscribe"
 > & {
   publish(message: T): void;
   subscribe(callback: (message: T, name: Name) => void): void;
+  unsubscribe(callback: (message: T, name: Name) => void): boolean;
 };
