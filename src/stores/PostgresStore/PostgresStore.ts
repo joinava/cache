@@ -93,6 +93,8 @@ export type PostgresStoreSupportedParams = {
   [paramName: string]: string | number | boolean | undefined;
 };
 
+const POSTGRES_GET_MANY_CHUNK_SIZE = 5_000;
+
 /**
  * The constraint that PostgresStore places on a `Spec`'s `content`: must be
  * JSON-serializable (potentially with undefined values present, since those
@@ -225,45 +227,56 @@ export default class PostgresStore<
     await this.ensureInitializedPromise;
     signal?.throwIfAborted();
 
-    const requestValues = sql.join(
-      requests.map(
-        ({ id, params }, requestIndex) =>
-          sql`(${requestIndex}, ${id}, ${params}::jsonb)`,
-      ),
-    );
-    const { rows } = await sql<{
-      request_index: number;
-      entry: TableEntry<Spec, Validators, Params>;
-    }>`
-      SELECT v.request_index, t.entry
-      FROM ${sql.id(
-        this.tableNameData.schemaName,
-        this.tableNameData.tableName,
-      )} AS t
-      INNER JOIN (
-        VALUES ${requestValues}
-      ) AS v(request_index, resource_id, params)
-        ON t.resource_id = v.resource_id
-        AND t.vary <@ v.params
-    `.execute(this.db);
-
-    signal?.throwIfAborted();
-
     const entriesForRequests = Array.from(
       { length: requests.length },
       () => [] as EntryForId<Spec, Validators, Params, Spec["id"]>[],
     );
-    for (const { request_index, entry } of rows) {
-      entriesForRequests[request_index]!.push(
-        this.deserializeEntry(
-          entry satisfies TableEntry<
-            Spec,
-            Validators,
-            Params,
-            Spec["id"]
-          > as TableEntry<Spec, Validators, Params, Spec["id"]>,
-        ),
+
+    for (
+      let chunkStart = 0;
+      chunkStart < requests.length;
+      chunkStart += POSTGRES_GET_MANY_CHUNK_SIZE
+    ) {
+      signal?.throwIfAborted();
+
+      const requestValues = sql.join(
+        requests
+          .slice(chunkStart, chunkStart + POSTGRES_GET_MANY_CHUNK_SIZE)
+          .map(
+            ({ id, params }, chunkIndex) =>
+              sql`(${chunkStart + chunkIndex}, ${id}, ${params}::jsonb)`,
+          ),
       );
+      const { rows } = await sql<{
+        request_index: number;
+        entry: TableEntry<Spec, Validators, Params>;
+      }>`
+        SELECT v.request_index, t.entry
+        FROM ${sql.id(
+          this.tableNameData.schemaName,
+          this.tableNameData.tableName,
+        )} AS t
+        INNER JOIN (
+          VALUES ${requestValues}
+        ) AS v(request_index, resource_id, params)
+          ON t.resource_id = v.resource_id
+          AND t.vary <@ v.params
+      `.execute(this.db);
+
+      signal?.throwIfAborted();
+
+      for (const { request_index, entry } of rows) {
+        entriesForRequests[request_index]!.push(
+          this.deserializeEntry(
+            entry satisfies TableEntry<
+              Spec,
+              Validators,
+              Params,
+              Spec["id"]
+            > as TableEntry<Spec, Validators, Params, Spec["id"]>,
+          ),
+        );
+      }
     }
 
     return entriesForRequests as StoreGetManyResult<
