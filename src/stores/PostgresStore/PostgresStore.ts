@@ -31,11 +31,7 @@ import type {
 } from "../../types/index.js";
 import type { Bind2 } from "../../types/utils.js";
 import { restoreInfinityInDirectives } from "../../utils/normalization.js";
-import {
-  defaultLoggersByComponent,
-  jsonStringify,
-  naiveGetMany,
-} from "../../utils/utils.js";
+import { defaultLoggersByComponent, jsonStringify } from "../../utils/utils.js";
 
 /**
  * Type representing the qualified name of the cache table.
@@ -215,20 +211,56 @@ export default class PostgresStore<
     requests: Reqs,
     options?: { signal?: AbortSignal },
   ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
+    const signal = options?.signal;
+    signal?.throwIfAborted();
+
     this.logTrace("querying for multiple entries", {
       requestCount: requests.length,
     });
 
-    // For PostgresStore, we'll use the naive implementation until we have time
-    // to optimize it. Technically, all these calls should probably be wrapped
-    // in a transaction, so that concurrent deletes can't lead us to returning
-    // partial/incosistent state, but that doesn't really matter for this cache.
-    return naiveGetMany<Spec, Validators, Params, Reqs>(
-      this,
-      requests,
-      undefined,
-      options,
+    if (requests.length === 0) {
+      return [] as StoreGetManyResult<Spec, Reqs, Validators, Params>;
+    }
+
+    await this.ensureInitializedPromise;
+    signal?.throwIfAborted();
+
+    const ids = [...new Set(requests.map(({ id }) => id))];
+    const result = await this.db
+      .selectFrom(this.tableName)
+      .select(["resource_id", "vary", "entry"])
+      .where("resource_id", "in", ids)
+      .execute();
+
+    signal?.throwIfAborted();
+
+    const rowsById = Map.groupBy(result, ({ resource_id }) => resource_id);
+    const entriesForRequests = requests.map(({ id, params }) =>
+      (rowsById.get(id) ?? [])
+        .filter(({ vary }) =>
+          postgresVaryMatchesRequest(
+            vary as unknown as NormalizedVary<Params>,
+            params,
+          ),
+        )
+        .map(({ entry }) =>
+          this.deserializeEntry(
+            entry satisfies TableEntry<
+              Spec,
+              Validators,
+              Params,
+              Spec["id"]
+            > as TableEntry<Spec, Validators, Params, Spec["id"]>,
+          ),
+        ),
     );
+
+    return entriesForRequests as StoreGetManyResult<
+      Spec,
+      Reqs,
+      Validators,
+      Params
+    >;
   }
 
   async store(
@@ -421,6 +453,20 @@ export default class PostgresStore<
       Params
     > as EntryForId<Spec, Validators, Params, Id>;
   }
+}
+
+function postgresVaryMatchesRequest<Params extends AnyParams>(
+  vary: NormalizedVary<Params>,
+  params: Readonly<NormalizedParams<Params>>,
+) {
+  // Match PostgreSQL's JSONB containment semantics for the primitive params
+  // supported by this store. In particular, JSON null is not the same as an
+  // absent property.
+  return Object.entries(vary).every(
+    ([key, value]) =>
+      Object.prototype.hasOwnProperty.call(params, key) &&
+      params[key] === value,
+  );
 }
 
 function keepMaxPerGroup<T>(opts: {

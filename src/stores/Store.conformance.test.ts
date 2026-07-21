@@ -361,6 +361,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         { id: "missing", params: matchingParams },
         { id: "two", params: unmatchedParams },
         { id: "one", params: unmatchedParams },
+        { id: "one", params: matchingParams },
       ] as const);
 
       assert.deepEqual(result[0].map(({ content }) => content.value).sort(), [
@@ -373,6 +374,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         result[3].map(({ content }) => content.value),
         ["one-any"],
       );
+      assert.deepEqual(result[4].map(({ content }) => content.value).sort(), [
+        "one-any",
+        "one-json",
+      ]);
     });
   });
 
