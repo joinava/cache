@@ -345,7 +345,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
     });
   });
 
-  it("preserves getMany order, duplicate requests, misses, and per-request params", async () => {
+  it("returns index-aligned getMany results for duplicate mixed-order requests", async () => {
     await withStore(createFixture, async (store) => {
       await store.store([
         { entry: makeEntry("one", "one-json"), maxStoreForSeconds: 60 },

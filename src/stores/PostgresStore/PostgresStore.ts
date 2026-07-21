@@ -1,6 +1,6 @@
 import { maxBy } from "es-toolkit";
 import type { ColumnType } from "kysely";
-import { Kysely, PostgresDialect } from "kysely";
+import { Kysely, PostgresDialect, sql } from "kysely";
 import type { Pool } from "pg";
 import type { Tagged } from "type-fest";
 import type {
@@ -225,35 +225,46 @@ export default class PostgresStore<
     await this.ensureInitializedPromise;
     signal?.throwIfAborted();
 
-    const ids = [...new Set(requests.map(({ id }) => id))];
-    const result = await this.db
-      .selectFrom(this.tableName)
-      .select(["resource_id", "vary", "entry"])
-      .where("resource_id", "in", ids)
-      .execute();
+    const requestValues = sql.join(
+      requests.map(
+        ({ id, params }, requestIndex) =>
+          sql`(${requestIndex}, ${id}, ${params}::jsonb)`,
+      ),
+    );
+    const { rows } = await sql<{
+      request_index: number;
+      entry: TableEntry<Spec, Validators, Params>;
+    }>`
+      SELECT v.request_index, t.entry
+      FROM ${sql.id(
+        this.tableNameData.schemaName,
+        this.tableNameData.tableName,
+      )} AS t
+      INNER JOIN (
+        VALUES ${requestValues}
+      ) AS v(request_index, resource_id, params)
+        ON t.resource_id = v.resource_id
+        AND t.vary <@ v.params
+    `.execute(this.db);
 
     signal?.throwIfAborted();
 
-    const rowsById = Map.groupBy(result, ({ resource_id }) => resource_id);
-    const entriesForRequests = requests.map(({ id, params }) =>
-      (rowsById.get(id) ?? [])
-        .filter(({ vary }) =>
-          postgresVaryMatchesRequest(
-            vary as unknown as NormalizedVary<Params>,
-            params,
-          ),
-        )
-        .map(({ entry }) =>
-          this.deserializeEntry(
-            entry satisfies TableEntry<
-              Spec,
-              Validators,
-              Params,
-              Spec["id"]
-            > as TableEntry<Spec, Validators, Params, Spec["id"]>,
-          ),
-        ),
+    const entriesForRequests = Array.from(
+      { length: requests.length },
+      () => [] as EntryForId<Spec, Validators, Params, Spec["id"]>[],
     );
+    for (const { request_index, entry } of rows) {
+      entriesForRequests[request_index]!.push(
+        this.deserializeEntry(
+          entry satisfies TableEntry<
+            Spec,
+            Validators,
+            Params,
+            Spec["id"]
+          > as TableEntry<Spec, Validators, Params, Spec["id"]>,
+        ),
+      );
+    }
 
     return entriesForRequests as StoreGetManyResult<
       Spec,
@@ -453,20 +464,6 @@ export default class PostgresStore<
       Params
     > as EntryForId<Spec, Validators, Params, Id>;
   }
-}
-
-function postgresVaryMatchesRequest<Params extends AnyParams>(
-  vary: NormalizedVary<Params>,
-  params: Readonly<NormalizedParams<Params>>,
-) {
-  // Match PostgreSQL's JSONB containment semantics for the primitive params
-  // supported by this store. In particular, JSON null is not the same as an
-  // absent property.
-  return Object.entries(vary).every(
-    ([key, value]) =>
-      Object.prototype.hasOwnProperty.call(params, key) &&
-      params[key] === value,
-  );
 }
 
 function keepMaxPerGroup<T>(opts: {

@@ -292,6 +292,13 @@ export default class Cache<
       options,
     );
 
+    if (cacheEntriesForRequests.length !== requests.length) {
+      throw new Error(
+        `Store.getMany contract violation: expected one result array per request ` +
+          `(expected ${requests.length}, received ${cacheEntriesForRequests.length})`,
+      );
+    }
+
     this.#logger("trace", "received entries from the store via getMany", {
       resultCount: sumBy(cacheEntriesForRequests, (it) => it.length),
     });
