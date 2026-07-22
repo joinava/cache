@@ -1,6 +1,6 @@
 import { maxBy } from "es-toolkit";
-import type { ColumnType } from "kysely";
-import { Kysely, PostgresDialect } from "kysely";
+import type { ColumnType, RawBuilder, SqlBool } from "kysely";
+import { Kysely, PostgresDialect, sql } from "kysely";
 import type { Pool } from "pg";
 import type { Tagged } from "type-fest";
 import type {
@@ -36,7 +36,6 @@ import {
   jsonStringify,
   naiveGetMany,
 } from "../../utils/utils.js";
-import { variantMatchesRequest } from "../../utils/varyHelpers.js";
 
 /**
  * Type representing the qualified name of the cache table.
@@ -83,21 +82,21 @@ type CacheTables<
 /**
  * We restrict the params this store supports to _primitive_ values.
  *
- * `get` matches variants by loading the candidate rows for a `resource_id` and
- * filtering them in JS with the canonical `variantMatchesRequest`, which
- * compares each vary value against the corresponding param with `===`. Strict
- * equality only does the right thing for primitives; object/array values would
- * be compared by reference and never match. (The rules of `vary` require the
- * value of a param to match the vary value _exactly_, i.e. containment at the
- * top level and deep equality below it -- which we don't implement.)
+ * `get` matches variants in the database (see `varyMatchesParamsSql`): a
+ * non-null vary value must `jsonb`-equal the corresponding param, and a `null`
+ * vary value requires the param to be *absent*. `jsonb` equality is exact at
+ * every level, so object/array values would in fact match correctly -- but the
+ * param type is still limited to primitives, because that's all real callers
+ * use and it keeps the contract identical to the Memory/Sqlite stores, whose JS
+ * matcher (`variantMatchesRequest`) compares with `===` and so cannot
+ * deep-compare objects.
  *
- * A previous implementation matched in the database via the JSONB containment
- * operator (`vary <@ $params`). That was abandoned because containment cannot
- * express the `null`-vary semantics: a `null` vary value means "the param must
- * be *absent* from the request", but `<@` requires the key to be present in the
- * params with an equal value, so `{"format": null}` never matched a request
- * that omitted `format`. Filtering in JS mirrors what SqliteStore does and
- * keeps all three stores' matching semantics identical.
+ * A previous implementation matched via the JSONB containment operator
+ * (`vary <@ $params`). It was replaced because containment cannot express the
+ * `null`-vary rule -- `<@` requires the key to be *present* with an equal
+ * value, so `{"format": null}` never matched a request that omitted `format` --
+ * and because it matched partially-contained nested objects rather than
+ * requiring exact equality.
  */
 export type PostgresStoreSupportedParams = {
   [paramName: string]: string | number | boolean | undefined;
@@ -109,6 +108,37 @@ export type PostgresStoreSupportedParams = {
  * are stripped on serialization).
  */
 export type PostgresStoreCompatibleSpec = CacheSpec<string, JSONWithUndefined>;
+
+/**
+ * Builds the SQL predicate that keeps only the stored variants (rows) whose
+ * `vary` requirements are satisfied by a request's `params`, implementing the
+ * full matching contract in the database.
+ *
+ * A row matches iff *no* vary entry is violated. For each `(key, value)` in the
+ * row's `vary`:
+ *   - a `null` value means "the param must be *absent*", so it's violated when
+ *     `params` contains that key; and
+ *   - a non-null value must `jsonb`-equal `params -> key` (which is SQL `NULL`,
+ *     hence `IS DISTINCT FROM`, when the param is missing).
+ *
+ * `resource_id` (indexed) has already narrowed the candidate rows to the few
+ * variants stored for one id, so the per-row `jsonb_each` scan is cheap. We use
+ * the `jsonb_exists` function rather than the `?` operator because `?` is
+ * ambiguous with driver parameter placeholders.
+ */
+function varyMatchesParamsSql<Params extends PostgresStoreSupportedParams>(
+  params: Readonly<NormalizedParams<Params>>,
+): RawBuilder<SqlBool> {
+  const paramsJson = jsonStringify(params);
+  return sql<SqlBool>`not exists (
+    select 1
+    from jsonb_each(${sql.ref("vary")}) as v(key, value)
+    where case
+      when jsonb_typeof(v.value) = 'null' then jsonb_exists(${paramsJson}::jsonb, v.key)
+      else (${paramsJson}::jsonb -> v.key) is distinct from v.value
+    end
+  )`;
+}
 
 /**
  * This class implements a store for cache entries, backed by Postgres. For
@@ -188,30 +218,25 @@ export default class PostgresStore<
 
     signal?.throwIfAborted();
 
-    // Load every stored variant for this resource id, then match variants in
-    // JS via the canonical `variantMatchesRequest`. See the comment on
-    // `PostgresStoreSupportedParams` for why we don't filter in the database.
-    // The number of variants per resource id is expected to be very small.
     const result = await this.db
       .selectFrom(this.tableName)
       .where("resource_id", "=", id)
+      .where(varyMatchesParamsSql(params))
       .selectAll()
       .execute();
 
     signal?.throwIfAborted();
 
-    const entries = result
-      .filter((it) => variantMatchesRequest(it.vary, params))
-      .map((it) =>
-        this.deserializeEntry(
-          it.entry satisfies TableEntry<
-            Spec,
-            Validators,
-            Params,
-            Spec["id"]
-          > as unknown as TableEntry<Spec, Validators, Params, Id>,
-        ),
-      );
+    const entries = result.map((it) =>
+      this.deserializeEntry(
+        it.entry satisfies TableEntry<
+          Spec,
+          Validators,
+          Params,
+          Spec["id"]
+        > as unknown as TableEntry<Spec, Validators, Params, Id>,
+      ),
+    );
 
     this.logTrace("returning entries from postgres query", entries);
     return entries;
