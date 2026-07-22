@@ -53,15 +53,41 @@ export function resultVariantKeyFromVaryEntries<V extends AnyParams>(
 
 /**
  * Returns whether a given `vary` object is compatible with the request's params.
+ *
+ * Recall that a `null` vary value means "this variant applies only when the
+ * request omits that param" (see the note on `AnyParamValue`), so an absent
+ * param must compare equal to a `null` vary value.
  */
 export function variantMatchesRequest<V extends AnyParams>(
-  vary: NormalizedVary<V>,
-  normalizedParams: NormalizedParams<V>,
+  vary: Readonly<NormalizedVary<V>>,
+  normalizedParams: Readonly<NormalizedParams<V>>,
 ) {
   return Object.entries(vary).every(
     ([key, value]) =>
-      normalizedParams[key] === (value === null ? undefined : value),
+      ownParamValue(normalizedParams, key) ===
+      (value === null ? undefined : value),
   );
+}
+
+/**
+ * Read a request param by name with *own-property* semantics, returning
+ * `undefined` when the param is absent.
+ *
+ * A plain `normalizedParams[key]` resolves up the prototype chain, so a param
+ * name that collides with an inherited `Object.prototype` member -- e.g.
+ * `"constructor"`, `"toString"`, `"__proto__"` -- would read back the inherited
+ * function/prototype instead of `undefined`. That breaks matching for vary
+ * keys with those names, because a `null` vary value (meaning "param absent")
+ * would never compare equal to the inherited value. `Object.hasOwn` restricts
+ * the lookup to the request's actual params.
+ */
+function ownParamValue<V extends AnyParams>(
+  normalizedParams: Readonly<NormalizedParams<V>>,
+  key: string,
+): AnyParamValue | undefined {
+  return Object.hasOwn(normalizedParams, key)
+    ? normalizedParams[key]
+    : undefined;
 }
 
 /**
@@ -89,7 +115,11 @@ export function requestVariantKeyForVaryKeys<V extends AnyParams>(
 ) {
   return resultVariantKeyFromVaryEntries(
     varyKeys.map(
-      (it) => [it, normalizedParams[it] ?? null] as const,
+      // Own-property read (see `ownParamValue`): a missing param -- including a
+      // vary key that collides with an inherited `Object.prototype` member like
+      // `"__proto__"` -- becomes `null`, matching the "param absent" sentinel a
+      // producer stores as a `null` vary value.
+      (it) => [it, ownParamValue(normalizedParams, it) ?? null] as const,
     ) satisfies NormalizedVaryEntry<AnyParams>[] as NormalizedVaryEntry<V>[],
   );
 }
