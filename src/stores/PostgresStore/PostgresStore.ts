@@ -36,6 +36,7 @@ import {
   jsonStringify,
   naiveGetMany,
 } from "../../utils/utils.js";
+import { variantMatchesRequest } from "../../utils/varyHelpers.js";
 
 /**
  * Type representing the qualified name of the cache table.
@@ -62,8 +63,12 @@ type CacheTables<
   [key in CacheTableName]: {
     // TODO: should be <Id, Id, never>, but kysely looses the tag at some point.
     resource_id: ColumnType<string, string, never>;
+    // Select type is `NormalizedVary` (not `NormalizedParams`) because the
+    // stored value can carry `null` values -- a `null` vary value means "this
+    // variant applies only when the request omits that param". `get` reads this
+    // column back to match variants in JS via `variantMatchesRequest`.
     vary: ColumnType<
-      Readonly<NormalizedParams<Params>>,
+      Readonly<NormalizedVary<Params>>,
       JsonOf<NormalizedVary<Params>>,
       never
     >;
@@ -76,22 +81,23 @@ type CacheTables<
 };
 
 /**
- * When we match `vary` values when retrieving entries, we currently query:
- * `vary <@ $params`, which means: "is the `vary` JSON value fully contained in
- * the params". This gives the correct result when the param and vary values are
- * _primitives_ (i.e., it asks: "does the request contain a superset of the
- * params, with matching values, that the response varied on"). But, it would
- * not work if the param or vary values are objects/arrays. For example:
+ * We restrict the params this store supports to _primitive_ values.
  *
- * {"a": {"b": {"c": "c"}}} is contained in {"a": {"b": {"c": "c", "d": "d"}}}
- * according to this operator.
+ * `get` matches variants by loading the candidate rows for a `resource_id` and
+ * filtering them in JS with the canonical `variantMatchesRequest`, which
+ * compares each vary value against the corresponding param with `===`. Strict
+ * equality only does the right thing for primitives; object/array values would
+ * be compared by reference and never match. (The rules of `vary` require the
+ * value of a param to match the vary value _exactly_, i.e. containment at the
+ * top level and deep equality below it -- which we don't implement.)
  *
- * But, the rules of `vary` say that the value of param `b` has to match exactly
- * the value of `vary.b`. I.e., we want containment only at the top level and
- * then check for equality at deeper levels. To do that, we could use ? and =
- * operators while iterating over the vary keys, but, since we're not
- * implementing that for now, we restrict this store to a set of param values
- * that are safe.
+ * A previous implementation matched in the database via the JSONB containment
+ * operator (`vary <@ $params`). That was abandoned because containment cannot
+ * express the `null`-vary semantics: a `null` vary value means "the param must
+ * be *absent* from the request", but `<@` requires the key to be present in the
+ * params with an equal value, so `{"format": null}` never matched a request
+ * that omitted `format`. Filtering in JS mirrors what SqliteStore does and
+ * keeps all three stores' matching semantics identical.
  */
 export type PostgresStoreSupportedParams = {
   [paramName: string]: string | number | boolean | undefined;
@@ -182,28 +188,30 @@ export default class PostgresStore<
 
     signal?.throwIfAborted();
 
+    // Load every stored variant for this resource id, then match variants in
+    // JS via the canonical `variantMatchesRequest`. See the comment on
+    // `PostgresStoreSupportedParams` for why we don't filter in the database.
+    // The number of variants per resource id is expected to be very small.
     const result = await this.db
       .selectFrom(this.tableName)
       .where("resource_id", "=", id)
-      // operator means: "Are the left JSON path/value entries contained at the
-      // top level within the right JSON value?" This is only right in the
-      // limited cases we support; see comment on PostgresRestrictedParams.
-      .where("vary", "<@", params)
       .selectAll()
       .execute();
 
     signal?.throwIfAborted();
 
-    const entries = result.map((it) =>
-      this.deserializeEntry(
-        it.entry satisfies TableEntry<
-          Spec,
-          Validators,
-          Params,
-          Spec["id"]
-        > as unknown as TableEntry<Spec, Validators, Params, Id>,
-      ),
-    );
+    const entries = result
+      .filter((it) => variantMatchesRequest(it.vary, params))
+      .map((it) =>
+        this.deserializeEntry(
+          it.entry satisfies TableEntry<
+            Spec,
+            Validators,
+            Params,
+            Spec["id"]
+          > as unknown as TableEntry<Spec, Validators, Params, Id>,
+        ),
+      );
 
     this.logTrace("returning entries from postgres query", entries);
     return entries;

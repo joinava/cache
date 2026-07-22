@@ -345,6 +345,50 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
     });
   });
 
+  it("treats vary keys that collide with Object.prototype members as ordinary params", async () => {
+    await withStore(createFixture, async (store) => {
+      // Param names like "constructor"/"toString"/"__proto__" must be handled
+      // as ordinary params, not resolved up the prototype chain. Each is stored
+      // here with a null value, meaning "this variant applies only when the
+      // request omits that param". These are defined via computed keys so that
+      // "__proto__" becomes an own property rather than mutating the prototype.
+      const protoKeyVary = {
+        ["constructor"]: null,
+        ["toString"]: null,
+        ["__proto__"]: null,
+      } satisfies Record<string, null> as unknown as NormalizedVary<TestParams>;
+
+      await store.store([
+        {
+          entry: makeEntry("id", "all-absent", protoKeyVary),
+          maxStoreForSeconds: 60,
+        },
+        { entry: makeEntry("id", "empty", emptyVary), maxStoreForSeconds: 60 },
+      ]);
+
+      // A request that omits those params matches both the empty variant and
+      // the "all absent" variant. A naive `params[key]` lookup would resolve
+      // e.g. "constructor" to the inherited function and fail to match here.
+      const noParams = {} as NormalizedParams<TestParams>;
+      assert.deepEqual(
+        (await store.get("id", noParams)).map(({ content }) => content.value).sort(),
+        ["all-absent", "empty"],
+      );
+
+      // Providing one of those params (with any value) means the request no
+      // longer matches the "must be absent" variant -- only the empty one.
+      const withConstructorParam = {
+        ["constructor"]: "anything",
+      } satisfies Record<string, string> as unknown as NormalizedParams<TestParams>;
+      assert.deepEqual(
+        (await store.get("id", withConstructorParam)).map(
+          ({ content }) => content.value,
+        ),
+        ["empty"],
+      );
+    });
+  });
+
   it("preserves getMany order, duplicate requests, misses, and per-request params", async () => {
     await withStore(createFixture, async (store) => {
       await store.store([

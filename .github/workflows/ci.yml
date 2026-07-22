@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-typecheck:
+    name: Lint & typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run tsc:check
+      - run: pnpm run lint
+
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # The PostgresStore integration tests (Cache.test.ts and the PostgresStore
+      # branch of the store-conformance suite) need a live Postgres. Reuse the
+      # repo's docker-compose.yml so the service config has a single source of
+      # truth shared with local `pnpm test:docker`. `--wait` blocks until the
+      # healthchecks defined there pass.
+      - name: Start Postgres (and Redis) via docker compose
+        run: docker compose up -d --wait
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Test
+        run: pnpm run test:ci
+        env:
+          DATABASE_HOST: localhost
+          DATABASE_PORT: "5433"
+          DATABASE_USER: cache
+          DATABASE_PASSWORD: cache
+          DATABASE_NAME: cache
+          REDIS_URL: redis://localhost:6380
+
+      - name: Upload JUnit test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-test-report
+          path: test-report.xml
+          if-no-files-found: warn
+
+      - name: Stop services
+        if: ${{ always() }}
+        run: docker compose down
