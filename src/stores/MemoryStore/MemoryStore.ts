@@ -193,85 +193,85 @@ export default class MemoryStore<
   public async store(
     entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
-    // The relationship is computed against the value stored for a slot BEFORE
-    // this call ran, so snapshot each slot's pre-call entry the first time we
-    // touch it (before any of this call's writes overwrite it).
-    const preCallBySlot = new Map<
-      FullCacheKey<Spec["id"]>,
-      readonly [Entry<Spec, Validators, Params>, Spec["id"]] | undefined
-    >();
-    // For within-call duplicates, only the entry that actually persists (the
-    // last write to a slot wins, here) reports its relationship; the dropped
-    // duplicates are omitted. Track the winning input index per slot.
-    const winnerIndexBySlot = new Map<FullCacheKey<Spec["id"]>, number>();
-
-    entriesWithTimes.forEach((it, index) => {
-      const cacheKey = this.storeOne(it, preCallBySlot);
-      winnerIndexBySlot.set(cacheKey, index);
+    // Derive each input's slot (variant + full cache key) once, up front.
+    const prepared = entriesWithTimes.map((input, index) => {
+      const variantKey = resultVariantKey(input.entry.vary);
+      return {
+        input,
+        index,
+        variantKey,
+        cacheKey: makeCacheKey(input.entry.id, variantKey),
+      };
     });
 
-    const results: StoreEntryResult[] = entriesWithTimes.map(() => ({}));
-    for (const [cacheKey, index] of winnerIndexBySlot) {
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      const entry = entriesWithTimes[index]!.entry;
-      results[index] = this.#relationshipToExisting(
-        entry,
-        preCallBySlot.get(cacheKey),
-      );
-    }
-    return results;
+    // The relationship is measured against what each slot held BEFORE this
+    // call, so snapshot every touched slot's current entry now, before any
+    // write. Reading a slot more than once here is harmless: nothing has been
+    // written yet, so each read of a slot returns the same pre-call value.
+    const preCallBySlot = new Map(
+      prepared.map(({ cacheKey }) => [cacheKey, this.entriesMap.get(cacheKey)] as const),
+    );
+
+    // Persist every entry. Within a slot the last write wins.
+    prepared.forEach((it) => this.#persist(it));
+
+    // A slot's persisted ("winner") entry is its last input, and a Map keeps
+    // the last value set for a key, so this is each slot's winning input index.
+    const winnerIndexBySlot = new Map(
+      prepared.map(({ cacheKey, index }) => [cacheKey, index] as const),
+    );
+
+    // Each slot's winner reports how its validators relate to that slot's
+    // pre-call entry; every other input (a dropped within-call duplicate) is
+    // omitted.
+    return prepared.map(({ input, index, cacheKey }) =>
+      winnerIndexBySlot.get(cacheKey) === index
+        ? this.#relationshipToExisting(input.entry, preCallBySlot.get(cacheKey))
+        : {},
+    );
   }
 
-  private storeOne(
-    it: StoreEntryInput<Spec, Validators, Params>,
-    preCallBySlot: Map<
-      FullCacheKey<Spec["id"]>,
-      readonly [Entry<Spec, Validators, Params>, Spec["id"]] | undefined
-    >,
-  ): FullCacheKey<Spec["id"]> {
-    const { entry, maxStoreForSeconds: deleteAfter } = it;
+  /** Writes one prepared entry into the store, updating the resource metadata. */
+  #persist(prepared: {
+    readonly input: StoreEntryInput<Spec, Validators, Params>;
+    readonly variantKey: VariantKey;
+    readonly cacheKey: FullCacheKey<Spec["id"]>;
+  }): void {
+    const { input, variantKey, cacheKey } = prepared;
+    const { entry, maxStoreForSeconds: deleteAfter } = input;
     const { id } = entry;
 
-    let resourceMetadata = this.resourceMetadataMap.get(id);
-    if (resourceMetadata === undefined) {
-      resourceMetadata = { varyKeysSets: [], entryVariantKeys: [] };
-      this.resourceMetadataMap.set(id, resourceMetadata);
-    }
+    const resourceMetadata = this.#resourceMetadataFor(id);
 
-    // Get a canonical array for Object.keys(entry.vary) so that we don't add
-    // duplicates to resourceMetadata.varyKeys, which would slow down reads!
+    // Record this entry's varyKeys set and variant key (deduped). We use arrays
+    // rather than sets because the per-resource counts are tiny and we'd rather
+    // slow down store() than get(). The varyKeys array is canonicalized so
+    // equal sets are reference-equal (and thus deduped).
     const varyKeys = canonicalSmallStringMultiset(Object.keys(entry.vary));
-
-    // We add the new varyKeys to the array, using an array rather than a set
-    // because, again, we expect the number of varyKeys per resource to be very
-    // small and because we'd rather slow down store() than get(), which using a
-    // set would do.
     if (!resourceMetadata.varyKeysSets.includes(varyKeys)) {
       resourceMetadata.varyKeysSets.push(varyKeys);
     }
-
-    // For storing the variant key in the metadata, we don't care about the
-    // components, so we can just use a string rather than a canonical array.
-    const variantKey = resultVariantKey(entry.vary);
-
     if (!resourceMetadata.entryVariantKeys.includes(variantKey)) {
       resourceMetadata.entryVariantKeys.push(variantKey);
     }
 
-    // Now that the metadata's updated, we store the content.
-    const cacheKey = makeCacheKey(id, variantKey);
-    const finalDeleteAfterSeconds =
+    const deleteAfterSeconds =
       deleteAfter === Infinity ? this.fallbackDeleteAfter : deleteAfter;
+    this.entriesMap.set(cacheKey, [entry, id], deleteAfterSeconds * 1000);
+  }
 
-    // Snapshot the pre-call entry for this slot before overwriting it, so that
-    // the relationship is computed against what was stored before this call
-    // (not against an earlier duplicate written in this same call).
-    if (!preCallBySlot.has(cacheKey)) {
-      preCallBySlot.set(cacheKey, this.entriesMap.get(cacheKey));
+  /** Returns the resource's metadata record, creating an empty one if absent. */
+  #resourceMetadataFor(id: Spec["id"]): {
+    varyKeysSets: VaryKeys[];
+    entryVariantKeys: VariantKey[];
+  } {
+    const existing = this.resourceMetadataMap.get(id);
+    if (existing !== undefined) {
+      return existing;
     }
-
-    this.entriesMap.set(cacheKey, [entry, id], finalDeleteAfterSeconds * 1000);
-    return cacheKey;
+    const created = { varyKeysSets: [], entryVariantKeys: [] };
+    this.resourceMetadataMap.set(id, created);
+    return created;
   }
 
   #relationshipToExisting(
