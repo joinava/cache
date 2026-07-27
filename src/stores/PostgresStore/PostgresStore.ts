@@ -1,4 +1,4 @@
-import { maxBy } from "es-toolkit";
+import { maxBy, memoize } from "es-toolkit";
 import type { ColumnType, RawBuilder, SqlBool } from "kysely";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import type { Pool } from "pg";
@@ -280,19 +280,22 @@ export default class PostgresStore<
       return [];
     }
 
+    const inputEntryVaries = memoize(this.serializeVary.bind(this));
+
     // Postgres only allows an ON CONFLICT to affect the same key once per
     // query, so we need to make sure that the entries are unique by id and
     // vary; if not, we need to choose the one with the newest birth date.
     // Entries dropped here report `{}` (they weren't the value compared/stored).
     const deduped = keepMaxPerGroup({
-      items: entries.map((it, originalIndex) => ({ it, originalIndex })),
-      groupBy: ({ it }) => {
-        const { id, vary } = it.entry;
-        const key = [id, this.serializeVary(vary)] as const;
-        return jsonStringify(key) satisfies JsonOf<
+      items: entries.map((it, originalIndex) => ({
+        it,
+        originalIndex,
+        variantKey: inputEntryVaries(it.entry.vary),
+      })),
+      groupBy: ({ it, variantKey }) =>
+        jsonStringify([it.entry.id, variantKey]) satisfies JsonOf<
           Jsonify<[unknown, JsonOf<NormalizedVary<Params>>]>
-        > as unknown as JsonOf<[string, JsonOf<NormalizedVary<Params>>]>;
-      },
+        > as unknown as JsonOf<[string, JsonOf<NormalizedVary<Params>>]>,
       maxBy: ({ it }) => entryUtils.birthDate(it.entry).getTime(),
     });
 
@@ -308,7 +311,7 @@ export default class PostgresStore<
           deduped.map(
             ({ it }, ord) => sql`(
               ${it.entry.id}::text, 
-              ${this.serializeVary(it.entry.vary)}::jsonb, 
+              ${inputEntryVaries(it.entry.vary)}::jsonb, 
               ${this.serializeEntry(it.entry)}::jsonb, 
               ${ord}::int
             )`,
