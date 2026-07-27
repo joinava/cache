@@ -59,7 +59,6 @@ const matchingParams = {
   audience: "public",
 } as NormalizedParams<TestParams>;
 
-const emptyVary = {} as NormalizedVary<TestParams>;
 const varyOnFormat = { format: "json" } as NormalizedVary<TestParams>;
 const varyOnLanguage = { lang: "en" } as NormalizedVary<TestParams>;
 const directives = { freshUntilAge: 60 } as NormalizedProducerDirectives;
