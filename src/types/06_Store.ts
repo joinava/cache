@@ -23,6 +23,35 @@ export type StoreEntryInput<
 };
 
 /**
+ * Describes how a stored entry's value relates to what was already stored for
+ * the same slot, based solely on the entry's `validators`.
+ *
+ * - "is-new":    the (id, vary) slot held no live entries when this entry was
+ *                stored (nothing to compare against).
+ * - "unchanged": the slot was non-empty and the entry's validators deep-equal
+ *                the validators of the currently-stored entry with the NEWEST
+ *                birth date (see entryUtils.birthDate) for that slot.
+ * - "changed":   the slot was non-empty and the entry's validators do NOT
+ *                deep-equal that newest-birth-date entry's validators.
+ *
+ * The comparison is a structural, order-independent deep-equality over the
+ * whole opaque `validators` object; no validator key is privileged.
+ *
+ * When multiple stored entries share the newest birth date but differ in
+ * validators (not reachable by any current store, which keep <= 1 entry per
+ * slot), which one is treated as the reference is implementation-defined.
+ */
+export type StoreEntryRelationship = "unchanged" | "changed" | "is-new";
+
+export type StoreEntryResult = {
+  /**
+   * Omitted when the store did not perform the check, OR when the incoming
+   * entry has empty validators (no validators => nothing to compare on).
+   */
+  readonly relationshipToExistingStoredData?: StoreEntryRelationship;
+};
+
+/**
  * This interfaces defines the methods that must be supported by "stores",
  * which are instances responsible for actually storing/querying cache entries
  * (on disk, in memory, in a database, etc). The type params have the same
@@ -113,7 +142,7 @@ export type Store<
    */
   store(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ): Promise<void>;
+  ): Promise<readonly StoreEntryResult[]>;
 
   /**
    * Deletes all stored entries for resources with the given id.

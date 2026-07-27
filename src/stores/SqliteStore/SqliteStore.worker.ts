@@ -15,6 +15,8 @@ import type {
   NormalizedParams,
   NormalizedVary,
 } from "../../types/index.js";
+import type { StoreEntryResult } from "../../types/06_Store.js";
+import { validatorsEqual } from "../../utils/normalizedProducerResultResourceHelpers.js";
 import {
   variantMatchesRequest,
   type VariantKey,
@@ -58,7 +60,7 @@ export type WorkerOperations = {
   };
   store: {
     request: { entries: readonly StoreEntryInput[] };
-    result: void;
+    result: readonly StoreEntryResult[];
   };
   delete: {
     request: { id: string };
@@ -99,6 +101,10 @@ type CacheRow = {
 type SqliteStoreWorkerContext = {
   selectById(id: string): CacheRow[];
   selectByIds(ids: readonly string[]): CacheRow[];
+  selectForSlot(
+    resourceId: string,
+    variantKey: VariantKey,
+  ): { entry: WorkerEntryJson } | undefined;
   upsert(entry: StoreEntryInput): void;
   deleteById(id: string): void;
   deleteExpiredByIds(ids?: readonly string[]): void;
@@ -144,12 +150,16 @@ export default async function runTask(
         getManyMatchingEntryJson(ctx, message.requests),
       );
     case "store":
-      context.transaction({ scope: "write" }, (ctx) => {
-        for (const entry of message.entries) {
+      return context.transaction({ scope: "write" }, (ctx) =>
+        message.entries.map((entry) => {
+          // Read the pre-upsert row for this slot to classify the incoming
+          // entry, THEN upsert. This all happens within the write transaction,
+          // so the read reflects the state before any of this call's writes.
+          const result = relationshipForStoredEntry(ctx, entry);
           ctx.upsert(entry);
-        }
-      });
-      return undefined;
+          return result;
+        }),
+      );
     case "delete":
       context.deleteById(message.id);
       return undefined;
@@ -227,6 +237,11 @@ function initialize(data: WorkerInitData): SqliteStoreWorkerContext {
       WHERE resource_id = ?
         AND (expires_at IS NULL OR expires_at > ?)
     `),
+    selectForSlot: db.prepare(`
+      SELECT entry
+      FROM cache_entries
+      WHERE resource_id = ? AND variant_key = ?
+    `),
     upsert: db.prepare(`
       INSERT INTO cache_entries (resource_id, variant_key, vary, entry, expires_at)
       VALUES (?, ?, ?, ?, ?)
@@ -260,6 +275,10 @@ function initialize(data: WorkerInitData): SqliteStoreWorkerContext {
   return {
     selectById: (id) =>
       prepared.selectById.all(id, expiryCutoff()) as CacheRow[],
+    selectForSlot: (resourceId, variantKey) =>
+      prepared.selectForSlot.get(resourceId, variantKey) as
+        | { entry: WorkerEntryJson }
+        | undefined,
     selectByIds: (ids) => {
       const uniqueIds = [...new Set(ids)];
       if (uniqueIds.length === 0) return [];
@@ -372,6 +391,36 @@ function getManyMatchingEntryJson(
       .filter((row) => variantMatchesRequest(jsonParse(row.vary), params))
       .map((row) => row.entry),
   );
+}
+
+/**
+ * Classifies an incoming entry against the row currently stored for its slot
+ * (read from within the write transaction, i.e. before this call's upserts).
+ * The field is omitted when the incoming entry has empty validators.
+ */
+function relationshipForStoredEntry(
+  context: SqliteStoreWorkerContext,
+  entry: StoreEntryInput,
+): StoreEntryResult {
+  const newValidators = jsonParse(entry.entryJson).validators;
+  if (Object.keys(newValidators).length === 0) {
+    return {};
+  }
+
+  const existing = context.selectForSlot(entry.resourceId, entry.variantKey);
+  if (existing === undefined) {
+    return { relationshipToExistingStoredData: "is-new" };
+  }
+
+  const existingValidators = jsonParse(existing.entry).validators;
+  return {
+    relationshipToExistingStoredData: validatorsEqual(
+      existingValidators,
+      newValidators,
+    )
+      ? "unchanged"
+      : "changed",
+  };
 }
 
 function isDatabaseLockedError(error: unknown): boolean {

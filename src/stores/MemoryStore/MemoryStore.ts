@@ -1,6 +1,9 @@
 import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
 import type { CacheSpec, SpecForId } from "../../types/00_CacheSpec.js";
-import type { StoreGetManyResult } from "../../types/06_Store.js";
+import type {
+  StoreEntryResult,
+  StoreGetManyResult,
+} from "../../types/06_Store.js";
 import {
   type AnyParams,
   type AnyValidators,
@@ -11,6 +14,7 @@ import {
   type StoreEntryInput,
   type StoreGetManyRequest,
 } from "../../types/index.js";
+import { validatorsEqual } from "../../utils/normalizedProducerResultResourceHelpers.js";
 import type { JsonOf } from "../../utils/utils.js";
 import { jsonStringify } from "../../utils/utils.js";
 import {
@@ -188,11 +192,19 @@ export default class MemoryStore<
 
   public async store(
     entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ) {
-    await Promise.all(entriesWithTimes.map(async (it) => this.storeOne(it)));
+  ): Promise<readonly StoreEntryResult[]> {
+    // Track which slots have already been written by an earlier entry in this
+    // same call so that, for within-call duplicates, we compute the
+    // relationship only for the entry compared against the pre-call snapshot
+    // and omit the field for the (dropped) duplicates.
+    const seenCacheKeys = new Set<FullCacheKey<Spec["id"]>>();
+    return entriesWithTimes.map((it) => this.storeOne(it, seenCacheKeys));
   }
 
-  private async storeOne(it: StoreEntryInput<Spec, Validators, Params>) {
+  private storeOne(
+    it: StoreEntryInput<Spec, Validators, Params>,
+    seenCacheKeys: Set<FullCacheKey<Spec["id"]>>,
+  ): StoreEntryResult {
     const { entry, maxStoreForSeconds: deleteAfter } = it;
     const { id } = entry;
 
@@ -227,7 +239,37 @@ export default class MemoryStore<
     const finalDeleteAfterSeconds =
       deleteAfter === Infinity ? this.fallbackDeleteAfter : deleteAfter;
 
+    // Compute how this entry relates to what's already stored for its slot,
+    // BEFORE overwriting it. For a within-call duplicate (a slot already
+    // written by an earlier entry in this same call), omit the field, since the
+    // value we'd be comparing against is not the pre-call snapshot.
+    const result: StoreEntryResult = seenCacheKeys.has(cacheKey)
+      ? {}
+      : this.#relationshipToExisting(entry, this.entriesMap.get(cacheKey));
+    seenCacheKeys.add(cacheKey);
+
     this.entriesMap.set(cacheKey, [entry, id], finalDeleteAfterSeconds * 1000);
+    return result;
+  }
+
+  #relationshipToExisting(
+    entry: Entry<Spec, Validators, Params>,
+    existing: readonly [Entry<Spec, Validators, Params>, Spec["id"]] | undefined,
+  ): StoreEntryResult {
+    if (Object.keys(entry.validators).length === 0) {
+      return {};
+    }
+    if (existing === undefined) {
+      return { relationshipToExistingStoredData: "is-new" };
+    }
+    return {
+      relationshipToExistingStoredData: validatorsEqual(
+        existing[0].validators,
+        entry.validators,
+      )
+        ? "unchanged"
+        : "changed",
+    };
   }
 
   public async delete(id: Spec["id"]) {

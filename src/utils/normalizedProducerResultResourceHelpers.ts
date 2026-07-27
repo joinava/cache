@@ -1,3 +1,4 @@
+import { isEqual } from "es-toolkit";
 import type { ReadonlyDeep } from "type-fest";
 
 import { instantiateTaggedType } from "type-party/runtime/tagged-types.js";
@@ -56,6 +57,19 @@ export function potentiallyUsefulFor(
  */
 export function isValidatable(it: AnyNormalizedProducerResultResource) {
   return Object.keys(it.validators).length > 0;
+}
+
+/**
+ * Structural, order-independent deep-equality over two opaque `validators`
+ * objects, used to decide how a newly-stored entry relates to what was already
+ * stored for its slot. Validators are user-defined opaque JSON, so we do not
+ * normalize anything (e.g. weak/strong etag `W/` prefixes).
+ */
+export function validatorsEqual(
+  a: Partial<AnyValidators>,
+  b: Partial<AnyValidators>,
+): boolean {
+  return isEqual(a, b);
 }
 
 export function isFresh(it: AnyNormalizedProducerResultResource, at: Date) {

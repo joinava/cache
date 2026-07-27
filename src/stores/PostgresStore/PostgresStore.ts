@@ -20,7 +20,11 @@ import type {
   NormalizedParams,
   NormalizedVary,
 } from "../../types/06_Normalization.js";
-import type { StoreGetManyResult } from "../../types/06_Store.js";
+import type {
+  StoreEntryRelationship,
+  StoreEntryResult,
+  StoreGetManyResult,
+} from "../../types/06_Store.js";
 import type {
   EntryForId,
   Logger,
@@ -266,54 +270,97 @@ export default class PostgresStore<
 
   async store(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ): Promise<void> {
+  ): Promise<readonly StoreEntryResult[]> {
     this.logTrace("storing entries", entries);
     await this.ensureInitializedPromise;
 
     // Early return if there are no entries to store
     if (entries.length === 0) {
       this.logTrace("no entries to store, returning early");
-      return;
+      return [];
     }
 
+    // Postgres only allows an ON CONFLICT to affect the same key once per
+    // query, so we need to make sure that the entries are unique by id and
+    // vary; if not, we need to choose the one with the newest birth date.
+    // Entries dropped here report `{}` (they weren't the value compared/stored).
+    const deduped = keepMaxPerGroup({
+      items: entries.map((it, originalIndex) => ({ it, originalIndex })),
+      groupBy: ({ it }) => {
+        const { id, vary } = it.entry;
+        const key = [id, this.serializeVary(vary)] as const;
+        return jsonStringify(key) satisfies JsonOf<
+          Jsonify<[unknown, JsonOf<NormalizedVary<Params>>]>
+        > as unknown as JsonOf<[string, JsonOf<NormalizedVary<Params>>]>;
+      },
+      maxBy: ({ it }) => entryUtils.birthDate(it.entry).getTime(),
+    });
+
+    // One row per deduped entry, tagged with its position (`ord`) so the
+    // per-row relationship the query computes can be mapped back to inputs.
+    const inputRows = deduped.map(({ it }, ord) => {
+      const { id, vary } = it.entry;
+      return sql`(${id}::text, ${this.serializeVary(vary)}::jsonb, ${this.serializeEntry(it.entry)}::jsonb, ${ord}::int)`;
+    });
+
+    // A single statement whose sibling CTEs share one snapshot: `old` reads the
+    // pre-existing row for each slot while `upsert` overwrites it, so `old`
+    // always reflects the state before this call. A data-modifying CTE always
+    // runs even when unreferenced, so the upsert happens regardless.
+    const query = sql<{ ord: number; relationship: StoreEntryRelationship }>`
+      with input(resource_id, vary, entry, ord) as (
+        values ${sql.join(inputRows)}
+      ),
+      old as (
+        select i.ord, i.resource_id, i.vary,
+               t.entry->'validators' as old_validators
+        from input i
+        left join ${sql.table(this.tableName)} t
+          on t.resource_id = i.resource_id and t.vary = i.vary
+      ),
+      upsert as (
+        insert into ${sql.table(this.tableName)} (resource_id, vary, entry)
+        select resource_id, vary, entry from input
+        on conflict (resource_id, vary) do update set entry = excluded.entry
+      )
+      select o.ord,
+             case
+               when o.old_validators is null then 'is-new'
+               when o.old_validators is distinct from (i.entry->'validators') then 'changed'
+               else 'unchanged'
+             end as relationship
+      from old o
+      join input i on i.ord = o.ord
+    `;
+
+    let resultRows: readonly { ord: number; relationship: StoreEntryRelationship }[];
     try {
-      await this.db
-        .insertInto(this.tableName)
-        .values(
-          // Postgres only allows an ON CONFLICT to affect the same key once per
-          // query, so we need to make sure that the entries are unique by id and
-          // vary; if not, we need to choose the one with the newest birth date.
-          keepMaxPerGroup({
-            items: entries,
-            groupBy: (it) => {
-              const { id, vary } = it.entry;
-              const key = [id, this.serializeVary(vary)] as const;
-              return jsonStringify(key) satisfies JsonOf<
-                Jsonify<[unknown, JsonOf<NormalizedVary<Params>>]>
-              > as unknown as JsonOf<[string, JsonOf<NormalizedVary<Params>>]>;
-            },
-            maxBy: (it) => entryUtils.birthDate(it.entry).getTime(),
-          }).map((it) => {
-            const { id, vary } = it.entry;
-            return {
-              resource_id: id,
-              vary: this.serializeVary(vary),
-              entry: this.serializeEntry(it.entry),
-            };
-          }),
-        )
-        .onConflict((oc) =>
-          // should this use a conflict on primary key instead? not sure what's the performance difference
-          oc.columns(["resource_id", "vary"]).doUpdateSet((eb) => ({
-            entry: eb.ref("excluded.entry"),
-          })),
-        )
-        .execute();
+      ({ rows: resultRows } = await query.execute(this.db));
       this.logTrace("stored entries successfully");
     } catch (error) {
       this.logError("failed to store entries", error);
       throw error;
     }
+
+    const relationshipByOrd = new Map<number, StoreEntryRelationship>(
+      resultRows.map((row) => [row.ord, row.relationship]),
+    );
+
+    // Build the result array parallel to the original input entries. Apply the
+    // empty-validators-omit rule in JS (not in SQL) here.
+    const results: StoreEntryResult[] = entries.map(() => ({}));
+    deduped.forEach(({ it, originalIndex }, ord) => {
+      if (Object.keys(it.entry.validators).length === 0) {
+        return;
+      }
+      const relationship = relationshipByOrd.get(ord);
+      if (relationship !== undefined) {
+        results[originalIndex] = {
+          relationshipToExistingStoredData: relationship,
+        };
+      }
+    });
+    return results;
   }
 
   async delete(id: Spec["id"]): Promise<void> {

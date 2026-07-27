@@ -20,7 +20,10 @@ import type {
   NormalizedParams,
   NormalizedVary,
 } from "../../types/06_Normalization.js";
-import type { StoreGetManyResult } from "../../types/06_Store.js";
+import type {
+  StoreEntryResult,
+  StoreGetManyResult,
+} from "../../types/06_Store.js";
 import type {
   EntryForId,
   Logger,
@@ -195,16 +198,27 @@ export default class SqliteStore<
 
   public async store(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ): Promise<void> {
+  ): Promise<readonly StoreEntryResult[]> {
     if (this.#status !== "open") {
       throw new Error("SqliteStore is closed");
     }
-    if (entries.length === 0) return;
+    if (entries.length === 0) return [];
 
-    await this.#write({
+    // Entries are deduped per slot before being sent to the worker (keeping the
+    // newest birth date), so the worker's per-entry results are parallel to the
+    // deduped list. Map those back onto the original input order; entries
+    // dropped by dedup report `{}`.
+    const prepared = this.#prepareEntries(entries);
+    const workerResults = await this.#write({
       type: "store",
-      entries: this.#prepareEntries(entries),
+      entries: prepared.map((it) => it.workerEntry),
     });
+
+    const results: StoreEntryResult[] = entries.map(() => ({}));
+    prepared.forEach((it, i) => {
+      results[it.originalIndex] = workerResults[i] ?? {};
+    });
+    return results;
   }
 
   public async delete(id: Spec["id"]): Promise<void> {
@@ -272,8 +286,9 @@ export default class SqliteStore<
 
   #prepareEntries(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ): WorkerStoreEntryInput[] {
-    return Map.groupBy(entries, ({ entry }) =>
+  ): { workerEntry: WorkerStoreEntryInput; originalIndex: number }[] {
+    const indexed = entries.map((it, originalIndex) => ({ it, originalIndex }));
+    return Map.groupBy(indexed, ({ it: { entry } }) =>
       jsonStringify([entry.id, resultVariantKey(entry.vary)]),
     )
       .values()
@@ -281,11 +296,14 @@ export default class SqliteStore<
         const newestForVariant = maxBy(
           // groupBy guarantees that the array is non-empty
           sameVariantEntries as AsNonEmptyArray<typeof sameVariantEntries>,
-          ({ entry }) => birthDate(entry).valueOf(),
+          ({ it: { entry } }) => birthDate(entry).valueOf(),
         );
 
-        const { entry, maxStoreForSeconds } = newestForVariant;
-        return this.#prepareEntry(entry, maxStoreForSeconds);
+        const { entry, maxStoreForSeconds } = newestForVariant.it;
+        return {
+          workerEntry: this.#prepareEntry(entry, maxStoreForSeconds),
+          originalIndex: newestForVariant.originalIndex,
+        };
       })
       .toArray();
   }
