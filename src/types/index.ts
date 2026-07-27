@@ -36,6 +36,8 @@ export type {
 export type {
   Store,
   StoreEntryInput,
+  StoreEntryRelationship,
+  StoreEntryResult,
   StoreGetManyRequest,
   StoreGetManyResult,
 } from "./06_Store.js";

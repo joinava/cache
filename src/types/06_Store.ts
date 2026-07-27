@@ -23,6 +23,46 @@ export type StoreEntryInput<
 };
 
 /**
+ * Describes how a stored entry's value relates to what was already stored for
+ * the same slot, based solely on the entry's `validators`.
+ *
+ * - "is-new":    the (id, vary) slot held no live entries when this entry was
+ *                stored (nothing to compare against).
+ * - "unchanged": the slot was non-empty and the entry's validators deep-equal
+ *                the validators of the currently-stored entry with the NEWEST
+ *                birth date (see entryUtils.birthDate) for that slot.
+ * - "changed":   the slot was non-empty and the entry's validators do NOT
+ *                deep-equal that newest-birth-date entry's validators.
+ *
+ * The comparison is a structural, order-independent deep-equality over the
+ * whole opaque `validators` object; no validator key is privileged. Both
+ * sides are interpreted in their JSON-serialized form: validator values are
+ * JSON by contract, but a type-violating `undefined` value is expressible
+ * from JS and is silently dropped on persistence, so it's ignored here too
+ * (for the emptiness check as well as the comparison) -- regardless of
+ * whether the particular store actually serializes.
+ *
+ * "Live" is defined by the store's own read semantics: if a store physically
+ * holds records that it would not return in response to a `get` (e.g.,
+ * records it considers expired but has not yet vacuumed), those records must
+ * NOT be considered for the purposes of this flag -- an incoming entry whose
+ * slot holds only such records is "is-new".
+ *
+ * When multiple stored entries share the newest birth date but differ in
+ * validators (not reachable by any current store, which keep <= 1 entry per
+ * slot), which one is treated as the reference is implementation-defined.
+ */
+export type StoreEntryRelationship = "unchanged" | "changed" | "is-new";
+
+export type StoreEntryResult = {
+  /**
+   * Omitted when the store did not perform the check, OR when the incoming
+   * entry has empty validators (no validators => nothing to compare on).
+   */
+  readonly relationshipToExistingStoredData?: StoreEntryRelationship;
+};
+
+/**
  * This interfaces defines the methods that must be supported by "stores",
  * which are instances responsible for actually storing/querying cache entries
  * (on disk, in memory, in a database, etc). The type params have the same
@@ -110,10 +150,16 @@ export type Store<
    * This method stores a list of cache entries. This method's return promise
    * should reject if storage fails, but specific errors are not currently
    * defined.
+   *
+   * If multiple entries in one call target the same (id, vary) slot, only the
+   * entry with the newest birth date (see entryUtils.birthDate) is stored;
+   * the dropped duplicates persist nothing and omit
+   * `relationshipToExistingStoredData` in their result slots. Which duplicate
+   * wins among entries tied on birth date is implementation-defined.
    */
   store(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ): Promise<void>;
+  ): Promise<readonly StoreEntryResult[]>;
 
   /**
    * Deletes all stored entries for resources with the given id.

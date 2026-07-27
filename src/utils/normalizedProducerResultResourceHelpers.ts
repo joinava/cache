@@ -1,3 +1,4 @@
+import { isEqual } from "es-toolkit";
 import type { ReadonlyDeep } from "type-fest";
 
 import { instantiateTaggedType } from "type-party/runtime/tagged-types.js";
@@ -56,6 +57,41 @@ export function potentiallyUsefulFor(
  */
 export function isValidatable(it: AnyNormalizedProducerResultResource) {
   return Object.keys(it.validators).length > 0;
+}
+
+/**
+ * Structural, order-independent deep-equality over two opaque `validators`
+ * objects, used to decide how a newly-stored entry relates to what was already
+ * stored for its slot. Validators are user-defined opaque JSON, so we do not
+ * normalize anything (e.g. weak/strong etag `W/` prefixes).
+ *
+ * Callers must pass values in their JSON-serialized form (see
+ * {@link validatorsAsStored}); values read back from a JSON-backed store
+ * already are.
+ */
+export function validatorsEqual(
+  a: Partial<AnyValidators>,
+  b: Partial<AnyValidators>,
+): boolean {
+  return isEqual(a, b);
+}
+
+/**
+ * Returns the validators as they survive JSON serialization. Validator values
+ * are JSON by contract, but `undefined` values are expressible from JS and
+ * are silently dropped when an entry is persisted. Change detection operates
+ * on this serialized form -- for both the emptiness check and the comparison
+ * -- so that stores that see the raw in-memory object (MemoryStore, and the
+ * incoming side in PostgresStore) agree with stores that compare persisted
+ * JSON (SqliteStore).
+ */
+export function validatorsAsStored(
+  validators: Partial<AnyValidators>,
+): Partial<AnyValidators> {
+  // The round-trip is exactly the transform persistence applies, and
+  // serializing a validators object yields a validators object (minus any
+  // dropped keys), so the cast back is sound.
+  return JSON.parse(JSON.stringify(validators)) as Partial<AnyValidators>;
 }
 
 export function isFresh(it: AnyNormalizedProducerResultResource, at: Date) {

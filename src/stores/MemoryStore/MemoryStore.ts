@@ -1,6 +1,9 @@
 import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
 import type { CacheSpec, SpecForId } from "../../types/00_CacheSpec.js";
-import type { StoreGetManyResult } from "../../types/06_Store.js";
+import type {
+  StoreEntryResult,
+  StoreGetManyResult,
+} from "../../types/06_Store.js";
 import {
   type AnyParams,
   type AnyValidators,
@@ -11,8 +14,13 @@ import {
   type StoreEntryInput,
   type StoreGetManyRequest,
 } from "../../types/index.js";
+import {
+  birthDate,
+  validatorsAsStored,
+  validatorsEqual,
+} from "../../utils/normalizedProducerResultResourceHelpers.js";
 import type { JsonOf } from "../../utils/utils.js";
-import { jsonStringify } from "../../utils/utils.js";
+import { jsonStringify, keepMaxPerGroup } from "../../utils/utils.js";
 import {
   requestVariantKeyForVaryKeys,
   resultVariantKey,
@@ -188,46 +196,115 @@ export default class MemoryStore<
 
   public async store(
     entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ) {
-    await Promise.all(entriesWithTimes.map(async (it) => this.storeOne(it)));
+  ): Promise<readonly StoreEntryResult[]> {
+    // Derive each input's slot (variant + full cache key) once, up front.
+    const prepared = entriesWithTimes.map((input, index) => {
+      const variantKey = resultVariantKey(input.entry.vary);
+      return {
+        input,
+        index,
+        variantKey,
+        cacheKey: makeCacheKey(input.entry.id, variantKey),
+      };
+    });
+
+    // The relationship is measured against what each slot held BEFORE this
+    // call, so snapshot every touched slot's current entry now, before any
+    // write. Reading a slot more than once here is harmless: nothing has been
+    // written yet, so each read of a slot returns the same pre-call value.
+    const preCallBySlot = new Map(
+      prepared.map(({ cacheKey }) => [cacheKey, this.entriesMap.get(cacheKey)] as const),
+    );
+
+    // Dedupe within the call per the contract's uniform rule: for each slot,
+    // only the entry with the newest birth date persists (the same rule the
+    // other stores apply).
+    const winners = keepMaxPerGroup({
+      items: prepared,
+      groupBy: (it) => it.cacheKey,
+      maxBy: (it) => birthDate(it.input.entry).valueOf(),
+    });
+    winners.forEach((it) => this.#persist(it));
+
+    const winnerIndexBySlot = new Map(
+      winners.map(({ cacheKey, index }) => [cacheKey, index] as const),
+    );
+
+    // Each slot's winner reports how its validators relate to that slot's
+    // pre-call entry; every other input (a dropped within-call duplicate) is
+    // omitted.
+    return prepared.map(({ input, index, cacheKey }) =>
+      winnerIndexBySlot.get(cacheKey) === index
+        ? this.#relationshipToExisting(input.entry, preCallBySlot.get(cacheKey))
+        : {},
+    );
   }
 
-  private async storeOne(it: StoreEntryInput<Spec, Validators, Params>) {
-    const { entry, maxStoreForSeconds: deleteAfter } = it;
+  /** Writes one prepared entry into the store, updating the resource metadata. */
+  #persist(prepared: {
+    readonly input: StoreEntryInput<Spec, Validators, Params>;
+    readonly variantKey: VariantKey;
+    readonly cacheKey: FullCacheKey<Spec["id"]>;
+  }): void {
+    const { input, variantKey, cacheKey } = prepared;
+    const { entry, maxStoreForSeconds: deleteAfter } = input;
     const { id } = entry;
 
-    let resourceMetadata = this.resourceMetadataMap.get(id);
-    if (resourceMetadata === undefined) {
-      resourceMetadata = { varyKeysSets: [], entryVariantKeys: [] };
-      this.resourceMetadataMap.set(id, resourceMetadata);
-    }
+    const resourceMetadata = this.#resourceMetadataFor(id);
 
-    // Get a canonical array for Object.keys(entry.vary) so that we don't add
-    // duplicates to resourceMetadata.varyKeys, which would slow down reads!
+    // Record this entry's varyKeys set and variant key (deduped). We use arrays
+    // rather than sets because the per-resource counts are tiny and we'd rather
+    // slow down store() than get(). The varyKeys array is canonicalized so
+    // equal sets are reference-equal (and thus deduped).
     const varyKeys = canonicalSmallStringMultiset(Object.keys(entry.vary));
-
-    // We add the new varyKeys to the array, using an array rather than a set
-    // because, again, we expect the number of varyKeys per resource to be very
-    // small and because we'd rather slow down store() than get(), which using a
-    // set would do.
     if (!resourceMetadata.varyKeysSets.includes(varyKeys)) {
       resourceMetadata.varyKeysSets.push(varyKeys);
     }
-
-    // For storing the variant key in the metadata, we don't care about the
-    // components, so we can just use a string rather than a canonical array.
-    const variantKey = resultVariantKey(entry.vary);
-
     if (!resourceMetadata.entryVariantKeys.includes(variantKey)) {
       resourceMetadata.entryVariantKeys.push(variantKey);
     }
 
-    // Now that the metadata's updated, we store the content.
-    const cacheKey = makeCacheKey(id, variantKey);
-    const finalDeleteAfterSeconds =
+    const deleteAfterSeconds =
       deleteAfter === Infinity ? this.fallbackDeleteAfter : deleteAfter;
+    this.entriesMap.set(cacheKey, [entry, id], deleteAfterSeconds * 1000);
+  }
 
-    this.entriesMap.set(cacheKey, [entry, id], finalDeleteAfterSeconds * 1000);
+  /** Returns the resource's metadata record, creating an empty one if absent. */
+  #resourceMetadataFor(id: Spec["id"]): {
+    varyKeysSets: VaryKeys[];
+    entryVariantKeys: VariantKey[];
+  } {
+    const existing = this.resourceMetadataMap.get(id);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const created = { varyKeysSets: [], entryVariantKeys: [] };
+    this.resourceMetadataMap.set(id, created);
+    return created;
+  }
+
+  #relationshipToExisting(
+    entry: Entry<Spec, Validators, Params>,
+    existing: readonly [Entry<Spec, Validators, Params>, Spec["id"]] | undefined,
+  ): StoreEntryResult {
+    // This store holds raw in-memory objects, so normalize BOTH sides to their
+    // JSON-serialized form before checking emptiness or comparing, to agree
+    // with the JSON-backed stores on type-violating values (e.g. `undefined`).
+    const newValidators = validatorsAsStored(entry.validators);
+    if (Object.keys(newValidators).length === 0) {
+      return {};
+    }
+    if (existing === undefined) {
+      return { relationshipToExistingStoredData: "is-new" };
+    }
+    return {
+      relationshipToExistingStoredData: validatorsEqual(
+        validatorsAsStored(existing[0].validators),
+        newValidators,
+      )
+        ? "unchanged"
+        : "changed",
+    };
   }
 
   public async delete(id: Spec["id"]) {

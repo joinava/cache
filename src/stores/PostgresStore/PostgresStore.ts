@@ -1,4 +1,3 @@
-import { maxBy } from "es-toolkit";
 import type { ColumnType, RawBuilder, SqlBool } from "kysely";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import type { Pool } from "pg";
@@ -20,7 +19,10 @@ import type {
   NormalizedParams,
   NormalizedVary,
 } from "../../types/06_Normalization.js";
-import type { StoreGetManyResult } from "../../types/06_Store.js";
+import type {
+  StoreEntryResult,
+  StoreGetManyResult,
+} from "../../types/06_Store.js";
 import type {
   EntryForId,
   Logger,
@@ -32,8 +34,13 @@ import type {
 import type { Bind2 } from "../../types/utils.js";
 import { restoreInfinityInDirectives } from "../../utils/normalization.js";
 import {
+  validatorsAsStored,
+  validatorsEqual,
+} from "../../utils/normalizedProducerResultResourceHelpers.js";
+import {
   defaultLoggersByComponent,
   jsonStringify,
+  keepMaxPerGroup,
   naiveGetMany,
 } from "../../utils/utils.js";
 
@@ -266,54 +273,170 @@ export default class PostgresStore<
 
   async store(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ): Promise<void> {
+  ): Promise<readonly StoreEntryResult[]> {
     this.logTrace("storing entries", entries);
     await this.ensureInitializedPromise;
 
     // Early return if there are no entries to store
     if (entries.length === 0) {
       this.logTrace("no entries to store, returning early");
-      return;
+      return [];
     }
 
-    try {
-      await this.db
-        .insertInto(this.tableName)
-        .values(
-          // Postgres only allows an ON CONFLICT to affect the same key once per
-          // query, so we need to make sure that the entries are unique by id and
-          // vary; if not, we need to choose the one with the newest birth date.
-          keepMaxPerGroup({
-            items: entries,
-            groupBy: (it) => {
-              const { id, vary } = it.entry;
-              const key = [id, this.serializeVary(vary)] as const;
-              return jsonStringify(key) satisfies JsonOf<
-                Jsonify<[unknown, JsonOf<NormalizedVary<Params>>]>
-              > as unknown as JsonOf<[string, JsonOf<NormalizedVary<Params>>]>;
-            },
-            maxBy: (it) => entryUtils.birthDate(it.entry).getTime(),
-          }).map((it) => {
-            const { id, vary } = it.entry;
-            return {
-              resource_id: id,
-              vary: this.serializeVary(vary),
-              entry: this.serializeEntry(it.entry),
-            };
-          }),
-        )
-        .onConflict((oc) =>
-          // should this use a conflict on primary key instead? not sure what's the performance difference
-          oc.columns(["resource_id", "vary"]).doUpdateSet((eb) => ({
-            entry: eb.ref("excluded.entry"),
-          })),
-        )
-        .execute();
-      this.logTrace("stored entries successfully");
-    } catch (error) {
-      this.logError("failed to store entries", error);
-      throw error;
+    // Postgres only allows an ON CONFLICT to affect the same key once per
+    // query, so collapse entries that share a slot (id + vary), keeping the
+    // newest by birth date. Dropped duplicates report `{}` (they weren't the
+    // value compared/stored).
+    const deduped = keepMaxPerGroup({
+      items: entries.map((it, originalIndex) => ({ it, originalIndex })),
+      groupBy: ({ it }) => this.slotKey(it.entry),
+      maxBy: ({ it }) => entryUtils.birthDate(it.entry).getTime(),
+    });
+
+    // Sort the rows by a deterministic key so that every store() call acquires
+    // its row locks in the same global order. Postgres processes a multi-row
+    // INSERT's rows in order, locking each conflicting row as it goes, so two
+    // concurrent calls whose batches share >= 2 slots in DIFFERENT orders
+    // could otherwise deadlock (each holding a row the other is waiting on).
+    // With a consistent order, the later call just waits for the earlier one.
+    const rows = deduped
+      .map(({ it }) => ({
+        resource_id: it.entry.id,
+        vary: this.serializeVary(it.entry.vary),
+        entry: this.serializeEntry(it.entry),
+      }))
+      .toSorted((a, b) =>
+        a.resource_id < b.resource_id
+          ? -1
+          : a.resource_id > b.resource_id
+            ? 1
+            : a.vary < b.vary
+              ? -1
+              : a.vary > b.vary
+                ? 1
+                : 0,
+      );
+    const resourceIds = [...new Set(deduped.map(({ it }) => it.entry.id))];
+
+    // One statement with two sibling CTEs sharing a single snapshot: `old` reads
+    // each affected slot's validators as they were BEFORE this call, while
+    // `upsert` overwrites the rows. A data-modifying CTE runs even though the
+    // final query doesn't reference `upsert`, so the write still happens; and
+    // because both CTEs see the pre-statement snapshot, `old` reflects the
+    // state before the upsert. We select `old` back to compare in JS (the same
+    // `validatorsEqual` the other stores use), rather than comparing in SQL.
+    //
+    // Concurrency caveat: this store plays a little loose with the contract's
+    // "as it was before this store() call" under a same-slot race. The
+    // classification comes from this statement's snapshot, but ON CONFLICT DO
+    // UPDATE can still see -- and overwrite -- a row a concurrent writer
+    // committed after that snapshot was taken. In that window we may report
+    // "is-new" (or a stale changed/unchanged) even though the upsert actually
+    // replaced the concurrent write. We accept that approximation for cache
+    // workloads rather than pay for row locks (SELECT ... FOR UPDATE) on
+    // every store; MemoryStore (synchronous) and SqliteStore (one write
+    // transaction) are exact.
+    // NB: kysely can't keep the row type for columns whose type depends on this
+    // class's `Params`/`Validators` generics, so -- as in `get` -- we cast the
+    // read-back rows to their known shape. The query *construction* above is
+    // still fully checked by kysely (table, columns, insert shape, on-conflict).
+    const oldRows = (await this.db
+      .with("old", (c) =>
+        c
+          .selectFrom(this.tableName)
+          .where("resource_id", "in", resourceIds)
+          .select((eb) => [
+            "resource_id",
+            "vary",
+            sql<Partial<Validators>>`${eb.ref("entry")} -> 'validators'`.as(
+              "validators",
+            ),
+          ]),
+      )
+      .with("upsert", (c) =>
+        c
+          .insertInto(this.tableName)
+          .values(rows)
+          .onConflict((oc) =>
+            oc
+              .columns(["resource_id", "vary"])
+              .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") })),
+          ),
+      )
+      .selectFrom("old")
+      .selectAll("old")
+      .execute()
+      .catch((error: unknown) => {
+        this.logError("failed to store entries", error);
+        throw error;
+      })) as unknown as readonly {
+      resource_id: string;
+      vary: Readonly<NormalizedVary<Params>>;
+      validators: Partial<Validators>;
+    }[];
+    this.logTrace("stored entries successfully");
+
+    // Index each affected slot's pre-call validators, so a slot with no row here
+    // is one that didn't exist before the call (i.e. "is-new").
+    const oldValidatorsBySlot = new Map(
+      oldRows.map((row) => [
+        this.slotKey({ id: row.resource_id, vary: row.vary }),
+        row.validators,
+      ]),
+    );
+
+    // Each deduped ("winner") entry reports its relationship, keyed back to its
+    // original input index.
+    const resultByInputIndex = new Map<number, StoreEntryResult>(
+      deduped.map(({ it, originalIndex }) => [
+        originalIndex,
+        this.#relationshipToExisting(it.entry, oldValidatorsBySlot),
+      ]),
+    );
+
+    // Map back onto the full input order; every input that isn't a winner (a
+    // dropped within-call duplicate) isn't in the map and so is omitted.
+    return entries.map((_entry, index) => resultByInputIndex.get(index) ?? {});
+  }
+
+  /**
+   * A canonical key for an entry's slot (resource id + vary). `jsonStringify` is
+   * a stable stringify, so the same logical slot always yields the same key
+   * regardless of key order or how Postgres returns the `vary` jsonb -- which is
+   * what lets us match the read-back `old` rows to inputs in JS.
+   */
+  private slotKey(entry: {
+    id: string;
+    vary: Readonly<NormalizedVary<Params>>;
+  }): string {
+    return jsonStringify([entry.id, entry.vary]);
+  }
+
+  /**
+   * How an incoming entry's validators relate to the slot's pre-call validators.
+   * Empty incoming validators are omitted; a slot absent from the map is is-new.
+   */
+  #relationshipToExisting(
+    entry: Entry<Spec, Validators, Params>,
+    oldValidatorsBySlot: ReadonlyMap<string, Partial<AnyValidators>>,
+  ): StoreEntryResult {
+    // The old side comes back from jsonb and so is already in JSON-serialized
+    // form; normalize the raw in-memory incoming side to match, so both the
+    // emptiness check and the comparison agree with the other stores on
+    // type-violating values (e.g. `undefined`).
+    const newValidators = validatorsAsStored(entry.validators);
+    if (Object.keys(newValidators).length === 0) {
+      return {};
     }
+    const old = oldValidatorsBySlot.get(this.slotKey(entry));
+    if (old === undefined) {
+      return { relationshipToExistingStoredData: "is-new" };
+    }
+    return {
+      relationshipToExistingStoredData: validatorsEqual(old, newValidators)
+        ? "unchanged"
+        : "changed",
+    };
   }
 
   async delete(id: Spec["id"]): Promise<void> {
@@ -454,20 +577,4 @@ export default class PostgresStore<
       Params
     > as EntryForId<Spec, Validators, Params, Id>;
   }
-}
-
-function keepMaxPerGroup<T>(opts: {
-  items: readonly T[];
-  groupBy: (item: T) => string;
-  maxBy: (item: T) => number;
-}): T[] {
-  return Map.groupBy(opts.items, opts.groupBy)
-    .values()
-    .map((group) =>
-      // Non-null assertions are safe because the group cannot be empty,
-      // or it wouldn't have an entry in the Map.
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      group.length > 1 ? maxBy(group, opts.maxBy)! : group[0]!,
-    )
-    .toArray();
 }

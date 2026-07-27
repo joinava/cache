@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import fc from "fast-check";
 import { after, before, describe, it, mock } from "node:test";
 import { makeTestWithFixture } from "test-with-fixture";
 
@@ -390,6 +391,63 @@ describe("Cache", { concurrency: true }, () => {
   );
 
   describe("PostgresStore-specific behavior", () => {
+    it("does not deadlock when concurrent store() calls hit overlapping slots in different orders", async () => {
+      // Postgres processes a multi-row INSERT ... ON CONFLICT DO UPDATE's rows
+      // in order, locking each conflicting row as it goes. If concurrent
+      // store() calls could lock the same rows in DIFFERENT orders, each could
+      // grab a row the other is waiting on, and Postgres would abort one with
+      // a "deadlock detected" error (40P01) after deadlock_timeout. The store
+      // must therefore order its rows deterministically, so concurrent calls
+      // acquire locks in one global order and merely wait on each other. This
+      // property drives concurrent same-slot batches in forward and reversed
+      // input orders; without deterministic ordering it deadlocks reliably.
+      const cache = new Cache(postgresStore);
+
+      await fc.assert(
+        fc.asyncProperty(
+          fc.record({
+            runId: fc.uuid(),
+            slotCount: fc.integer({ min: 60, max: 120 }),
+          }),
+          async ({ runId, slotCount }) => {
+            const data = Array.from({ length: slotCount }, (_unused, i) => ({
+              id: `${runId}:${String(i)}`,
+              vary: emptyVary,
+              // A non-trivial payload keeps each row's processing from being
+              // instantaneous, widening the window in which the concurrent
+              // statements actually interleave.
+              content: { i, padding: "x".repeat(2048) },
+              directives: { freshUntilAge: 60 },
+            }));
+
+            // Seed the slots so the concurrent calls below take the
+            // row-UPDATE (lock-then-wait) path on every slot.
+            await cache.store(data);
+
+            const reversed = data.toReversed();
+            const results = await Promise.allSettled([
+              cache.store(data),
+              cache.store(reversed),
+              cache.store(data),
+              cache.store(reversed),
+            ]);
+            // Surface the rejection reasons (e.g. "deadlock detected") in the
+            // assertion diff, rather than an opaque `{ status: 'rejected' }`.
+            const failures = results.flatMap((r) =>
+              r.status === "rejected" ? [String(r.reason)] : [],
+            );
+            expect(failures).to.deep.eq([]);
+          },
+        ),
+        // Each run is expensive (hundreds of rows across 5 statements), and a
+        // single run of ~100 reversed-order rows already reproduces the
+        // deadlock essentially every time when ordering is nondeterministic.
+        // Skip shrinking: a deadlock is binary and shrinking would rerun many
+        // ~1s deadlock_timeout cycles.
+        { numRuns: 3, endOnFailure: true },
+      );
+    });
+
     it("should only keep the entry with the newest birth date when storing multiple entries with same id and vary", async () => {
       const cache = new Cache(postgresStore);
       const id = randomURI();

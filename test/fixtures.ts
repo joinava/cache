@@ -164,15 +164,19 @@ export function postgresStoreFixture() {
       user: process.env["DATABASE_USER"]!, // eslint-disable-line @typescript-eslint/no-non-null-assertion
       password: process.env["DATABASE_PASSWORD"]!, // eslint-disable-line @typescript-eslint/no-non-null-assertion
     });
-    // Use a new schema name for each store instance so that tests can run in
-    // parallel without interfering with each other.
+    // Use a new schema AND table name for each store instance so that tests
+    // (and test files, which node runs in parallel) can't interfere with each
+    // other: cleanup drops the whole schema, so a schema shared across
+    // fixtures would let one suite's cleanup destroy another suite's
+    // still-in-use tables mid-run.
+    const schemaName = `cache_test_${Math.random()}`.replace(/\./g, "_");
     const tableName = `cache-test-${Math.random()}`.replace(/\./g, "_");
     const postgresStore = new PostgresStore<
       CacheSpec<string, JSON>,
       AnyValidators,
       PostgresStoreSupportedParams
     >(postgres, {
-      schemaName: "cache",
+      schemaName,
       tableName,
     });
 
@@ -183,7 +187,7 @@ export function postgresStoreFixture() {
         // eslint-disable-next-line no-console
         console.log("Cleaning up postgres store");
         await postgresStore[Symbol.asyncDispose]();
-        await postgres.query("drop schema cache cascade");
+        await postgres.query(`drop schema "${schemaName}" cascade`);
         await postgres.end();
       },
     };

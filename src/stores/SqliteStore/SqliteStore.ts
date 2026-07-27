@@ -1,4 +1,3 @@
-import { maxBy } from "es-toolkit";
 import { fileURLToPath } from "node:url";
 import { Piscina } from "piscina";
 import type {
@@ -6,7 +5,6 @@ import type {
   Jsonify,
   JsonOf,
   JSONWithUndefined,
-  NonEmptyArray,
 } from "type-party";
 import { parseDateString } from "type-party/runtime/dates.js";
 import { jsonParse, jsonStringify } from "type-party/runtime/json.js";
@@ -20,7 +18,10 @@ import type {
   NormalizedParams,
   NormalizedVary,
 } from "../../types/06_Normalization.js";
-import type { StoreGetManyResult } from "../../types/06_Store.js";
+import type {
+  StoreEntryResult,
+  StoreGetManyResult,
+} from "../../types/06_Store.js";
 import type {
   EntryForId,
   Logger,
@@ -31,6 +32,7 @@ import type {
 } from "../../types/index.js";
 import { restoreInfinityInDirectives } from "../../utils/normalization.js";
 import { birthDate } from "../../utils/normalizedProducerResultResourceHelpers.js";
+import { keepMaxPerGroup } from "../../utils/utils.js";
 import { resultVariantKey } from "../../utils/varyHelpers.js";
 import type {
   ReadWorkerRequestInput,
@@ -54,10 +56,6 @@ type TableEntry<
   Params extends SqliteStoreSupportedParams,
   Id extends Spec["id"] = Spec["id"],
 > = JsonifiedEntry<SpecForId<Spec, Id>, Validators, Params>;
-
-type AsNonEmptyArray<T extends readonly unknown[]> = T extends (infer U)[]
-  ? NonEmptyArray<U>
-  : never;
 
 /**
  * A {@link Store} backed by a single SQLite database file.
@@ -195,16 +193,27 @@ export default class SqliteStore<
 
   public async store(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ): Promise<void> {
+  ): Promise<readonly StoreEntryResult[]> {
     if (this.#status !== "open") {
       throw new Error("SqliteStore is closed");
     }
-    if (entries.length === 0) return;
+    if (entries.length === 0) return [];
 
-    await this.#write({
+    // Entries are deduped per slot before being sent to the worker (keeping the
+    // newest birth date), so the worker's per-entry results are parallel to the
+    // deduped list. Map those back onto the original input order; entries
+    // dropped by dedup report `{}`.
+    const prepared = this.#prepareEntries(entries);
+    const workerResults = await this.#write({
       type: "store",
-      entries: this.#prepareEntries(entries),
+      entries: prepared.map((it) => it.workerEntry),
     });
+
+    const results: StoreEntryResult[] = entries.map(() => ({}));
+    prepared.forEach((it, i) => {
+      results[it.originalIndex] = workerResults[i] ?? {};
+    });
+    return results;
   }
 
   public async delete(id: Spec["id"]): Promise<void> {
@@ -272,22 +281,16 @@ export default class SqliteStore<
 
   #prepareEntries(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ): WorkerStoreEntryInput[] {
-    return Map.groupBy(entries, ({ entry }) =>
-      jsonStringify([entry.id, resultVariantKey(entry.vary)]),
-    )
-      .values()
-      .map((sameVariantEntries) => {
-        const newestForVariant = maxBy(
-          // groupBy guarantees that the array is non-empty
-          sameVariantEntries as AsNonEmptyArray<typeof sameVariantEntries>,
-          ({ entry }) => birthDate(entry).valueOf(),
-        );
-
-        const { entry, maxStoreForSeconds } = newestForVariant;
-        return this.#prepareEntry(entry, maxStoreForSeconds);
-      })
-      .toArray();
+  ): { workerEntry: WorkerStoreEntryInput; originalIndex: number }[] {
+    return keepMaxPerGroup({
+      items: entries.map((it, originalIndex) => ({ it, originalIndex })),
+      groupBy: ({ it: { entry } }) =>
+        jsonStringify([entry.id, resultVariantKey(entry.vary)]),
+      maxBy: ({ it: { entry } }) => birthDate(entry).valueOf(),
+    }).map(({ it: { entry, maxStoreForSeconds }, originalIndex }) => ({
+      workerEntry: this.#prepareEntry(entry, maxStoreForSeconds),
+      originalIndex,
+    }));
   }
 
   #prepareEntry(
