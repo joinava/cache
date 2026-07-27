@@ -346,21 +346,28 @@ export default class PostgresStore<
       resultRows.map((row) => [row.ord, row.relationship]),
     );
 
-    // Build the result array parallel to the original input entries. Apply the
-    // empty-validators-omit rule in JS (not in SQL) here.
-    const results: StoreEntryResult[] = entries.map(() => ({}));
-    deduped.forEach(({ it, originalIndex }, ord) => {
-      if (Object.keys(it.entry.validators).length === 0) {
-        return;
-      }
-      const relationship = relationshipByOrd.get(ord);
-      if (relationship !== undefined) {
-        results[originalIndex] = {
-          relationshipToExistingStoredData: relationship,
-        };
-      }
-    });
-    return results;
+    // Each deduped ("winner") entry reports the relationship the query computed
+    // for its `ord`, keyed back to its original input index -- except that an
+    // incoming entry with empty validators is omitted per the contract (the SQL
+    // still returns a relationship for it, so we override here, not in SQL).
+    const resultByInputIndex = new Map<number, StoreEntryResult>(
+      deduped.map(({ it, originalIndex }, ord) => {
+        const relationship =
+          Object.keys(it.entry.validators).length === 0
+            ? undefined
+            : relationshipByOrd.get(ord);
+        return [
+          originalIndex,
+          relationship === undefined
+            ? {}
+            : { relationshipToExistingStoredData: relationship },
+        ];
+      }),
+    );
+
+    // Map back onto the full input order; every input that isn't a winner (a
+    // dropped within-call duplicate) isn't in the map and so is omitted.
+    return entries.map((_entry, index) => resultByInputIndex.get(index) ?? {});
   }
 
   async delete(id: Spec["id"]): Promise<void> {
