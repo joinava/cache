@@ -620,7 +620,7 @@ describe("Cache", { concurrency: true }, () => {
         }
       });
 
-      it("publishes nothing for entries whose relationship was not reported", async () => {
+      it("publishes an undefined relationship for entries whose relationship was not reported", async () => {
         const cache = new Cache(memoryStore);
         const idWithValidators = randomURI();
         const idWithoutValidators = randomURI();
@@ -631,7 +631,8 @@ describe("Cache", { concurrency: true }, () => {
 
         try {
           // One store() call with a mixed batch: only the entry with
-          // validators gets a relationship, so only it gets an event.
+          // validators gets a relationship; the other's event carries
+          // undefined (empty validators => nothing to compare on).
           await cache.store([
             {
               id: idWithoutValidators,
@@ -649,6 +650,12 @@ describe("Cache", { concurrency: true }, () => {
           ]);
 
           expect(collector.messages).to.deep.equal([
+            {
+              id: idWithoutValidators,
+              vary: emptyVary,
+              validators: {},
+              relationshipToExistingStoredData: undefined,
+            },
             {
               id: idWithValidators,
               vary: emptyVary,

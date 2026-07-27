@@ -99,11 +99,11 @@ export function publishDroppedDirective(
 }
 
 /**
- * Name of the diagnostics channel that fires once per stored entry for which
- * the store reported how the entry's value relates to what was already stored
- * for the same `(id, vary)` slot (see {@link StoreEntryRelationship}). No
- * event fires for entries where the store omitted the check (or the entry had
- * empty validators, in which case there's nothing to compare on).
+ * Name of the diagnostics channel that fires once per entry passed to
+ * `Cache.store()`, reporting how the entry's value relates to what was
+ * already stored for the same `(id, vary)` slot (see
+ * {@link StoreEntryRelationship}) -- or `undefined` when the store didn't
+ * report a relationship for the entry.
  *
  * Subscribers can use these events to, e.g., observe how often cached data is
  * actually changing at the origin.
@@ -121,8 +121,14 @@ export type StoreEntryResultMessage = {
   vary: Vary<AnyParams>;
   /** The stored entry's validators, on which the comparison was keyed */
   validators: Partial<AnyValidators>;
-  /** How the entry's value relates to what the slot previously held */
-  relationshipToExistingStoredData: StoreEntryRelationship;
+  /**
+   * How the entry's value relates to what the slot previously held, or
+   * `undefined` when the store didn't report a relationship for this entry
+   * (it didn't perform the check, the entry had empty validators so there was
+   * nothing to compare on, or the entry was an in-call duplicate that lost to
+   * a newer entry for the same slot and so was never persisted).
+   */
+  relationshipToExistingStoredData: StoreEntryRelationship | undefined;
 };
 
 /**

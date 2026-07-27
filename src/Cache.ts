@@ -360,9 +360,6 @@ export default class Cache<
 
     // The results array is parallel to the input entries (see Store.store).
     results.forEach(({ relationshipToExistingStoredData }, i) => {
-      if (relationshipToExistingStoredData === undefined) {
-        return;
-      }
       // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
       const { entry } = entriesWithTimes[i]!;
       publishStoreEntryResult({
