@@ -296,20 +296,24 @@ export default class PostgresStore<
       maxBy: ({ it }) => entryUtils.birthDate(it.entry).getTime(),
     });
 
-    // One row per deduped entry, tagged with its position (`ord`) so the
-    // per-row relationship the query computes can be mapped back to inputs.
-    const inputRows = deduped.map(({ it }, ord) => {
-      const { id, vary } = it.entry;
-      return sql`(${id}::text, ${this.serializeVary(vary)}::jsonb, ${this.serializeEntry(it.entry)}::jsonb, ${ord}::int)`;
-    });
-
     // A single statement whose sibling CTEs share one snapshot: `old` reads the
     // pre-existing row for each slot while `upsert` overwrites it, so `old`
     // always reflects the state before this call. A data-modifying CTE always
     // runs even when unreferenced, so the upsert happens regardless.
     const query = sql<{ ord: number; relationship: StoreEntryRelationship }>`
       with input(resource_id, vary, entry, ord) as (
-        values ${sql.join(inputRows)}
+        values ${sql.join(
+          // One row per deduped entry, tagged with its position (`ord`) so the
+          // per-row relationship the query computes can be mapped back to inputs.
+          deduped.map(
+            ({ it }, ord) => sql`(
+              ${it.entry.id}::text, 
+              ${this.serializeVary(it.entry.vary)}::jsonb, 
+              ${this.serializeEntry(it.entry)}::jsonb, 
+              ${ord}::int
+            )`,
+          ),
+        )}
       ),
       old as (
         select i.ord, i.resource_id, i.vary,
@@ -333,7 +337,10 @@ export default class PostgresStore<
       join input i on i.ord = o.ord
     `;
 
-    let resultRows: readonly { ord: number; relationship: StoreEntryRelationship }[];
+    let resultRows: readonly {
+      ord: number;
+      relationship: StoreEntryRelationship;
+    }[];
     try {
       ({ rows: resultRows } = await query.execute(this.db));
       this.logTrace("stored entries successfully");
