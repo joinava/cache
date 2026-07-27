@@ -1,11 +1,16 @@
 import { expect } from "chai";
 import fc from "fast-check";
+import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { after, before, describe, it, mock } from "node:test";
 import { makeTestWithFixture } from "test-with-fixture";
 
 import { setTimeout as delay } from "timers/promises";
 import { dummyEntryData, postgresStoreFixture } from "../test/fixtures.js";
 import Cache from "./Cache.js";
+import {
+  STORE_ENTRY_RESULT_CHANNEL_NAME,
+  type StoreEntryResultMessage,
+} from "./diagnostics.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 import type PostgresStore from "./stores/PostgresStore/PostgresStore.js";
 import type { CacheSpec } from "./types/00_CacheSpec.js";
@@ -534,6 +539,127 @@ describe("Cache", { concurrency: true }, () => {
 
       expect(listener.mock.calls[1]?.arguments[0]).to.deep.contain(results[1]);
       expect(listener.mock.calls[1]?.arguments[1]).to.eq(Infinity);
+    });
+
+    describe("store-entry-result diagnostics channel", () => {
+      // Other tests in this file run concurrently and also call store(), so
+      // each test filters channel messages down to the ids it stored.
+      const collectMessagesForIds = (ids: readonly string[]) => {
+        const messages: StoreEntryResultMessage[] = [];
+        const listener = (msg: unknown) => {
+          const message = msg as StoreEntryResultMessage;
+          if (ids.includes(message.id)) {
+            messages.push(message);
+          }
+        };
+        subscribe(STORE_ENTRY_RESULT_CHANNEL_NAME, listener);
+        return {
+          messages,
+          unsubscribe: () =>
+            unsubscribe(STORE_ENTRY_RESULT_CHANNEL_NAME, listener),
+        };
+      };
+
+      it("publishes the entry's id, vary, and validators with each reported relationship", async () => {
+        const cache = new Cache(memoryStore);
+        const id = randomURI();
+        const vary = { someParam: "someValue" };
+        const collector = collectMessagesForIds([id]);
+
+        try {
+          await cache.store([
+            {
+              id,
+              vary,
+              content: ["v1"],
+              validators: { etag: "a" },
+              directives: { freshUntilAge: 60 },
+            },
+          ]);
+          await cache.store([
+            {
+              id,
+              vary,
+              content: ["v1"],
+              validators: { etag: "a" },
+              directives: { freshUntilAge: 60 },
+            },
+          ]);
+          await cache.store([
+            {
+              id,
+              vary,
+              content: ["v2"],
+              validators: { etag: "b" },
+              directives: { freshUntilAge: 60 },
+            },
+          ]);
+
+          expect(collector.messages).to.deep.equal([
+            {
+              id,
+              vary,
+              validators: { etag: "a" },
+              relationshipToExistingStoredData: "is-new",
+            },
+            {
+              id,
+              vary,
+              validators: { etag: "a" },
+              relationshipToExistingStoredData: "unchanged",
+            },
+            {
+              id,
+              vary,
+              validators: { etag: "b" },
+              relationshipToExistingStoredData: "changed",
+            },
+          ]);
+        } finally {
+          collector.unsubscribe();
+        }
+      });
+
+      it("publishes nothing for entries whose relationship was not reported", async () => {
+        const cache = new Cache(memoryStore);
+        const idWithValidators = randomURI();
+        const idWithoutValidators = randomURI();
+        const collector = collectMessagesForIds([
+          idWithValidators,
+          idWithoutValidators,
+        ]);
+
+        try {
+          // One store() call with a mixed batch: only the entry with
+          // validators gets a relationship, so only it gets an event.
+          await cache.store([
+            {
+              id: idWithoutValidators,
+              vary: emptyVary,
+              content: ["no-validators"],
+              directives: { freshUntilAge: 60 },
+            },
+            {
+              id: idWithValidators,
+              vary: emptyVary,
+              content: ["with-validators"],
+              validators: { rowVersion: 1 },
+              directives: { freshUntilAge: 60 },
+            },
+          ]);
+
+          expect(collector.messages).to.deep.equal([
+            {
+              id: idWithValidators,
+              vary: emptyVary,
+              validators: { rowVersion: 1 },
+              relationshipToExistingStoredData: "is-new",
+            },
+          ]);
+        } finally {
+          collector.unsubscribe();
+        }
+      });
     });
   });
 
