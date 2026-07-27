@@ -1,4 +1,3 @@
-import { maxBy } from "es-toolkit";
 import { fileURLToPath } from "node:url";
 import { Piscina } from "piscina";
 import type {
@@ -6,7 +5,6 @@ import type {
   Jsonify,
   JsonOf,
   JSONWithUndefined,
-  NonEmptyArray,
 } from "type-party";
 import { parseDateString } from "type-party/runtime/dates.js";
 import { jsonParse, jsonStringify } from "type-party/runtime/json.js";
@@ -34,6 +32,7 @@ import type {
 } from "../../types/index.js";
 import { restoreInfinityInDirectives } from "../../utils/normalization.js";
 import { birthDate } from "../../utils/normalizedProducerResultResourceHelpers.js";
+import { keepMaxPerGroup } from "../../utils/utils.js";
 import { resultVariantKey } from "../../utils/varyHelpers.js";
 import type {
   ReadWorkerRequestInput,
@@ -57,10 +56,6 @@ type TableEntry<
   Params extends SqliteStoreSupportedParams,
   Id extends Spec["id"] = Spec["id"],
 > = JsonifiedEntry<SpecForId<Spec, Id>, Validators, Params>;
-
-type AsNonEmptyArray<T extends readonly unknown[]> = T extends (infer U)[]
-  ? NonEmptyArray<U>
-  : never;
 
 /**
  * A {@link Store} backed by a single SQLite database file.
@@ -287,25 +282,15 @@ export default class SqliteStore<
   #prepareEntries(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): { workerEntry: WorkerStoreEntryInput; originalIndex: number }[] {
-    const indexed = entries.map((it, originalIndex) => ({ it, originalIndex }));
-    return Map.groupBy(indexed, ({ it: { entry } }) =>
-      jsonStringify([entry.id, resultVariantKey(entry.vary)]),
-    )
-      .values()
-      .map((sameVariantEntries) => {
-        const newestForVariant = maxBy(
-          // groupBy guarantees that the array is non-empty
-          sameVariantEntries as AsNonEmptyArray<typeof sameVariantEntries>,
-          ({ it: { entry } }) => birthDate(entry).valueOf(),
-        );
-
-        const { entry, maxStoreForSeconds } = newestForVariant.it;
-        return {
-          workerEntry: this.#prepareEntry(entry, maxStoreForSeconds),
-          originalIndex: newestForVariant.originalIndex,
-        };
-      })
-      .toArray();
+    return keepMaxPerGroup({
+      items: entries.map((it, originalIndex) => ({ it, originalIndex })),
+      groupBy: ({ it: { entry } }) =>
+        jsonStringify([entry.id, resultVariantKey(entry.vary)]),
+      maxBy: ({ it: { entry } }) => birthDate(entry).valueOf(),
+    }).map(({ it: { entry, maxStoreForSeconds }, originalIndex }) => ({
+      workerEntry: this.#prepareEntry(entry, maxStoreForSeconds),
+      originalIndex,
+    }));
   }
 
   #prepareEntry(

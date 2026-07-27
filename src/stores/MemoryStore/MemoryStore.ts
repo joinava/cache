@@ -14,9 +14,13 @@ import {
   type StoreEntryInput,
   type StoreGetManyRequest,
 } from "../../types/index.js";
-import { validatorsEqual } from "../../utils/normalizedProducerResultResourceHelpers.js";
+import {
+  birthDate,
+  validatorsAsStored,
+  validatorsEqual,
+} from "../../utils/normalizedProducerResultResourceHelpers.js";
 import type { JsonOf } from "../../utils/utils.js";
-import { jsonStringify } from "../../utils/utils.js";
+import { jsonStringify, keepMaxPerGroup } from "../../utils/utils.js";
 import {
   requestVariantKeyForVaryKeys,
   resultVariantKey,
@@ -212,13 +216,18 @@ export default class MemoryStore<
       prepared.map(({ cacheKey }) => [cacheKey, this.entriesMap.get(cacheKey)] as const),
     );
 
-    // Persist every entry. Within a slot the last write wins.
-    prepared.forEach((it) => this.#persist(it));
+    // Dedupe within the call per the contract's uniform rule: for each slot,
+    // only the entry with the newest birth date persists (the same rule the
+    // other stores apply).
+    const winners = keepMaxPerGroup({
+      items: prepared,
+      groupBy: (it) => it.cacheKey,
+      maxBy: (it) => birthDate(it.input.entry).valueOf(),
+    });
+    winners.forEach((it) => this.#persist(it));
 
-    // A slot's persisted ("winner") entry is its last input, and a Map keeps
-    // the last value set for a key, so this is each slot's winning input index.
     const winnerIndexBySlot = new Map(
-      prepared.map(({ cacheKey, index }) => [cacheKey, index] as const),
+      winners.map(({ cacheKey, index }) => [cacheKey, index] as const),
     );
 
     // Each slot's winner reports how its validators relate to that slot's
@@ -278,7 +287,11 @@ export default class MemoryStore<
     entry: Entry<Spec, Validators, Params>,
     existing: readonly [Entry<Spec, Validators, Params>, Spec["id"]] | undefined,
   ): StoreEntryResult {
-    if (Object.keys(entry.validators).length === 0) {
+    // This store holds raw in-memory objects, so normalize BOTH sides to their
+    // JSON-serialized form before checking emptiness or comparing, to agree
+    // with the JSON-backed stores on type-violating values (e.g. `undefined`).
+    const newValidators = validatorsAsStored(entry.validators);
+    if (Object.keys(newValidators).length === 0) {
       return {};
     }
     if (existing === undefined) {
@@ -286,8 +299,8 @@ export default class MemoryStore<
     }
     return {
       relationshipToExistingStoredData: validatorsEqual(
-        existing[0].validators,
-        entry.validators,
+        validatorsAsStored(existing[0].validators),
+        newValidators,
       )
         ? "unchanged"
         : "changed",

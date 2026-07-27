@@ -199,6 +199,91 @@ function defineChangeDetectionConformance(
     });
   });
 
+  // -- Validators are interpreted as their JSON-serialized form --------------
+  //
+  // `undefined` isn't a legal validator value (AnyValidators values are JSON),
+  // but it's expressible from JS, and JSON serialization silently drops
+  // `undefined`-valued keys. Every store must interpret validators as what
+  // survives serialization -- including stores that hold or receive the raw
+  // in-memory object -- or the same input classifies differently per store.
+
+  it("ignores undefined-valued keys when deciding whether validators are empty", async () => {
+    await withStore(createFixture, async (store) => {
+      // Deliberately type-violating input; see the section comment above.
+      const effectivelyEmpty = {
+        etag: undefined,
+      } as unknown as AnyValidators;
+
+      const results = await store.store([
+        {
+          entry: makeEntry("id", "a", varyOnFormat, {
+            validators: effectivelyEmpty,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      // Nothing survives serialization, so there's nothing to compare on: the
+      // relationship must be omitted (not "is-new").
+      assert.equal(relationshipsOf(results)[0], undefined);
+    });
+  });
+
+  it("ignores undefined-valued keys when comparing validators, on both sides", async () => {
+    await withStore(createFixture, async (store) => {
+      // Deliberately type-violating input; see the section comment above.
+      const dirtyOne = {
+        etag: "1",
+        extra: undefined,
+      } as unknown as AnyValidators;
+      const dirtyTwo = {
+        etag: "2",
+        extra: undefined,
+      } as unknown as AnyValidators;
+
+      // Incoming side: a clean seed, then a re-store whose only difference is
+      // an undefined-valued key. Serialization-wise they're identical.
+      await store.store([
+        {
+          entry: makeEntry("incoming", "a", varyOnFormat, {
+            validators: { etag: "1" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      const incomingSide = await store.store([
+        {
+          entry: makeEntry("incoming", "b", varyOnFormat, {
+            validators: dirtyOne,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(incomingSide)[0], "unchanged");
+
+      // Stored side: seed with the undefined-valued key, then re-store clean.
+      const dirtySeed = await store.store([
+        {
+          entry: makeEntry("stored", "a", varyOnFormat, {
+            validators: dirtyTwo,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(dirtySeed)[0], "is-new");
+
+      const storedSide = await store.store([
+        {
+          entry: makeEntry("stored", "b", varyOnFormat, {
+            validators: { etag: "2" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(storedSide)[0], "unchanged");
+    });
+  });
+
   // -- is-new granularity is per (id, vary) slot, not per resource id --------
 
   it("reports is-new for a slot that held no live entry", async () => {
@@ -471,7 +556,7 @@ function defineChangeDetectionConformance(
 
   // -- Within-a-single-store()-call duplicates -------------------------------
 
-  it("compares in-call duplicates against the pre-call snapshot; winner reports, dropped is omitted", async () => {
+  it("dedupes in-call duplicates by newest birth date; the winner reports against the pre-call snapshot and the dropped duplicate is omitted", async () => {
     await withStore(createFixture, async (store) => {
       const validatorsA = { etag: "A" };
       const validatorsB = { etag: "B" };
@@ -486,26 +571,27 @@ function defineChangeDetectionConformance(
         },
       ]);
 
-      // A single call with two entries for the SAME slot. The second entry is
-      // both last-in-array AND has the newest birth date, so it is the winner
-      // under every store's dedup rule (Memory/Sqlite: last wins; Postgres:
-      // max birth date). Crucially the winner's validators equal the *pre-call*
-      // stored value A -- so the winner must report "unchanged", proving the
-      // comparison is against the pre-call snapshot and NOT against the other
-      // in-call entry B (which would give "changed").
+      // A single call with two entries for the SAME slot. The FIRST entry has
+      // the newest birth date, so it must win under the contract's uniform
+      // newest-birth-date dedup rule -- a last-write-wins implementation would
+      // persist (and report for) the second entry instead. Crucially the
+      // winner's validators equal the *pre-call* stored value A, so the winner
+      // must report "unchanged", proving the comparison is against the
+      // pre-call snapshot and NOT against the other in-call entry B (which
+      // would give "changed").
       const results = await store.store([
         {
-          entry: makeEntry("id", "dup-b", varyOnFormat, {
-            validators: validatorsB,
-            date: new Date("2024-02-01T00:00:00.000Z"),
+          entry: makeEntry("id", "winner", varyOnFormat, {
+            validators: validatorsA,
+            date: new Date("2024-05-01T00:00:00.000Z"),
             initialAge: 0,
           }),
           maxStoreForSeconds: 60,
         },
         {
-          entry: makeEntry("id", "dup-a", varyOnFormat, {
-            validators: validatorsA,
-            date: new Date("2024-05-01T00:00:00.000Z"),
+          entry: makeEntry("id", "loser", varyOnFormat, {
+            validators: validatorsB,
+            date: new Date("2024-02-01T00:00:00.000Z"),
             initialAge: 0,
           }),
           maxStoreForSeconds: 60,
@@ -515,22 +601,15 @@ function defineChangeDetectionConformance(
       assert.equal(results.length, 2);
       const rels = relationshipsOf(results);
 
-      // Winner (index 1) reports against the pre-call snapshot A.
-      assert.equal(rels[1], "unchanged");
+      // Winner (index 0, newest birth date) reports against the pre-call
+      // snapshot A; the dropped duplicate persists nothing and is omitted.
+      assert.deepEqual(rels, ["unchanged", undefined]);
 
-      // Dropped duplicate (index 0): the contract omits it. The rule is
-      // documented as implementation-defined for dropped duplicates, so stay
-      // tolerant -- accept omitted, or (at most) the correct pre-call
-      // relationship for B vs A ("changed").
-      assert.ok(
-        rels[0] === undefined || rels[0] === "changed",
-        `dropped duplicate should be omitted or its pre-call relationship, got ${String(rels[0])}`,
-      );
-
-      // The winner (validators A, newest birth date) is what actually persisted.
+      // The winner is what actually persisted, even though it came FIRST.
       const stored = await store.get("id", matchingParams);
       assert.equal(stored.length, 1);
       assert.deepEqual(stored[0]?.validators, validatorsA);
+      assert.equal(stored[0]?.content.value, "winner");
     });
   });
 
@@ -704,17 +783,19 @@ function makeOracle() {
 //  1. NO in-call duplicate slots. `callArb` emits each slot at most once per
 //     call, so the "multiple inputs for one slot in one store() call" case is
 //     unreachable by the property. Covered by
-//     "compares in-call duplicates against the pre-call snapshot...".
-//     (Rationale: the three stores' in-call dedup rules differ -- Memory/Sqlite
-//     last-wins vs Postgres max-birth-date -- so a store-agnostic oracle can't
-//     predict the winner unless duplicates are excluded here.)
+//     "dedupes in-call duplicates by newest birth date...", which pins the
+//     contract's uniform rule: every store keeps the entry with the newest
+//     birth date. (Rationale for still excluding duplicates here: randomly
+//     generated dates can tie, and the winner among birth-date ties is
+//     implementation-defined, so a store-agnostic oracle can't predict it.)
 //
-//  2. Newest-birth-date tie-break among MULTIPLE co-stored entries is never
+//  2. Newest-birth-date dedup among MULTIPLE same-call entries is never
 //     exercised: with <= 1 entry per slot and distinct slots per call, each
 //     slot's stored value is simply the last write, so `date`/`initialAge`
 //     never influence the property's outcome. Covered by the "A -> B -> A"
-//     test (cross-call newest-wins) and the in-call duplicate test (winner is
-//     both last AND newest birth date).
+//     test (cross-call: comparison target is the currently-stored value) and
+//     the in-call duplicate test (newest-birth-date entry wins even when it
+//     is not last).
 //
 //  3. Slots come from a fixed 2-ids x 2-varies set, not arbitrary id/vary
 //     values -- a deliberate bound so `unchanged` collisions are frequent.
@@ -722,8 +803,10 @@ function makeOracle() {
 //     Store.conformance.test.ts.
 //
 //  4. Validator values are restricted to JSON-round-trippable data (see
-//     `roundTrips`); Infinity/NaN/undefined are out of scope because they are
-//     not representable in the JSON-backed stores.
+//     `roundTrips`); Infinity/NaN/undefined are never generated because they
+//     are not representable in the JSON-backed stores. The runtime meaning of
+//     type-violating `undefined` values (interpreted as their JSON-serialized
+//     form) is covered by the dedicated "ignores undefined-valued keys" tests.
 //
 //  5. `maxStoreForSeconds` is fixed at 60, so no entry ever expires within a
 //     property run and the expired-slot rule (expired records are not live =>

@@ -1,4 +1,5 @@
 import { default as debug } from "debug";
+import { maxBy } from "es-toolkit";
 
 import pLimit from "p-limit";
 import type { CacheSpec, SpecForId } from "../types/00_CacheSpec.js";
@@ -91,6 +92,31 @@ export const zip2 = <T, U>(a: readonly T[], b: readonly U[]): [T, U][] => {
 
   return res;
 };
+
+/**
+ * Groups the items by `groupBy` and keeps, per group, the (first) item that
+ * maximizes `maxBy`. Group order follows first appearance in `items` (i.e.,
+ * `Map.groupBy` insertion order).
+ *
+ * All stores use this to dedupe a `store()` call's entries per (id, vary)
+ * slot, keeping the entry with the newest birth date, so that the in-call
+ * "winner" is the same across every store implementation.
+ */
+export function keepMaxPerGroup<T>(opts: {
+  items: readonly T[];
+  groupBy: (item: T) => string;
+  maxBy: (item: T) => number;
+}): T[] {
+  return Map.groupBy(opts.items, opts.groupBy)
+    .values()
+    .map((group) =>
+      // Non-null assertions are safe because the group cannot be empty,
+      // or it wouldn't have an entry in the Map.
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      group.length > 1 ? maxBy(group, opts.maxBy)! : group[0]!,
+    )
+    .toArray();
+}
 
 /**
  * A naive implementation of the `getMany` method that uses the store's `get`

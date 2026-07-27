@@ -35,7 +35,12 @@ export type StoreEntryInput<
  *                deep-equal that newest-birth-date entry's validators.
  *
  * The comparison is a structural, order-independent deep-equality over the
- * whole opaque `validators` object; no validator key is privileged.
+ * whole opaque `validators` object; no validator key is privileged. Both
+ * sides are interpreted in their JSON-serialized form: validator values are
+ * JSON by contract, but a type-violating `undefined` value is expressible
+ * from JS and is silently dropped on persistence, so it's ignored here too
+ * (for the emptiness check as well as the comparison) -- regardless of
+ * whether the particular store actually serializes.
  *
  * "Live" is defined by the store's own read semantics: if a store physically
  * holds records that it would not return in response to a `get` (e.g.,
@@ -145,6 +150,12 @@ export type Store<
    * This method stores a list of cache entries. This method's return promise
    * should reject if storage fails, but specific errors are not currently
    * defined.
+   *
+   * If multiple entries in one call target the same (id, vary) slot, only the
+   * entry with the newest birth date (see entryUtils.birthDate) is stored;
+   * the dropped duplicates persist nothing and omit
+   * `relationshipToExistingStoredData` in their result slots. Which duplicate
+   * wins among entries tied on birth date is implementation-defined.
    */
   store(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],

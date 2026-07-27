@@ -1,4 +1,3 @@
-import { maxBy } from "es-toolkit";
 import type { ColumnType, RawBuilder, SqlBool } from "kysely";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import type { Pool } from "pg";
@@ -34,10 +33,14 @@ import type {
 } from "../../types/index.js";
 import type { Bind2 } from "../../types/utils.js";
 import { restoreInfinityInDirectives } from "../../utils/normalization.js";
-import { validatorsEqual } from "../../utils/normalizedProducerResultResourceHelpers.js";
+import {
+  validatorsAsStored,
+  validatorsEqual,
+} from "../../utils/normalizedProducerResultResourceHelpers.js";
 import {
   defaultLoggersByComponent,
   jsonStringify,
+  keepMaxPerGroup,
   naiveGetMany,
 } from "../../utils/utils.js";
 
@@ -290,11 +293,29 @@ export default class PostgresStore<
       maxBy: ({ it }) => entryUtils.birthDate(it.entry).getTime(),
     });
 
-    const rows = deduped.map(({ it }) => ({
-      resource_id: it.entry.id,
-      vary: this.serializeVary(it.entry.vary),
-      entry: this.serializeEntry(it.entry),
-    }));
+    // Sort the rows by a deterministic key so that every store() call acquires
+    // its row locks in the same global order. Postgres processes a multi-row
+    // INSERT's rows in order, locking each conflicting row as it goes, so two
+    // concurrent calls whose batches share >= 2 slots in DIFFERENT orders
+    // could otherwise deadlock (each holding a row the other is waiting on).
+    // With a consistent order, the later call just waits for the earlier one.
+    const rows = deduped
+      .map(({ it }) => ({
+        resource_id: it.entry.id,
+        vary: this.serializeVary(it.entry.vary),
+        entry: this.serializeEntry(it.entry),
+      }))
+      .toSorted((a, b) =>
+        a.resource_id < b.resource_id
+          ? -1
+          : a.resource_id > b.resource_id
+            ? 1
+            : a.vary < b.vary
+              ? -1
+              : a.vary > b.vary
+                ? 1
+                : 0,
+      );
     const resourceIds = [...new Set(deduped.map(({ it }) => it.entry.id))];
 
     // One statement with two sibling CTEs sharing a single snapshot: `old` reads
@@ -399,7 +420,12 @@ export default class PostgresStore<
     entry: Entry<Spec, Validators, Params>,
     oldValidatorsBySlot: ReadonlyMap<string, Partial<AnyValidators>>,
   ): StoreEntryResult {
-    if (Object.keys(entry.validators).length === 0) {
+    // The old side comes back from jsonb and so is already in JSON-serialized
+    // form; normalize the raw in-memory incoming side to match, so both the
+    // emptiness check and the comparison agree with the other stores on
+    // type-violating values (e.g. `undefined`).
+    const newValidators = validatorsAsStored(entry.validators);
+    if (Object.keys(newValidators).length === 0) {
       return {};
     }
     const old = oldValidatorsBySlot.get(this.slotKey(entry));
@@ -407,7 +433,7 @@ export default class PostgresStore<
       return { relationshipToExistingStoredData: "is-new" };
     }
     return {
-      relationshipToExistingStoredData: validatorsEqual(old, entry.validators)
+      relationshipToExistingStoredData: validatorsEqual(old, newValidators)
         ? "unchanged"
         : "changed",
     };
@@ -551,20 +577,4 @@ export default class PostgresStore<
       Params
     > as EntryForId<Spec, Validators, Params, Id>;
   }
-}
-
-function keepMaxPerGroup<T>(opts: {
-  items: readonly T[];
-  groupBy: (item: T) => string;
-  maxBy: (item: T) => number;
-}): T[] {
-  return Map.groupBy(opts.items, opts.groupBy)
-    .values()
-    .map((group) =>
-      // Non-null assertions are safe because the group cannot be empty,
-      // or it wouldn't have an entry in the Map.
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      group.length > 1 ? maxBy(group, opts.maxBy)! : group[0]!,
-    )
-    .toArray();
 }
