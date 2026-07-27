@@ -2,6 +2,7 @@ import { groupBy, sortBy, sumBy } from "es-toolkit";
 import { EventEmitter } from "events";
 import type { InvariantOf, ReadonlyDeep } from "type-fest";
 import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
+import { publishStoreEntryResult } from "./diagnostics.js";
 import {
   type Entry,
   type NormalizeParamName,
@@ -355,7 +356,21 @@ export default class Cache<
       this.emitter.emit("store", entry, maxStoreForSeconds);
     });
 
-    return this.#dataStore.store(entriesWithTimes);
+    const results = await this.#dataStore.store(entriesWithTimes);
+
+    // The results array is parallel to the input entries (see Store.store).
+    results.forEach(({ relationshipToExistingStoredData }, i) => {
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const { entry } = entriesWithTimes[i]!;
+      publishStoreEntryResult({
+        id: entry.id,
+        vary: entry.vary,
+        validators: entry.validators,
+        relationshipToExistingStoredData,
+      });
+    });
+
+    return results;
   }
 
   public async close(timeout?: number) {

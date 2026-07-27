@@ -48,6 +48,9 @@ export {
   DROPPED_DIRECTIVE_CHANNEL_NAME,
   droppedDirectiveChannel,
   type DroppedDirectiveMessage,
+  STORE_ENTRY_RESULT_CHANNEL_NAME,
+  storeEntryResultChannel,
+  type StoreEntryResultMessage,
 } from "./diagnostics.js";
 
 export const entryUtils = { birthDate, age, isValidatable, isFresh };
