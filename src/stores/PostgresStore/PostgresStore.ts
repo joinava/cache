@@ -21,7 +21,6 @@ import type {
   NormalizedVary,
 } from "../../types/06_Normalization.js";
 import type {
-  StoreEntryRelationship,
   StoreEntryResult,
   StoreGetManyResult,
 } from "../../types/06_Store.js";
@@ -35,6 +34,7 @@ import type {
 } from "../../types/index.js";
 import type { Bind2 } from "../../types/utils.js";
 import { restoreInfinityInDirectives } from "../../utils/normalization.js";
+import { validatorsEqual } from "../../utils/normalizedProducerResultResourceHelpers.js";
 import {
   defaultLoggersByComponent,
   jsonStringify,
@@ -281,93 +281,125 @@ export default class PostgresStore<
     }
 
     // Postgres only allows an ON CONFLICT to affect the same key once per
-    // query, so we need to make sure that the entries are unique by id and
-    // vary; if not, we need to choose the one with the newest birth date.
-    // Entries dropped here report `{}` (they weren't the value compared/stored).
+    // query, so collapse entries that share a slot (id + vary), keeping the
+    // newest by birth date. Dropped duplicates report `{}` (they weren't the
+    // value compared/stored).
     const deduped = keepMaxPerGroup({
       items: entries.map((it, originalIndex) => ({ it, originalIndex })),
-      groupBy: ({ it }) => {
-        const { id, vary } = it.entry;
-        const key = [id, this.serializeVary(vary)] as const;
-        return jsonStringify(key) satisfies JsonOf<
-          Jsonify<[unknown, JsonOf<NormalizedVary<Params>>]>
-        > as unknown as JsonOf<[string, JsonOf<NormalizedVary<Params>>]>;
-      },
+      groupBy: ({ it }) => this.slotKey(it.entry),
       maxBy: ({ it }) => entryUtils.birthDate(it.entry).getTime(),
     });
 
-    // One row per deduped entry, tagged with its position (`ord`) so the
-    // per-row relationship the query computes can be mapped back to inputs.
-    const inputRows = deduped.map(({ it }, ord) => {
-      const { id, vary } = it.entry;
-      return sql`(${id}::text, ${this.serializeVary(vary)}::jsonb, ${this.serializeEntry(it.entry)}::jsonb, ${ord}::int)`;
-    });
+    const rows = deduped.map(({ it }) => ({
+      resource_id: it.entry.id,
+      vary: this.serializeVary(it.entry.vary),
+      entry: this.serializeEntry(it.entry),
+    }));
+    const resourceIds = [...new Set(deduped.map(({ it }) => it.entry.id))];
 
-    // A single statement whose sibling CTEs share one snapshot: `old` reads the
-    // pre-existing row for each slot while `upsert` overwrites it, so `old`
-    // always reflects the state before this call. A data-modifying CTE always
-    // runs even when unreferenced, so the upsert happens regardless.
-    const query = sql<{ ord: number; relationship: StoreEntryRelationship }>`
-      with input(resource_id, vary, entry, ord) as (
-        values ${sql.join(inputRows)}
-      ),
-      old as (
-        select i.ord, i.resource_id, i.vary,
-               t.entry->'validators' as old_validators
-        from input i
-        left join ${sql.table(this.tableName)} t
-          on t.resource_id = i.resource_id and t.vary = i.vary
-      ),
-      upsert as (
-        insert into ${sql.table(this.tableName)} (resource_id, vary, entry)
-        select resource_id, vary, entry from input
-        on conflict (resource_id, vary) do update set entry = excluded.entry
+    // One statement with two sibling CTEs sharing a single snapshot: `old` reads
+    // each affected slot's validators as they were BEFORE this call, while
+    // `upsert` overwrites the rows. A data-modifying CTE runs even though the
+    // final query doesn't reference `upsert`, so the write still happens; and
+    // because both CTEs see the pre-statement snapshot, `old` reflects the
+    // state before the upsert. We select `old` back to compare in JS (the same
+    // `validatorsEqual` the other stores use), rather than comparing in SQL.
+    // NB: kysely can't keep the row type for columns whose type depends on this
+    // class's `Params`/`Validators` generics, so -- as in `get` -- we cast the
+    // read-back rows to their known shape. The query *construction* above is
+    // still fully checked by kysely (table, columns, insert shape, on-conflict).
+    const oldRows = (await this.db
+      .with("old", (c) =>
+        c
+          .selectFrom(this.tableName)
+          .where("resource_id", "in", resourceIds)
+          .select((eb) => [
+            "resource_id",
+            "vary",
+            sql<Partial<Validators>>`${eb.ref("entry")} -> 'validators'`.as(
+              "validators",
+            ),
+          ]),
       )
-      select o.ord,
-             case
-               when o.old_validators is null then 'is-new'
-               when o.old_validators is distinct from (i.entry->'validators') then 'changed'
-               else 'unchanged'
-             end as relationship
-      from old o
-      join input i on i.ord = o.ord
-    `;
+      .with("upsert", (c) =>
+        c
+          .insertInto(this.tableName)
+          .values(rows)
+          .onConflict((oc) =>
+            oc
+              .columns(["resource_id", "vary"])
+              .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") })),
+          ),
+      )
+      .selectFrom("old")
+      .selectAll("old")
+      .execute()
+      .catch((error: unknown) => {
+        this.logError("failed to store entries", error);
+        throw error;
+      })) as unknown as readonly {
+      resource_id: string;
+      vary: Readonly<NormalizedVary<Params>>;
+      validators: Partial<Validators>;
+    }[];
+    this.logTrace("stored entries successfully");
 
-    let resultRows: readonly { ord: number; relationship: StoreEntryRelationship }[];
-    try {
-      ({ rows: resultRows } = await query.execute(this.db));
-      this.logTrace("stored entries successfully");
-    } catch (error) {
-      this.logError("failed to store entries", error);
-      throw error;
-    }
-
-    const relationshipByOrd = new Map<number, StoreEntryRelationship>(
-      resultRows.map((row) => [row.ord, row.relationship]),
+    // Index each affected slot's pre-call validators, so a slot with no row here
+    // is one that didn't exist before the call (i.e. "is-new").
+    const oldValidatorsBySlot = new Map(
+      oldRows.map((row) => [
+        this.slotKey({ id: row.resource_id, vary: row.vary }),
+        row.validators,
+      ]),
     );
 
-    // Each deduped ("winner") entry reports the relationship the query computed
-    // for its `ord`, keyed back to its original input index -- except that an
-    // incoming entry with empty validators is omitted per the contract (the SQL
-    // still returns a relationship for it, so we override here, not in SQL).
+    // Each deduped ("winner") entry reports its relationship, keyed back to its
+    // original input index.
     const resultByInputIndex = new Map<number, StoreEntryResult>(
-      deduped.map(({ it, originalIndex }, ord) => {
-        const relationship =
-          Object.keys(it.entry.validators).length === 0
-            ? undefined
-            : relationshipByOrd.get(ord);
-        return [
-          originalIndex,
-          relationship === undefined
-            ? {}
-            : { relationshipToExistingStoredData: relationship },
-        ];
-      }),
+      deduped.map(({ it, originalIndex }) => [
+        originalIndex,
+        this.#relationshipToExisting(it.entry, oldValidatorsBySlot),
+      ]),
     );
 
     // Map back onto the full input order; every input that isn't a winner (a
     // dropped within-call duplicate) isn't in the map and so is omitted.
     return entries.map((_entry, index) => resultByInputIndex.get(index) ?? {});
+  }
+
+  /**
+   * A canonical key for an entry's slot (resource id + vary). `jsonStringify` is
+   * a stable stringify, so the same logical slot always yields the same key
+   * regardless of key order or how Postgres returns the `vary` jsonb -- which is
+   * what lets us match the read-back `old` rows to inputs in JS.
+   */
+  private slotKey(entry: {
+    id: string;
+    vary: Readonly<NormalizedVary<Params>>;
+  }): string {
+    return jsonStringify([entry.id, entry.vary]);
+  }
+
+  /**
+   * How an incoming entry's validators relate to the slot's pre-call validators.
+   * Empty incoming validators are omitted; a slot absent from the map is is-new.
+   */
+  #relationshipToExisting(
+    entry: Entry<Spec, Validators, Params>,
+    oldValidatorsBySlot: ReadonlyMap<string, Partial<AnyValidators>>,
+  ): StoreEntryResult {
+    if (Object.keys(entry.validators).length === 0) {
+      return {};
+    }
+    const old = oldValidatorsBySlot.get(this.slotKey(entry));
+    if (old === undefined) {
+      return { relationshipToExistingStoredData: "is-new" };
+    }
+    return {
+      relationshipToExistingStoredData: validatorsEqual(old, entry.validators)
+        ? "unchanged"
+        : "changed",
+    };
   }
 
   async delete(id: Spec["id"]): Promise<void> {
