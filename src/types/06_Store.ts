@@ -37,6 +37,12 @@ export type StoreEntryInput<
  * The comparison is a structural, order-independent deep-equality over the
  * whole opaque `validators` object; no validator key is privileged.
  *
+ * "Live" is defined by the store's own read semantics: if a store physically
+ * holds records that it would not return in response to a `get` (e.g.,
+ * records it considers expired but has not yet vacuumed), those records must
+ * NOT be considered for the purposes of this flag -- an incoming entry whose
+ * slot holds only such records is "is-new".
+ *
  * When multiple stored entries share the newest birth date but differ in
  * validators (not reachable by any current store, which keep <= 1 entry per
  * slot), which one is treated as the reference is implementation-defined.

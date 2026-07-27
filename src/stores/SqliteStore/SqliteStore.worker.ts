@@ -241,6 +241,7 @@ function initialize(data: WorkerInitData): SqliteStoreWorkerContext {
       SELECT entry
       FROM cache_entries
       WHERE resource_id = ? AND variant_key = ?
+        AND (expires_at IS NULL OR expires_at > ?)
     `),
     upsert: db.prepare(`
       INSERT INTO cache_entries (resource_id, variant_key, vary, entry, expires_at)
@@ -275,8 +276,12 @@ function initialize(data: WorkerInitData): SqliteStoreWorkerContext {
   return {
     selectById: (id) =>
       prepared.selectById.all(id, expiryCutoff()) as CacheRow[],
+    // Filtering out expired rows matters for correctness, not just hygiene:
+    // change detection must only consider records that a `get` would still
+    // return, so an expired-but-not-yet-vacuumed row must read as "no live
+    // entry" (=> is-new), matching the expiry filter on the select* reads.
     selectForSlot: (resourceId, variantKey) =>
-      prepared.selectForSlot.get(resourceId, variantKey) as
+      prepared.selectForSlot.get(resourceId, variantKey, expiryCutoff()) as
         | { entry: WorkerEntryJson }
         | undefined,
     selectByIds: (ids) => {

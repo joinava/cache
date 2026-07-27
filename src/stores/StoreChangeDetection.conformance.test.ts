@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { AnyValidatorsArb } from "../../test/arbitraries/02_Validators.js";
 import { postgresStoreFixture } from "../../test/fixtures.js";
@@ -76,7 +77,7 @@ describe("Store change-detection conformance", () => {
     defineChangeDetectionConformance(async () => {
       const store = new MemoryStore<TestSpec, AnyValidators, TestParams>();
       return { store, cleanup: async () => store.close() };
-    });
+    }, { entriesExpire: true });
   });
 
   describe("SqliteStore", () => {
@@ -93,7 +94,7 @@ describe("Store change-detection conformance", () => {
           await rm(directory, { recursive: true, force: true });
         },
       };
-    });
+    }, { entriesExpire: true });
   });
 
   describe(
@@ -141,6 +142,16 @@ describe("Store change-detection conformance", () => {
 
 function defineChangeDetectionConformance(
   createFixture: () => Promise<StoreFixture>,
+  opts?: {
+    /**
+     * Whether this store expires entries per `maxStoreForSeconds`. Stores that
+     * do must not treat an expired (even if still physically present) record
+     * as existing stored data. PostgresStore never expires records -- every
+     * record it holds is returned by `get` -- so the expiry test doesn't apply
+     * to it.
+     */
+    entriesExpire?: boolean;
+  },
 ) {
   // -- Empty validators => field omitted, regardless of what's stored --------
 
@@ -241,6 +252,40 @@ function defineChangeDetectionConformance(
       assert.equal(relationshipsOf(restoreOriginal)[0], "changed");
     });
   });
+
+  // -- Expired records are not "live", so they're not the comparison target --
+
+  if (opts?.entriesExpire === true) {
+    it("reports is-new when the slot's stored record has expired, even if it's still physically present", async () => {
+      await withStore(createFixture, async (store) => {
+        // 0.125s is exactly representable in binary, so `* 1000` stays an
+        // integer and can't trip SQLite's STRICT INTEGER expires_at column.
+        const validators = { etag: "same" };
+        const first = await store.store([
+          {
+            entry: makeEntry("id", "a", varyOnFormat, { validators }),
+            maxStoreForSeconds: 0.125,
+          },
+        ]);
+        assert.equal(relationshipsOf(first)[0], "is-new");
+
+        // Wait until the record is expired. Nothing has forced a cleanup pass,
+        // so a store may well still hold the record physically -- but `get`
+        // would no longer return it, so per the contract the slot holds no
+        // LIVE entry and change detection must not compare against it: storing
+        // the SAME validators again must be "is-new", not "unchanged".
+        await sleep(500);
+
+        const second = await store.store([
+          {
+            entry: makeEntry("id", "b", varyOnFormat, { validators }),
+            maxStoreForSeconds: 60,
+          },
+        ]);
+        assert.equal(relationshipsOf(second)[0], "is-new");
+      });
+    });
+  }
 
   // -- unchanged: order-independent, structural deep-equality ----------------
 
@@ -679,6 +724,11 @@ function makeOracle() {
 //  4. Validator values are restricted to JSON-round-trippable data (see
 //     `roundTrips`); Infinity/NaN/undefined are out of scope because they are
 //     not representable in the JSON-backed stores.
+//
+//  5. `maxStoreForSeconds` is fixed at 60, so no entry ever expires within a
+//     property run and the expired-slot rule (expired records are not live =>
+//     "is-new") is unreachable here. Covered by the dedicated "expired ...
+//     still physically present" test (for the stores where entries expire).
 //
 // NOT excluded (exercised inside the property): empty-validators entries (the
 // omit rule), is-new on fresh slots, and per-(id,vary) slot granularity.
