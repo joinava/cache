@@ -193,18 +193,42 @@ export default class MemoryStore<
   public async store(
     entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
-    // Track which slots have already been written by an earlier entry in this
-    // same call so that, for within-call duplicates, we compute the
-    // relationship only for the entry compared against the pre-call snapshot
-    // and omit the field for the (dropped) duplicates.
-    const seenCacheKeys = new Set<FullCacheKey<Spec["id"]>>();
-    return entriesWithTimes.map((it) => this.storeOne(it, seenCacheKeys));
+    // The relationship is computed against the value stored for a slot BEFORE
+    // this call ran, so snapshot each slot's pre-call entry the first time we
+    // touch it (before any of this call's writes overwrite it).
+    const preCallBySlot = new Map<
+      FullCacheKey<Spec["id"]>,
+      readonly [Entry<Spec, Validators, Params>, Spec["id"]] | undefined
+    >();
+    // For within-call duplicates, only the entry that actually persists (the
+    // last write to a slot wins, here) reports its relationship; the dropped
+    // duplicates are omitted. Track the winning input index per slot.
+    const winnerIndexBySlot = new Map<FullCacheKey<Spec["id"]>, number>();
+
+    entriesWithTimes.forEach((it, index) => {
+      const cacheKey = this.storeOne(it, preCallBySlot);
+      winnerIndexBySlot.set(cacheKey, index);
+    });
+
+    const results: StoreEntryResult[] = entriesWithTimes.map(() => ({}));
+    for (const [cacheKey, index] of winnerIndexBySlot) {
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const entry = entriesWithTimes[index]!.entry;
+      results[index] = this.#relationshipToExisting(
+        entry,
+        preCallBySlot.get(cacheKey),
+      );
+    }
+    return results;
   }
 
   private storeOne(
     it: StoreEntryInput<Spec, Validators, Params>,
-    seenCacheKeys: Set<FullCacheKey<Spec["id"]>>,
-  ): StoreEntryResult {
+    preCallBySlot: Map<
+      FullCacheKey<Spec["id"]>,
+      readonly [Entry<Spec, Validators, Params>, Spec["id"]] | undefined
+    >,
+  ): FullCacheKey<Spec["id"]> {
     const { entry, maxStoreForSeconds: deleteAfter } = it;
     const { id } = entry;
 
@@ -239,17 +263,15 @@ export default class MemoryStore<
     const finalDeleteAfterSeconds =
       deleteAfter === Infinity ? this.fallbackDeleteAfter : deleteAfter;
 
-    // Compute how this entry relates to what's already stored for its slot,
-    // BEFORE overwriting it. For a within-call duplicate (a slot already
-    // written by an earlier entry in this same call), omit the field, since the
-    // value we'd be comparing against is not the pre-call snapshot.
-    const result: StoreEntryResult = seenCacheKeys.has(cacheKey)
-      ? {}
-      : this.#relationshipToExisting(entry, this.entriesMap.get(cacheKey));
-    seenCacheKeys.add(cacheKey);
+    // Snapshot the pre-call entry for this slot before overwriting it, so that
+    // the relationship is computed against what was stored before this call
+    // (not against an earlier duplicate written in this same call).
+    if (!preCallBySlot.has(cacheKey)) {
+      preCallBySlot.set(cacheKey, this.entriesMap.get(cacheKey));
+    }
 
     this.entriesMap.set(cacheKey, [entry, id], finalDeleteAfterSeconds * 1000);
-    return result;
+    return cacheKey;
   }
 
   #relationshipToExisting(
