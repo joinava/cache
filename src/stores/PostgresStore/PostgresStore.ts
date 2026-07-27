@@ -304,6 +304,17 @@ export default class PostgresStore<
     // because both CTEs see the pre-statement snapshot, `old` reflects the
     // state before the upsert. We select `old` back to compare in JS (the same
     // `validatorsEqual` the other stores use), rather than comparing in SQL.
+    //
+    // Concurrency caveat: this store plays a little loose with the contract's
+    // "as it was before this store() call" under a same-slot race. The
+    // classification comes from this statement's snapshot, but ON CONFLICT DO
+    // UPDATE can still see -- and overwrite -- a row a concurrent writer
+    // committed after that snapshot was taken. In that window we may report
+    // "is-new" (or a stale changed/unchanged) even though the upsert actually
+    // replaced the concurrent write. We accept that approximation for cache
+    // workloads rather than pay for row locks (SELECT ... FOR UPDATE) on
+    // every store; MemoryStore (synchronous) and SqliteStore (one write
+    // transaction) are exact.
     // NB: kysely can't keep the row type for columns whose type depends on this
     // class's `Params`/`Validators` generics, so -- as in `get` -- we cast the
     // read-back rows to their known shape. The query *construction* above is
