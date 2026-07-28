@@ -5,6 +5,7 @@ import { omit } from "es-toolkit";
 import fc from "fast-check";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "timers/promises";
+import { isNonEmptyArray } from "type-party/runtime/nonempty.js";
 import {
   UnusableEntryArb,
   UsableEntryArb,
@@ -293,12 +294,15 @@ describe("wrapBulkProducer", () => {
                 ...Unusable,
               ];
 
-              await store.store(
-                storableGeneratedData.map(({ entry }) => ({
-                  entry,
-                  maxStoreForSeconds: 10,
-                })),
+              // The generated data can be empty; the Store contract takes a
+              // non-empty list (Cache owns the empty case), so skip the seed
+              // store when there's nothing to seed.
+              const storableInputs = storableGeneratedData.map(
+                ({ entry }) => ({ entry, maxStoreForSeconds: 10 }),
               );
+              if (isNonEmptyArray(storableInputs)) {
+                await store.store(storableInputs);
+              }
 
               function shouldError(id: string) {
                 return id.includes("9");

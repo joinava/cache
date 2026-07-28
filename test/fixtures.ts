@@ -71,8 +71,17 @@ export const StaleEntryArb = fc.oneof(
   // past than the freshUntilAge.
   fc
     .tuple(
-      PositiveNumberArb,
-      fc.date({ noInvalidDate: true, max: new Date() }),
+      // Bound the lifetime: an infinite (or absurdly huge) freshUntilAge
+      // can't be made stale by back-dating production at all, and unbounded
+      // values push the derived date below the representable Date range,
+      // yielding an Invalid Date -- which normalization rejects. Likewise
+      // keep pastDate recent enough that the subtraction stays representable.
+      PositiveNumberArb.filter((n) => n <= MAX_INITIAL_AGE),
+      fc.date({
+        noInvalidDate: true,
+        min: new Date(-7_000_000_000_000_000),
+        max: new Date(),
+      }),
       UniqueIdArb,
     )
     .map(([freshUntilAge, pastDate, id]) => {

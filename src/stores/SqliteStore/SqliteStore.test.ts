@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sqlite from "node:sqlite";
 import { describe, it } from "node:test";
+import { isNonEmptyArray } from "type-party/runtime/nonempty.js";
 
 import type {
   CacheSpec,
@@ -49,7 +50,6 @@ const directives = { freshUntilAge: 60 } as NormalizedProducerDirectives;
 describe("SqliteStore", () => {
   it("returns empty results for misses and empty getMany requests", async () => {
     await withTempStore(async ({ store }) => {
-      await store.store([]);
       await store.delete("missing");
 
       assert.deepEqual(await store.get("missing", matchingParams), []);
@@ -471,10 +471,6 @@ describe("SqliteStore", () => {
         /SqliteStore is closed/,
       );
       await assert.rejects(
-        async () => store.store([]),
-        /SqliteStore is closed/,
-      );
-      await assert.rejects(
         async () => store.delete("id"),
         /SqliteStore is closed/,
       );
@@ -576,12 +572,12 @@ describe("SqliteStore", () => {
   it("keeps get results valid while stores and deletes run concurrently", async () => {
     await withTempStore(
       async ({ store }) => {
-        await store.store(
-          Array.from({ length: 20 }, (_, i) => ({
-            entry: makeEntry(`id:${i}`, `initial:${i}`),
-            maxStoreForSeconds: 60,
-          })),
-        );
+        const seedBatch = Array.from({ length: 20 }, (_, i) => ({
+          entry: makeEntry(`id:${i}`, `initial:${i}`),
+          maxStoreForSeconds: 60,
+        }));
+        assert.ok(isNonEmptyArray(seedBatch));
+        await store.store(seedBatch);
 
         const operations: Promise<unknown>[] = [];
         for (let i = 0; i < 20; i += 1) {

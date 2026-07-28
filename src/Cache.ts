@@ -356,6 +356,13 @@ export default class Cache<
       this.emitter.emit("store", entry, maxStoreForSeconds);
     });
 
+    // The Store contract takes a non-empty list; an empty store() trivially
+    // stores nothing (and has no per-entry results to publish), so
+    // short-circuit it here rather than in every store.
+    if (!isNonEmptyArray(entriesWithTimes)) {
+      return [];
+    }
+
     const results = await this.#dataStore.store(entriesWithTimes);
 
     // The results array is parallel to the input entries (see Store.store).

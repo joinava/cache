@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
+import { isNonEmptyArray } from "type-party/runtime/nonempty.js";
 
 import { AnyValidatorsArb } from "../../test/arbitraries/02_Validators.js";
 import { postgresStoreFixture } from "../../test/fixtures.js";
@@ -636,6 +637,9 @@ function defineChangeDetectionConformance(
                 };
               });
 
+              if (!isNonEmptyArray(inputs)) {
+                throw new Error("unreachable: callArb only emits non-empty calls");
+              }
               const results = await store.store(inputs);
               assert.equal(results.length, inputs.length);
               assert.deepEqual(relationshipsOf(results), expected);

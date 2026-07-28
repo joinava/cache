@@ -70,14 +70,34 @@ export function normalizeProducerResultResource<
   // object's id/content correlation is preserved because we don't synthesize
   // values; we just round-trip them.
 
+  // `date` and `initialAge` jointly determine the entry's birth date
+  // (birthDate = date - initialAge*1000), which downstream code relies on for
+  // freshness math and, contractually, for Store.store()'s in-call dedup
+  // (newest birth date wins). An Invalid Date or NaN initialAge would poison
+  // that math with NaN, so -- like NaN freshUntilAge below -- reject it here
+  // at the boundary; there's no sensible recovery. Infinite and negative
+  // initialAge stay allowed (long-standing behavior): +Infinity means "born
+  // infinitely long ago" (never fresh, deterministic in dedup), and negatives
+  // are clamped to 0 below.
+  const date = resourceResult.date ?? fallbackProducedAt ?? new Date();
+  if (Number.isNaN(date.valueOf())) {
+    throw new TypeError("Invalid producer result: date is an Invalid Date");
+  }
+  const givenInitialAge = resourceResult.initialAge ?? 0;
+  if (Number.isNaN(givenInitialAge)) {
+    throw new TypeError(
+      "Invalid producer result: initialAge cannot be NaN",
+    );
+  }
+
   return {
     id: resourceResult.id as Spec["id"],
     content: resourceResult.content as Spec["content"],
-    initialAge: Math.max(resourceResult.initialAge ?? 0, 0),
+    initialAge: Math.max(givenInitialAge, 0),
     vary: normalizeVary(resourceResult.vary ?? {}),
     directives: normalizeProducerDirectives(resourceResult.directives),
     validators: resourceResult.validators ?? {},
-    date: resourceResult.date ?? fallbackProducedAt ?? new Date(),
+    date,
   } as Entry<Spec, Validators, Params>;
 }
 

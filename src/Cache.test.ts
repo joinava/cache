@@ -513,6 +513,58 @@ describe("Cache", { concurrency: true }, () => {
     });
   });
 
+  describe("store() input handling at the normalization boundary", () => {
+    it("short-circuits empty store() calls without hitting the store", async () => {
+      const cache = new Cache(memoryStore);
+      // The Store contract takes a non-empty list; Cache owns the
+      // empty-input case.
+      expect(await cache.store([])).to.deep.eq([]);
+    });
+
+    it("rejects entries whose date is an Invalid Date", async () => {
+      const cache = new Cache(memoryStore);
+      const error = await cache
+        .store([
+          {
+            id: randomURI(),
+            vary: emptyVary,
+            content: ["x"],
+            directives: { freshUntilAge: 60 },
+            date: new Date(Number.NaN),
+          },
+        ])
+        .then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+      expect(error).to.be.instanceOf(TypeError);
+      expect(String(error)).to.include("Invalid Date");
+    });
+
+    it("rejects entries whose initialAge is NaN", async () => {
+      // NB: NaN only. Infinite initialAge is a legal (if extreme) value --
+      // "born infinitely long ago" -- and negative initialAge is clamped;
+      // both are long-standing behavior exercised by the fixtures'
+      // arbitraries. NaN is the one value that poisons all birth-date math.
+      const cache = new Cache(memoryStore);
+      const error = await cache
+        .store([
+          {
+            id: randomURI(),
+            vary: emptyVary,
+            content: ["x"],
+            directives: { freshUntilAge: 60 },
+            initialAge: Number.NaN,
+          },
+        ])
+        .then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+      expect(error).to.be.instanceOf(TypeError);
+    });
+  });
+
   describe("events", () => {
     it("should emit an event for each stored entry", async () => {
       const cache = new Cache(memoryStore);

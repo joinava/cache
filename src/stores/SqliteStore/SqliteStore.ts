@@ -5,6 +5,7 @@ import type {
   Jsonify,
   JsonOf,
   JSONWithUndefined,
+  NonEmptyArray,
 } from "type-party";
 import { parseDateString } from "type-party/runtime/dates.js";
 import { jsonParse, jsonStringify } from "type-party/runtime/json.js";
@@ -192,12 +193,13 @@ export default class SqliteStore<
   }
 
   public async store(
-    entries: readonly StoreEntryInput<Spec, Validators, Params>[],
+    entries: Readonly<
+      NonEmptyArray<StoreEntryInput<Spec, Validators, Params>>
+    >,
   ): Promise<readonly StoreEntryResult[]> {
     if (this.#status !== "open") {
       throw new Error("SqliteStore is closed");
     }
-    if (entries.length === 0) return [];
 
     // Entries are deduped per slot before being sent to the worker (keeping the
     // newest birth date), so the worker's per-entry results are parallel to the

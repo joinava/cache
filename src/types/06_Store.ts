@@ -1,3 +1,5 @@
+import type { NonEmptyArray } from "type-party";
+
 import type { CacheSpec } from "./00_CacheSpec.js";
 import type { AnyParams } from "./01_Params.js";
 import type { AnyValidators } from "./02_Validators.js";
@@ -72,6 +74,16 @@ export type StoreEntryResult = {
  * {@link CacheSpec}. The `get`/`getMany` methods are generic over the
  * specific id of an incoming request so that the returned entries' content
  * types are narrowed to those compatible with that id.
+ *
+ * Aliasing: a store may retain and return the caller's objects by reference
+ * (MemoryStore does) or may snapshot/serialize them (the persistent stores
+ * do). Callers must therefore treat an entry as deeply immutable once it has
+ * been passed to `store()`, and must treat entries returned from
+ * `get`/`getMany` as read-only: mutating either corrupts aliasing stores
+ * while silently doing nothing on snapshotting ones. (Ideally the signatures
+ * would encode this with `ReadonlyDeep<...>`, but that runs into
+ * type-instantiation and variance limitations in practice; see the note on
+ * {@link StoreEntryInput}.)
  */
 export type Store<
   Spec extends CacheSpec,
@@ -116,6 +128,10 @@ export type Store<
    * @param id The id of the resource whose cache entries should be returned.
    * @param params The request parameters, with both the names and values of the
    *   params normalized.
+   * @param options.signal Best-effort cancellation: implementations check the
+   *   signal at phase boundaries (in particular, before starting) and reject
+   *   with its reason if it's aborted, but in-flight I/O is not cancelled and
+   *   may still complete in the background.
    */
   get<Id extends Spec["id"]>(
     id: Id,
@@ -140,6 +156,7 @@ export type Store<
    *
    * @param requests Array of requests, each containing an id and params for the
    *   resource whose cache entries should be returned.
+   * @param options.signal Best-effort cancellation, as in {@link Store.get}.
    */
   getMany<const Reqs extends readonly StoreGetManyRequest<Spec, Params>[]>(
     requests: Reqs,
@@ -147,9 +164,18 @@ export type Store<
   ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>>;
 
   /**
-   * This method stores a list of cache entries. This method's return promise
-   * should reject if storage fails, but specific errors are not currently
-   * defined.
+   * This method stores a non-empty list of cache entries (the Cache class
+   * short-circuits empty stores, so the contract requires at least one
+   * entry). The return promise should reject if storage fails, but specific
+   * errors are not currently defined.
+   *
+   * Failure atomicity is NOT guaranteed: a rejected `store()` may have
+   * persisted some, all, or none of its entries. Storing IS idempotent,
+   * though -- each entry's write is an upsert keyed on its (id, vary) slot --
+   * so retrying a failed (or interrupted) call with the same entries is
+   * always safe and converges to the same stored state. (A retry's
+   * StoreEntryResults are computed against whatever the earlier attempt left
+   * behind, naturally.)
    *
    * If multiple entries in one call target the same (id, vary) slot, only the
    * entry with the newest birth date (see entryUtils.birthDate) is stored;
@@ -158,7 +184,9 @@ export type Store<
    * wins among entries tied on birth date is implementation-defined.
    */
   store(
-    entries: readonly StoreEntryInput<Spec, Validators, Params>[],
+    entries: Readonly<
+      NonEmptyArray<StoreEntryInput<Spec, Validators, Params>>
+    >,
   ): Promise<readonly StoreEntryResult[]>;
 
   /**

@@ -1,3 +1,4 @@
+import type { NonEmptyArray } from "type-party";
 import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
 import type { CacheSpec, SpecForId } from "../../types/00_CacheSpec.js";
 import type {
@@ -195,7 +196,9 @@ export default class MemoryStore<
   }
 
   public async store(
-    entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
+    entriesWithTimes: Readonly<
+      NonEmptyArray<StoreEntryInput<Spec, Validators, Params>>
+    >,
   ): Promise<readonly StoreEntryResult[]> {
     // Derive each input's slot (variant + full cache key) once, up front.
     const prepared = entriesWithTimes.map((input, index) => {

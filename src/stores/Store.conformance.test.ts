@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { isNonEmptyArray } from "type-party/runtime/nonempty.js";
 
 import { NormalizedProducerDirectivesArb } from "../../test/arbitraries/06_Normalization.js";
 import { postgresStoreFixture } from "../../test/fixtures.js";
@@ -108,11 +109,76 @@ describe("Store conformance", () => {
 function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
   it("returns empty results for misses and empty getMany requests", async () => {
     await withStore(createFixture, async (store) => {
-      await store.store([]);
+      // NB: there's no empty-store() case here: the Store contract takes a
+      // non-empty list (the Cache class short-circuits empty stores; see the
+      // Cache tests).
       await store.delete("missing");
 
       assert.deepEqual(await store.get("missing", matchingParams), []);
       assert.deepEqual(await store.getMany([] as const), []);
+    });
+  });
+
+  it("is idempotent: re-storing the same entries converges to the same stored state", async () => {
+    await withStore(createFixture, async (store) => {
+      // The contract guarantees no atomicity on failure but does guarantee
+      // that retrying a store() with the same entries is safe (every write is
+      // an upsert keyed on its slot). Exercise the observable half of that:
+      // storing an identical batch twice leaves identical state.
+      const batch = [
+        {
+          entry: makeEntry("idem-a", "a", varyOnFormat, {
+            validators: { etag: "a" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+        {
+          entry: makeEntry("idem-b", "b", varyOnLanguage, {
+            validators: { etag: "b" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ] as const;
+
+      await store.store(batch);
+      const firstA = await store.get("idem-a", matchingParams);
+      const firstB = await store.get("idem-b", matchingParams);
+
+      await store.store(batch);
+      const secondA = await store.get("idem-a", matchingParams);
+      const secondB = await store.get("idem-b", matchingParams);
+
+      assert.deepEqual(
+        [secondA, secondB].map((it) => it.map(snapshotEntry)),
+        [firstA, firstB].map((it) => it.map(snapshotEntry)),
+      );
+    });
+  });
+
+  it("rejects get/getMany with the signal's reason when given an already-aborted signal", async () => {
+    await withStore(createFixture, async (store) => {
+      // Signal handling is best-effort (checked at phase boundaries, no
+      // cancellation of in-flight I/O), but the already-aborted case is fully
+      // specified: reject with the signal's reason.
+      const reason = new Error("aborted before the call");
+      const signal = AbortSignal.abort(reason);
+
+      await assert.rejects(
+        store.get("anything", matchingParams, { signal }),
+        reason,
+      );
+      await assert.rejects(
+        store.getMany([{ id: "anything", params: matchingParams }] as const, {
+          signal,
+        }),
+        reason,
+      );
+
+      // Force any lazy store initialization to settle before fixture cleanup:
+      // the aborted calls above reject BEFORE awaiting initialization (that's
+      // the point), and e.g. PostgresStore's fixture cleanup would otherwise
+      // race the still-in-flight schema creation.
+      await store.get("anything", matchingParams);
     });
   });
 
@@ -488,12 +554,12 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
 
   it("keeps returned entries valid while stores and deletes overlap", async () => {
     await withStore(createFixture, async (store) => {
-      await store.store(
-        Array.from({ length: 12 }, (_, i) => ({
-          entry: makeEntry(`id:${i}`, `initial:${i}`),
-          maxStoreForSeconds: 60,
-        })),
-      );
+      const seedBatch = Array.from({ length: 12 }, (_, i) => ({
+        entry: makeEntry(`id:${i}`, `initial:${i}`),
+        maxStoreForSeconds: 60,
+      }));
+      assert.ok(isNonEmptyArray(seedBatch));
+      await store.store(seedBatch);
 
       const operations: Promise<unknown>[] = [];
       for (let i = 0; i < 12; i += 1) {

@@ -7,6 +7,7 @@ import type {
   Jsonify,
   JsonOf,
   JSONWithUndefined,
+  NonEmptyArray,
 } from "type-party";
 import { parseDateString } from "type-party/runtime/dates.js";
 import { entryUtils } from "../../index.js";
@@ -272,16 +273,12 @@ export default class PostgresStore<
   }
 
   async store(
-    entries: readonly StoreEntryInput<Spec, Validators, Params>[],
+    entries: Readonly<
+      NonEmptyArray<StoreEntryInput<Spec, Validators, Params>>
+    >,
   ): Promise<readonly StoreEntryResult[]> {
     this.logTrace("storing entries", entries);
     await this.ensureInitializedPromise;
-
-    // Early return if there are no entries to store
-    if (entries.length === 0) {
-      this.logTrace("no entries to store, returning early");
-      return [];
-    }
 
     // Postgres only allows an ON CONFLICT to affect the same key once per
     // query, so collapse entries that share a slot (id + vary), keeping the
