@@ -3,6 +3,17 @@
 //
 // Those that are meant to be public are re-exported below.
 export type { CacheSpec, ContentForId, SpecForId } from "./00_CacheSpec.js";
+export {
+  idStartsWith,
+  resourceType,
+  soleResourceType,
+  type ContentOfResourceType,
+  type IdOfResourceType,
+  type ResourceTypeName,
+  type ResourceTypes,
+  type ResourceTypeSpec,
+  type SpecOf,
+} from "./00_ResourceTypes.js";
 export type { AnyParams, AnyParamValue } from "./01_Params.js";
 export type { AnyValidators } from "./02_Validators.js";
 export type {
@@ -19,8 +30,10 @@ export type {
   Vary,
 } from "./04_ProducerResult.js";
 export type {
+  MultiIdTypeRequestPairedProducer,
   RequestPairedProducer,
   RequestPairedProducerResult,
+  SingleIdTypeRequestPairedProducer,
 } from "./05_RequestPairedProducer.js";
 export type {
   Entry,

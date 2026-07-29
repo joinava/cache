@@ -1,6 +1,6 @@
 {
   "name": "@zingage/cache",
-  "version": "1.6.0",
+  "version": "2.0.0",
   "type": "module",
   "packageManager": "pnpm@10.26.1",
   "exports": {

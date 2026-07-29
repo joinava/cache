@@ -3,19 +3,26 @@ import type { ReadonlyDeep } from "type-fest";
 import type { PublicInterface } from "type-party";
 
 import type Cache from "../Cache.js";
-import type { CacheSpec } from "../types/00_CacheSpec.js";
+import {
+  AmbiguousResourceTypeError,
+  UnclassifiableIdError,
+} from "../Cache.js";
+import type { CacheSpec, SpecForId } from "../types/00_CacheSpec.js";
+import type {
+  IdOfResourceType,
+  ResourceTypeName,
+  ResourceTypes,
+  SpecOf,
+} from "../types/00_ResourceTypes.js";
 import type {
   AnyParams,
   AnyValidators,
-  ConsumerDirectives,
-  ConsumerRequest,
+  Entry,
   ProducerResultResource,
-  RequestPairedProducer,
   RequestPairedProducerResult,
 } from "../types/index.js";
-import type { PartialConsumerRequest } from "./requestPairedProducerUtils.js";
-import { wrapBulkProducer } from "./wrapBulkProducer.js";
 import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
+import { wrapBulkProducer } from "./wrapBulkProducer.js";
 
 /**
  * ## Computing producers vs. (plain) producers
@@ -31,35 +38,43 @@ import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
  * text, a rendered template, a compiled artifact). Here the *input* is the
  * identity of the work, so a hash of the input is the natural cache key — but
  * the producer wants the original, un-hashed input to actually do the
- * computation. These wrappers encapsulate exactly that: you provide a
- * `hashInput` function and a producer that takes the full `Input`, and they
- * derive the cache id, keep the input around just long enough to hand it to the
- * producer on a miss, and otherwise behave like `wrapProducer` /
- * `wrapBulkProducer` (same caching, request-collapsing, stale-while-revalidate,
- * abort, and diagnostics behavior; see {@link WrapProducerOptions}).
+ * computation. These wrappers encapsulate exactly that: each covered branch
+ * provides a `hashInput` function and a `produce` that takes the full `Input`,
+ * and the wrapper derives the cache id, keeps the input around just long
+ * enough to hand it to the producer on a miss, and otherwise behaves like
+ * `wrapProducer` / `wrapBulkProducer` (same caching, request-collapsing,
+ * stale-while-revalidate, abort, and diagnostics behavior; see
+ * {@link WrapProducerOptions}).
+ *
+ * ## Branches, coverage, and minted ids
+ *
+ * Like the plain wrappers, coverage — any non-empty subset of the cache's
+ * registry — is inferred from the `branches` record's keys. Because computing
+ * ids are hashes, the registry's in-band-discriminator requirement falls on
+ * `hashInput`: each branch's `hashInput` must mint ids that its resource
+ * type's `matches` guard accepts. This is checked at runtime: the wrapper
+ * classifies each hashed id and throws
+ * `UnclassifiableIdError`/`AmbiguousResourceTypeError` on mismatch, naming
+ * the branch. For `soleResourceType` registries that runtime check is vacuous
+ * (the guard accepts everything); there, `hashInput`'s compile-checked return
+ * type — `IdOfResourceType`, i.e. the narrowed `Id` when the sole type
+ * declares one — is the line of defense.
+ *
+ * When a wrapper covers more than one type, each branch must also provide
+ * `matchesInput`, the input-side classifier used to pick the branch for an
+ * incoming input (tried in the record's key order; an input no covered
+ * branch accepts throws). With exactly one covered type, `matchesInput` is
+ * unnecessary and ignored.
  *
  * ## Supplemental resources are keyed by input, not id
  *
  * Like plain producers, a computing producer can return `supplementalResources`
- * — values it produced as a byproduct that are worth caching — and a union
- * `CacheSpec` lets those be a different content type than the primary (the
- * classic "computing a collection also yields its individual items" case). The
- * one twist that follows from keys being input-hashes: a supplemental is
- * identified by the **input** it would be computed from, not a bare id. The
- * wrapper hashes each supplemental's input the same way it hashes the primary
- * input, so a later `compute(thatInput)` finds it as a cache hit. (A bare id
- * would be unreachable, since computing lookups only ever go through
- * `hashInput`.)
- *
- * ## Correlating input to content
- *
- * For a union `CacheSpec`, `wrapComputingProducer` alone can't verify that
- * `hashInput` and the `producer` agree on a content type per input variant —
- * they're separate functions, so that coherence is the caller's responsibility
- * (just as a hand-written multi-id-type plain producer's would be). When you
- * want it enforced, build the producer with `computingProducerByInputType` —
- * the computing analog of `producerByIdType` — which dispatches per input
- * variant and checks input → content (and supplementals) end to end.
+ * — values it produced as a byproduct that are worth caching. The twist that
+ * follows from keys being input-hashes: a supplemental is identified by the
+ * **input** it would be computed from, not a bare id. The wrapper hashes each
+ * supplemental's input with the producing branch's own `hashInput`, so a
+ * later `compute(thatInput)` finds it as a cache hit. (A bare id would be
+ * unreachable, since computing lookups only ever go through `hashInput`.)
  *
  * @module
  */
@@ -96,116 +111,260 @@ export type ComputingProducerResult<
     : never)[];
 };
 
-/** Shared options for {@link wrapComputingProducer} / {@link wrapBulkComputingProducer}. */
-type ComputingProducerOptions<
+/**
+ * One covered resource type's slice of a computing wrapper: how to recognize
+ * its inputs, how to mint its cache ids, and how to compute its values.
+ */
+export type ComputingBranch<
   Input,
-  Spec extends CacheSpec,
+  RT extends ResourceTypes,
+  K extends ResourceTypeName<RT>,
   Validators extends AnyValidators,
   Params extends AnyParams,
-> = Omit<WrapProducerOptions<Params>, "isCacheable"> & {
-  cache: PublicInterface<Cache<Spec, Validators, Params>>;
-  hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>;
-  isCacheable?(this: void, input: Input): boolean;
+> = {
+  /**
+   * Input classifier for this branch. Required when the wrapper covers more
+   * than one type; forbidden (and ignored) when it covers exactly one.
+   */
+  matchesInput?: (input: unknown) => input is Input;
+  /** Must mint ids that this branch's `matches` guard accepts. */
+  hashInput: (
+    input: Input,
+  ) => IdOfResourceType<RT[K]> | Promise<IdOfResourceType<RT[K]>>;
+  produce: (
+    // `input` is `ReadonlyDeep` because the same input object can be handed to
+    // more than one producer call (concurrent callers share it via the
+    // registry), so a producer must not mutate what another might be reading.
+    input: ReadonlyDeep<Input>,
+    options?: { signal?: AbortSignal },
+  ) => Promise<
+    ComputingProducerResult<
+      Input,
+      SpecForId<SpecOf<RT>, IdOfResourceType<RT[K]>>,
+      Validators,
+      Params
+    >
+  >;
 };
 
 /**
- * Like {@link wrapProducer}, but for a "computing producer" whose value is a
- * function of an `Input` rather than a lookup by id. You provide `hashInput`
- * (to derive the cache id from the input) and a producer that receives the full
- * input; the returned function is called with the input directly.
+ * The internal, type-erased branch shape all wrapper plumbing dispatches
+ * through. SAFETY: a branch is only invoked for inputs its own `matchesInput`
+ * accepted (or, single-coverage, any input — matching the declared `Input`),
+ * and each minted id is classified against the branch's own resource type
+ * before use.
+ */
+type LooseBranch<Input> = {
+  matchesInput?: (input: unknown) => boolean;
+  hashInput: (input: Input) => string | Promise<string>;
+  produce: (
+    input: ReadonlyDeep<Input>,
+    options?: { signal?: AbortSignal },
+  ) => Promise<ComputingProducerResult<Input, CacheSpec, AnyValidators, AnyParams>>;
+};
+
+/**
+ * Validates a computing wrapper's `branches` record at construction time and
+ * returns its (erased) entries. Throws on a keyless record (same as the plain
+ * wrappers) and, for multi-type coverage, on any branch missing its
+ * `matchesInput` input classifier.
+ */
+function checkedBranchEntries<Input>(
+  wrapperName: string,
+  branches: object,
+): [string, LooseBranch<Input>][] {
+  const entries = Object.entries(branches) as [string, LooseBranch<Input>][];
+
+  if (entries.length === 0) {
+    throw new Error(
+      `${wrapperName}: \`branches\` must be a record with one entry per ` +
+        "covered resource type and cannot be empty.",
+    );
+  }
+
+  if (entries.length > 1) {
+    const missing = entries
+      .filter(([, branch]) => typeof branch.matchesInput !== "function")
+      .map(([name]) => name);
+    if (missing.length > 0) {
+      throw new Error(
+        `${wrapperName}: this wrapper covers more than one resource type, so ` +
+          `every branch needs a \`matchesInput\` input classifier; missing ` +
+          `on: ${missing.join(", ")}`,
+      );
+    }
+  }
+
+  return entries;
+}
+
+/**
+ * Picks the branch for an input: with one covered type, that branch; with
+ * several, the first (in record key order) whose `matchesInput` accepts the
+ * input. Throws if no covered branch matches.
+ */
+function findBranch<B extends { matchesInput?: (input: unknown) => boolean }>(
+  wrapperName: string,
+  branchEntries: readonly [string, B][],
+  input: unknown,
+): [string, B] {
+  if (branchEntries.length === 1) {
+    // Non-null assertion is safe: length was just checked.
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    return branchEntries[0]!;
+  }
+  const entry = branchEntries.find(([, branch]) =>
+    branch.matchesInput?.(input),
+  );
+  if (entry === undefined) {
+    throw new Error(
+      `${wrapperName}: no branch matched the input ${JSON.stringify(input)}`,
+    );
+  }
+  return entry;
+}
+
+/**
+ * Checks that a branch's `hashInput` minted an id that classifies to that
+ * branch's own resource type, rethrowing the classification errors with the
+ * offending branch named. Runs before the id is used for anything (in
+ * particular, before any cache read). Vacuous for `soleResourceType`
+ * registries, whose guard accepts every id.
+ */
+function checkMintedId(
+  cache: { readonly name: string; classify: (id: string) => string },
+  branchName: string,
+  id: string,
+): void {
+  let classified: string;
+  try {
+    classified = cache.classify(id);
+  } catch (e) {
+    if (e instanceof UnclassifiableIdError) {
+      throw new UnclassifiableIdError({
+        cacheName: cache.name,
+        id,
+        message: `Cache "${cache.name}": \`hashInput\` for branch "${branchName}" minted id ${JSON.stringify(id)}, which matches no resource type in the registry`,
+      });
+    }
+    if (e instanceof AmbiguousResourceTypeError) {
+      throw new AmbiguousResourceTypeError({
+        cacheName: cache.name,
+        id,
+        matchedResourceTypes: e.matchedResourceTypes,
+        message: `Cache "${cache.name}": \`hashInput\` for branch "${branchName}" minted id ${JSON.stringify(id)}, which matches more than one resource type in the registry (${e.matchedResourceTypes.join(", ")})`,
+      });
+    }
+    throw e;
+  }
+
+  if (classified !== branchName) {
+    throw new UnclassifiableIdError({
+      cacheName: cache.name,
+      id,
+      message: `Cache "${cache.name}": \`hashInput\` for branch "${branchName}" minted id ${JSON.stringify(id)}, which classifies to resource type "${classified}" instead of "${branchName}"`,
+    });
+  }
+}
+
+/**
+ * Like {@link wrapProducer}, but for "computing producers" whose values are a
+ * function of an `Input` rather than a lookup by id. Each covered branch
+ * provides `hashInput` (to derive the branch's cache ids from its inputs) and
+ * a `produce` that receives the full input; the returned function is called
+ * with the input directly.
  *
- * See the module docs for when to use this vs. {@link wrapProducer}.
+ * See the module docs for when to use this vs. {@link wrapProducer}, and for
+ * the branch/coverage/minted-id contracts.
  *
- * @param options - The same options as {@link wrapProducer}, plus: `cache` (the
- *   {@link Cache} to use — in the options object rather than a separate
- *   argument); `hashInput`, which derives the cache id from the input (sync or
- *   async, and returns the cache's `id` type so callers can mint a branded key);
- *   and an `isCacheable` that receives the **input** rather than an opaque id.
- * @param producer - Computes the value from the full input on a cache miss. See
- *   {@link ComputingProducerResult} for the return shape (no primary `id`;
- *   supplemental resources keyed by input).
+ * @param cache - The {@link Cache} to use.
+ * @param options - The same options as {@link wrapProducer}.
+ * @param branches - One {@link ComputingBranch} per covered resource type
+ *   (any non-empty subset of the registry; coverage is inferred from the
+ *   record's keys).
  */
 export function wrapComputingProducer<
   Input,
-  Spec extends CacheSpec,
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 >(
-  options: ComputingProducerOptions<Input, Spec, Validators, Params>,
-  // `input` is `ReadonlyDeep` because the same input object can be handed to
-  // more than one producer call (concurrent callers share it via the registry),
-  // so a producer must not mutate what another might be reading.
-  producer: (
-    input: ReadonlyDeep<Input>,
-    producerOptions?: { signal?: AbortSignal },
-  ) => Promise<ComputingProducerResult<Input, Spec, Validators, Params>>,
-) {
-  const {
-    cache,
-    hashInput,
-    isCacheable: isInputCacheable,
-    ...wrapOptions
-  } = options;
-  const registry = new InputRegistry<Input>();
-  const hashSupplementals = makeSupplementalHasher<
-    Input,
-    Spec,
+  cache: PublicInterface<Cache<RT, Validators, Params>>,
+  options: WrapProducerOptions<Params> | undefined,
+  branches: {
+    readonly [K in Covered]: ComputingBranch<Input, RT, K, Validators, Params>;
+  },
+): (
+  input: Input,
+  options?: { signal?: AbortSignal },
+) => Promise<
+  Entry<
+    SpecForId<SpecOf<RT>, IdOfResourceType<RT[Covered]>>,
     Validators,
     Params
-  >(hashInput);
+  >
+> {
+  const branchEntries = checkedBranchEntries<Input>(
+    "wrapComputingProducer",
+    branches,
+  );
+  const registry = new InputRegistry<Input>();
+  const hashSupplementals = makeSupplementalHasher<Input>();
 
-  const wrapped = wrapProducer<Spec, Validators, Params>(
+  // The internal producer for each branch recovers the branch's input from
+  // the registry and hands it to the branch's `produce`. `registry.get` runs
+  // synchronously before `produce` is invoked, so the input is read while
+  // still registered (see InputRegistry docs).
+  const producers = Object.fromEntries(
+    branchEntries.map(([name, branch]) => [
+      name,
+      async (
+        req: { readonly id: string },
+        producerOptions?: { signal?: AbortSignal },
+      ) => {
+        const input = registry.get(req.id) as ReadonlyDeep<Input>;
+        const result = producerOptions
+          ? await branch.produce(input, producerOptions)
+          : await branch.produce(input);
+        return hashSupplementals(branch.hashInput, result);
+      },
+    ]),
+  );
+
+  // SAFETY: the cast bridges the erased internal producers record to
+  // `wrapProducer`'s per-type record type, which is opaque while `RT` is an
+  // unresolved generic. Runtime dispatch upholds the contract: each producer
+  // only ever receives ids its branch's `hashInput` minted (checked, below,
+  // to classify to that branch's type before any request is made).
+  const wrapped = wrapProducer<RT, Covered, Validators, Params>(
     cache,
-    {
-      ...wrapOptions,
-      // `registry.get` runs synchronously inside `wrapProducer`'s `isCacheable`
-      // check, while the id is still registered.
-      ...(isInputCacheable
-        ? { isCacheable: (id: string) => isInputCacheable(registry.get(id)) }
-        : {}),
-    },
-    // `registry.get` runs synchronously before `producer` is invoked, so the
-    // input is read while still registered (see InputRegistry docs). The cast
-    // bridges the explicit signature to the `RequestPairedProducer` conditional
-    // type, which is opaque while `Spec` is an unresolved generic — the same
-    // coercion `wrapProducer` performs internally.
-    (async <Id extends Spec["id"]>(
-      req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
-      producerOptions?: { signal?: AbortSignal },
-    ) => {
-      // The registry holds the mutable `Input`; widen to `ReadonlyDeep` (sound —
-      // `producer` only reads it) to match the producer's signature.
-      const input = registry.get(req.id) as ReadonlyDeep<Input>;
-      return hashSupplementals(await producer(input, producerOptions));
-    }) as unknown as RequestPairedProducer<Spec, Validators, Params>,
+    options,
+    producers as unknown as Parameters<
+      typeof wrapProducer<RT, Covered, Validators, Params>
+    >[2],
   );
 
   const wrappedComputingProducer = async (
     input: Input,
-    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal },
+    callOptions?: { signal?: AbortSignal },
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
 
-    // `Awaited` doesn't reduce under the generic `Spec`, even though `Spec["id"]`
-    // extends `string` (so can't be a thenable); the cast restores the id type.
-    const id = (await hashInput(input)) as Spec["id"];
+    const [branchName, branch] = findBranch("wrapComputingProducer", branchEntries, input);
+    const id = await branch.hashInput(input);
     signal?.throwIfAborted();
+
+    checkMintedId(cache, branchName, id);
 
     registry.acquire(id, input);
     try {
       return await wrapped(
-        // The cast bridges to `PartialConsumerRequest`, whose id/directives are
-        // `ReadonlyDeep`-wrapped and so opaque against the plain types here
-        // while `Spec` is generic — the same boundary coercion `wrapProducer`
-        // uses. The conditional spread avoids `directives: undefined` (rejected
-        // under `exactOptionalPropertyTypes`).
-        {
-          id,
-          ...(callOptions?.directives
-            ? { directives: callOptions.directives }
-            : {}),
-        } as PartialConsumerRequest<Params, Spec["id"]>,
+        // SAFETY: bridges to `PartialConsumerRequest`, whose id is opaque
+        // against the plain `string` here while `RT` is generic; the id was
+        // just checked to classify to this branch's covered type.
+        { id } as unknown as Parameters<typeof wrapped>[0],
         signal ? { signal } : undefined,
       );
     } finally {
@@ -213,99 +372,161 @@ export function wrapComputingProducer<
     }
   };
 
-  // Expose the cache on the returned function (for convenience, e.g. closing it).
-  wrappedComputingProducer.cache = cache;
-
   return wrappedComputingProducer;
 }
 
 /**
  * The bulk analogue of {@link wrapComputingProducer}, layered over
  * {@link wrapBulkProducer}: looks each input's derived id up in the cache and
- * calls the producer only for the inputs that missed, computing them as a
- * single batch. Results are returned per input, aligned by index.
+ * calls each covered branch's `produce` only for the inputs that missed,
+ * computing them as a single batch per branch. Results are returned per
+ * input, aligned by index.
  *
  * See the module docs for when to use this vs. {@link wrapBulkProducer}.
  *
+ * @param cache - The {@link Cache} to use.
  * @param options - Same as {@link wrapComputingProducer}'s options.
- * @param producer - Computes the values for the missed inputs on a cache miss,
+ * @param branches - Same as {@link wrapComputingProducer}'s branches, except
+ *   each branch's `produce` computes the values for a batch of missed inputs,
  *   returning a result (or `ErrorType`) per input, aligned by index.
  */
 export function wrapBulkComputingProducer<
   Input,
-  Spec extends CacheSpec,
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
   ErrorType extends Error = Error,
 >(
-  options: ComputingProducerOptions<Input, Spec, Validators, Params>,
-  // `input`s are `ReadonlyDeep` for the same reason as the single variant: they
-  // can be shared with other producer calls via the registry, so a producer
-  // must not mutate them.
-  producer: (
-    inputs: readonly ReadonlyDeep<Input>[],
-    producerOptions?: { signal?: AbortSignal },
-  ) => Promise<
-    (ComputingProducerResult<Input, Spec, Validators, Params> | ErrorType)[]
-  >,
-) {
-  const {
-    cache,
-    hashInput,
-    isCacheable: isInputCacheable,
-    ...wrapOptions
-  } = options;
+  cache: PublicInterface<Cache<RT, Validators, Params>>,
+  options: WrapProducerOptions<Params> | undefined,
+  branches: {
+    readonly [K in Covered]: Omit<
+      ComputingBranch<Input, RT, K, Validators, Params>,
+      "produce"
+    > & {
+      produce: (
+        // `input`s are `ReadonlyDeep` for the same reason as the single
+        // variant: they can be shared with other producer calls via the
+        // registry, so a producer must not mutate them.
+        inputs: readonly ReadonlyDeep<Input>[],
+        options?: { signal?: AbortSignal },
+      ) => Promise<
+        (
+          | ComputingProducerResult<
+              Input,
+              SpecForId<SpecOf<RT>, IdOfResourceType<RT[K]>>,
+              Validators,
+              Params
+            >
+          | ErrorType
+        )[]
+      >;
+    };
+  },
+): (
+  inputs: readonly Input[],
+  options?: { signal?: AbortSignal },
+) => Promise<
+  (
+    | Entry<
+        SpecForId<SpecOf<RT>, IdOfResourceType<RT[Covered]>>,
+        Validators,
+        Params
+      >
+    | ErrorType
+  )[]
+> {
+  type LooseBulkBranch = Omit<LooseBranch<Input>, "produce"> & {
+    produce: (
+      inputs: readonly ReadonlyDeep<Input>[],
+      options?: { signal?: AbortSignal },
+    ) => Promise<
+      (
+        | ComputingProducerResult<Input, CacheSpec, AnyValidators, AnyParams>
+        | ErrorType
+      )[]
+    >;
+  };
+
+  const branchEntries = checkedBranchEntries<Input>(
+    "wrapBulkComputingProducer",
+    branches,
+  ) as unknown as [string, LooseBulkBranch][];
+  const branchesByName = new Map(branchEntries);
   const registry = new InputRegistry<Input>();
-  const hashSupplementals = makeSupplementalHasher<
-    Input,
-    Spec,
-    Validators,
-    Params
-  >(hashInput);
+  const hashSupplementals = makeSupplementalHasher<Input>();
   // Bound concurrent input hashing (see HASH_CONCURRENCY); shared across calls.
   const hashLimit = pLimit(HASH_CONCURRENCY);
 
-  const wrapped = wrapBulkProducer<Spec, Validators, Params, ErrorType>(
-    cache,
-    {
-      ...wrapOptions,
-      // `registry.get` runs synchronously inside `wrapBulkProducer`'s
-      // `isCacheable` check, while the id is still registered.
-      ...(isInputCacheable
-        ? { isCacheable: (id: string) => isInputCacheable(registry.get(id)) }
-        : {}),
-    },
-    // Each `registry.get` runs synchronously (while mapping) before `producer`
-    // is invoked, so every input is read while still registered.
-    (reqs, producerOptions) => {
-      // Widen to `ReadonlyDeep` (sound — `producer` only reads); see the
-      // single-producer variant.
-      const inputs = reqs.map(
-        (req) => registry.get(req.id),
-      ) as readonly ReadonlyDeep<Input>[];
-      return producer(inputs, producerOptions).then((results) =>
-        Promise.all(
-          results.map(async (result) =>
-            result instanceof Error ? result : hashSupplementals(result),
+  // Each branch's internal bulk producer recovers the inputs from the
+  // registry (synchronously, while still registered) and hands the batch to
+  // the branch's `produce`.
+  const producers = Object.fromEntries(
+    branchEntries.map(([name, branch]) => [
+      name,
+      (
+        reqs: readonly { readonly id: string }[],
+        producerOptions?: { signal?: AbortSignal },
+      ) => {
+        const inputs = reqs.map((req) =>
+          registry.get(req.id),
+        ) as readonly ReadonlyDeep<Input>[];
+        const producerPromise = producerOptions
+          ? branch.produce(inputs, producerOptions)
+          : branch.produce(inputs);
+        return producerPromise.then(async (results) =>
+          Promise.all(
+            results.map(async (result) =>
+              result instanceof Error
+                ? result
+                : hashSupplementals(branch.hashInput, result),
+            ),
           ),
-        ),
-      );
-    },
+        );
+      },
+    ]),
+  );
+
+  // SAFETY: same bridge as wrapComputingProducer's (see there).
+  const wrapped = wrapBulkProducer<RT, Covered, Validators, Params, ErrorType>(
+    cache,
+    options,
+    producers as unknown as Parameters<
+      typeof wrapBulkProducer<RT, Covered, Validators, Params, ErrorType>
+    >[2],
   );
 
   const wrappedBulkComputingProducer = async (
     inputs: readonly Input[],
-    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal },
+    callOptions?: { signal?: AbortSignal },
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
 
-    // Bounded by `hashLimit` (`hashInput` may be sync — p-limit handles that);
-    // cast for the same reason as the single-producer variant.
-    const ids = (await Promise.all(
-      inputs.map((input) => hashLimit(() => hashInput(input))),
-    )) as Spec["id"][];
+    // Route each input to its branch, then hash it with that branch's
+    // `hashInput` (bounded by `hashLimit`; `hashInput` may be sync — p-limit
+    // handles that).
+    const branchNames = inputs.map(
+      (input) => findBranch("wrapBulkComputingProducer", branchEntries, input)[0],
+    );
+    const ids = await Promise.all(
+      inputs.map(async (input, index) =>
+        hashLimit(async () => {
+          // Non-null assertion is safe: index-aligned with `inputs`, and every
+          // branch name came from `branchEntries`.
+          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+          const branch = branchesByName.get(branchNames[index]!)!;
+          return branch.hashInput(input);
+        }),
+      ),
+    );
     signal?.throwIfAborted();
+
+    ids.forEach((id, index) => {
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- index-aligned with `ids`
+      checkMintedId(cache, branchNames[index]!, id);
+    });
 
     ids.forEach((id, index) => {
       // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- index-aligned with `ids`
@@ -313,13 +534,8 @@ export function wrapBulkComputingProducer<
     });
     try {
       return await wrapped(
-        // See the single-producer variant for why the requests are cast.
-        ids.map((id) => ({
-          id,
-          ...(callOptions?.directives
-            ? { directives: callOptions.directives }
-            : {}),
-        })) as PartialConsumerRequest<Params, Spec["id"]>[],
+        // SAFETY: same bridge as wrapComputingProducer's (see there).
+        ids.map((id) => ({ id })) as unknown as Parameters<typeof wrapped>[0],
         signal ? { signal } : undefined,
       );
     } finally {
@@ -327,52 +543,52 @@ export function wrapBulkComputingProducer<
     }
   };
 
-  // Expose the cache on the returned function (for convenience, e.g. closing it).
-  wrappedBulkComputingProducer.cache = cache;
-
   return wrappedBulkComputingProducer;
 }
 
 /**
  * Builds the function that turns a {@link ComputingProducerResult} into the
  * plain {@link RequestPairedProducerResult} the underlying producer machinery
- * expects, by hashing each supplemental resource's `input` into its storage id.
+ * expects, by hashing each supplemental resource's `input` -- with the
+ * producing branch's own `hashInput` -- into its storage id.
  *
  * The casts reconstruct the canonical result shape from the computing result
  * (which differs only by how supplementals are keyed); TS can't track the
  * distributive transform across the `Omit`/re-add.
  */
-function makeSupplementalHasher<
-  Input,
-  Spec extends CacheSpec,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
->(hashInput: (input: Input) => Spec["id"] | Promise<Spec["id"]>) {
+function makeSupplementalHasher<Input>() {
   // One limiter shared across every call of the returned hasher.
   const limit = pLimit(HASH_CONCURRENCY);
   return async (
-    result: ComputingProducerResult<Input, Spec, Validators, Params>,
-  ): Promise<RequestPairedProducerResult<Spec, Validators, Params>> => {
+    hashInput: (input: Input) => string | Promise<string>,
+    result: ComputingProducerResult<Input, CacheSpec, AnyValidators, AnyParams>,
+  ): Promise<
+    RequestPairedProducerResult<CacheSpec, AnyValidators, AnyParams>
+  > => {
     const { supplementalResources, ...primary } = result;
     if (!supplementalResources || supplementalResources.length === 0) {
       return primary as unknown as RequestPairedProducerResult<
-        Spec,
-        Validators,
-        Params
+        CacheSpec,
+        AnyValidators,
+        AnyParams
       >;
     }
 
     return {
       ...primary,
       supplementalResources: await Promise.all(
-        supplementalResources.map((resource) =>
+        supplementalResources.map(async (resource) =>
           limit(async () => {
             const { input, ...rest } = resource;
             return { ...rest, id: await Promise.resolve(hashInput(input)) };
           }),
         ),
       ),
-    } as unknown as RequestPairedProducerResult<Spec, Validators, Params>;
+    } as unknown as RequestPairedProducerResult<
+      CacheSpec,
+      AnyValidators,
+      AnyParams
+    >;
   };
 }
 

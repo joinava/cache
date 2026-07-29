@@ -5,7 +5,12 @@ import {
   isValidatable,
 } from "./utils/normalizedProducerResultResourceHelpers.js";
 
-export { default as Cache } from "./Cache.js";
+export {
+  AmbiguousResourceTypeError,
+  default as Cache,
+  UnclassifiableIdError,
+  type CacheLookupResult,
+} from "./Cache.js";
 export { default as MemoryStore } from "./stores/MemoryStore/MemoryStore.js";
 export { default as PostgresStore } from "./stores/PostgresStore/PostgresStore.js";
 export type { PostgresStoreSupportedParams } from "./stores/PostgresStore/PostgresStore.js";
@@ -16,41 +21,45 @@ export {
 } from "./stores/SqliteStore/SqliteStore.js";
 export * from "./types/index.js";
 export { default as collapsedTaskCreator } from "./utils/collapsedTaskCreator.js";
-export {
-  idStartsWith,
-  producerByIdType,
-  type ProducerBranch,
-  type ProducerByIdTypeBuilder,
-} from "./utils/producerByIdType.js";
 export { restoreInfinityInDirectives } from "./utils/normalization.js";
+export type { PartialConsumerRequest } from "./utils/requestPairedProducerUtils.js";
 export { naiveGetMany } from "./utils/utils.js";
-export { wrapBulkProducer } from "./utils/wrapBulkProducer.js";
-export { default as wrapProducer } from "./utils/wrapProducer.js";
-export type { CacheResultOutcome } from "./utils/wrapProducer.js";
+export type { JsonOf } from "type-party";
+export { jsonParse, jsonStringify } from "type-party/runtime/json.js";
 export {
-  computingProducerByInputType,
-  type ComputingProducerByInputTypeBuilder,
-  type ComputingVariant,
-  type ComputingVariantSupplemental,
-  type ContentForVariants,
-  type InputForVariants,
-} from "./utils/computingProducerByInputType.js";
+  wrapBulkProducer,
+  type BulkProducersFor,
+  type BulkResourceTypeProducer,
+} from "./utils/wrapBulkProducer.js";
+export {
+  default as wrapProducer,
+  NoProducerForResourceTypeError,
+  type ProducersFor,
+  type ResourceTypeProducer,
+  type WrapProducerOptions,
+} from "./utils/wrapProducer.js";
 export {
   wrapBulkComputingProducer,
   wrapComputingProducer,
+  type ComputingBranch,
+  type ComputingProducerResult,
 } from "./utils/wrapComputingProducer.js";
 
 // Diagnostics channels
 export {
-  CACHE_RESULT_CHANNEL_NAME,
-  cacheResultChannel,
-  type CacheResultMessage,
-  DROPPED_DIRECTIVE_CHANNEL_NAME,
-  droppedDirectiveChannel,
-  type DroppedDirectiveMessage,
-  STORE_ENTRY_RESULT_CHANNEL_NAME,
-  storeEntryResultChannel,
-  type StoreEntryResultMessage,
+  CACHE_FETCH_CHANNEL_NAME,
+  cacheFetchChannel,
+  type CacheFetchMessage,
+  CACHE_PRODUCE_CHANNEL_NAME,
+  cacheProduceChannel,
+  type CacheProduceMessage,
+  CACHE_READ_CHANNEL_NAME,
+  cacheReadChannel,
+  type CacheReadMessage,
+  CACHE_STORE_ENTRY_CHANNEL_NAME,
+  cacheStoreEntryChannel,
+  type CacheStoreEntryMessage,
+  type TypedChannel,
 } from "./diagnostics.js";
 
 export const entryUtils = { birthDate, age, isValidatable, isFresh };
