@@ -249,14 +249,10 @@ export function expectCachePathFetch(
  * is deep-equaled. `requests` are compared order-insensitively (batch order
  * within one bulk invocation isn't documented).
  *
- * On `collapsedCallerCount`: §6.5.3 reads "logical callers that rode this
- * invocation via request collapsing", which admits two readings -- riders
- * only (a lone caller's invocation reports 0), or every logical request
- * attached to the invocation, its trigger included (a lone caller reports 1;
- * one rider makes 2; a background revalidation reports 1). The §6.5 prose
- * "N callers ride 1 invocation" supports the second, which is also what the
- * implementation does; these suites assert that reading. Flagged in the
- * acceptance report as needing a one-line doc clarification.
+ * On `collapsedCallerCount`: the initiator plus every rider (≥ 1; a lone
+ * caller reports 1, one rider makes 2, a background revalidation with no
+ * waiting caller reports 1) -- the doc's §6.5.3 docstring now states this
+ * explicitly (it counts ATTACHMENT, not settlement dependence).
  */
 export function expectProduceMessage(
   msg: CacheProduceMessage | undefined,

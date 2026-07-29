@@ -123,8 +123,13 @@ export type CollapsedInvocation = {
  * - the task function receives a {@link CollapsedInvocation} handle so it can
  *   publish invocation-scoped diagnostics (trigger, attached-caller count);
  * - each call's return says whether it `rode` an already-in-flight
- *   invocation (true) or initiated one (false), which is what the fetch
- *   channel's `collapsed` flag reports.
+ *   invocation (true) or initiated one (false). Settlements that DEPEND on
+ *   the invocation (served-from-producer / producer-error /
+ *   served-stale-after-error / aborted-while-waiting) report this as the
+ *   fetch channel's `collapsed` flag; cache-served settlements (fresh or
+ *   stale-while-revalidating) report `collapsed: false` even when they
+ *   attached a background revalidation as a rider, since their settlement
+ *   never depended on it (see CacheFetchMessage.collapsed).
  *
  * Not exported from the package: the public `collapsedTaskCreator` remains
  * the general-purpose utility.

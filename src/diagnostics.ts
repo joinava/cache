@@ -127,10 +127,18 @@ export const CACHE_FETCH_CHANNEL_NAME = "@zingage/cache:fetch";
 export type CacheFetchMessage = Attribution & {
   resourceId: string;
   /**
-   * True if this request rode an already-in-flight producer call. In the base
-   * (not the union) because it doesn't co-vary with the bypass flag: e.g.
-   * `served-stale-after-error` can be collapsed (a rider on a failed shared
-   * invocation falling back to its own if-error entry) but never bypassed.
+   * True if this request's own SETTLEMENT rode an already-in-flight producer
+   * call -- it was answered (or errored/aborted) via an invocation some
+   * other caller initiated. Cache-served settlements report false even when
+   * the request attached a background revalidation to an in-flight
+   * invocation: a `served-stale-while-revalidating` rider counts in the
+   * produce channel's `collapsedCallerCount` but not here, because its
+   * settlement was the cached entry, not the invocation.
+   *
+   * In the base (not the union) because it doesn't co-vary with the bypass
+   * flag: e.g. `served-stale-after-error` can be collapsed (a rider on a
+   * failed shared invocation falling back to its own if-error entry) but
+   * never bypassed.
    */
   collapsed: boolean;
 } & (
@@ -211,7 +219,17 @@ export type CacheProduceMessage = {
    * resourceType).
    */
   requests: readonly { resourceType: string; resourceId: string }[];
-  /** Logical callers that rode this invocation via request collapsing. */
+  /**
+   * Total logical callers this invocation served: the initiator plus every
+   * rider that collapsed onto it (≥ 1; a background revalidation with no
+   * waiting foreground caller reports 1). Counts ATTACHMENT, not settlement
+   * dependence: an SWR caller whose background revalidation rode this
+   * invocation is counted here while its own fetch reports
+   * `collapsed: false` -- so Σ(collapsedCallerCount − 1) ≥ the number of
+   * `collapsed: true` fetches. May also undercount by riders that attach in
+   * the settlement's microtask window (they're served by the just-settled
+   * invocation, but this count was already read).
+   */
   collapsedCallerCount: number;
   outcome: "success" | "error";
   durationMs: number;

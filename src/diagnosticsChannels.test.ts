@@ -340,11 +340,12 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("after close with 'act-empty'/'no-op': reads still publish (found: 'none') and store() returns []", async () => {
+    it("after close with 'act-empty'/'no-op': reads still publish (found: 'none'), store() returns [], delete() no-ops", async () => {
       // Contract adjudication #8: an act-empty read is still a lookup the
       // channel reports, and a no-op store returns an empty results array.
       const name = uniqueCacheName("read-after-close");
-      const cache = new Cache(memoryStoreFor(registry), {
+      const store = memoryStoreFor(registry);
+      const cache = new Cache(store, {
         name,
         resourceTypes: registry,
         onGetAfterClose: "act-empty",
@@ -374,6 +375,13 @@ describe("diagnostics channels (§6.5)", () => {
         ]);
         expect(storeResults).to.deep.equal([]);
         expect(capture.storeEntry).to.deep.equal([]);
+
+        // Deletes are writes, so they follow onStoreAfterClose too: under
+        // "no-op" a post-close delete resolves without touching the store.
+        store.delete = async () => {
+          throw new Error("store.delete must not be called after close");
+        };
+        await cache.delete("site:a");
       } finally {
         capture.stop();
       }
@@ -930,6 +938,73 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
+    it("SWR riders: a second stale-served caller rides the in-flight revalidation -- counted in collapsedCallerCount, but its fetch stays collapsed: false (settlement-centric)", async () => {
+      const { name, cache } = makeHarness("fetch-swr-rider");
+      // Seeded (before capture starts) as stale but well inside the SWR
+      // window, backdated so no wall-clock wait is involved.
+      await cache.store([
+        {
+          id: "site:swr",
+          content: "old",
+          date: secondsAgo(30),
+          directives: swrWindowDirectives,
+        },
+      ]);
+      const capture = captureChannels(name);
+      let releaseProducer = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseProducer = resolve;
+      });
+      const producer = mock.fn(async () => {
+        await gate;
+        return { content: "new", directives: freshFor100 };
+      });
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      try {
+        // Both calls are served stale immediately; the first starts a
+        // background revalidation (held open by the gate), the second's
+        // revalidation rides it.
+        const res1 = await getSite({ id: "site:swr" });
+        const res2 = await getSite({ id: "site:swr" });
+        expect(res1.content).to.equal("old");
+        expect(res2.content).to.equal("old");
+
+        releaseProducer();
+        await waitUntil(
+          () => capture.produce.length === 1,
+          "the shared revalidation settling",
+        );
+        expect(producer.mock.callCount()).to.equal(1);
+
+        // Both settlements were the cached entry -- neither depended on the
+        // shared invocation -- so both fetches report collapsed: false,
+        // while the produce message counts the rider. The channels
+        // deliberately reconcile as an inequality:
+        // Σ(collapsedCallerCount − 1) ≥ #collapsed-true fetches (§6.5.3).
+        expect(capture.fetch).to.have.lengthOf(2);
+        capture.fetch.forEach((message) => {
+          expectCachePathFetch(message, {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:swr",
+            disposition: "served-stale-while-revalidating",
+            collapsed: false,
+          });
+        });
+        expectProduceMessage(capture.produce[0], {
+          cache: name,
+          trigger: "revalidation",
+          requests: [{ resourceType: "site_day", resourceId: "site:swr" }],
+          collapsedCallerCount: 2,
+          outcome: "success",
+        });
+      } finally {
+        releaseProducer();
+        capture.stop();
+        await cache.close();
+      }
+    });
+
     it("onCacheReadFailure default ('call-producer'): the failed read emits no read message; the fetch settles normally", async () => {
       const { name, store, cache } = makeHarness("fetch-read-failure-default");
       store.get = async () => {
@@ -983,6 +1058,60 @@ describe("diagnostics channels (§6.5)", () => {
         expect(capture.read).to.deep.equal([]);
         expect(capture.fetch).to.deep.equal([]);
         expect(capture.produce).to.deep.equal([]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("wrapBulkProducer + onCacheReadFailure: 'throw': a mixed bypass+read batch emits NO fetch messages -- even after the bypass invocation settles and stores", async () => {
+      const { name, store, cache } = makeHarness("fetch-bulk-throw-bypass");
+      const readError = new Error("store exploded");
+      store.getMany = async () => {
+        throw readError;
+      };
+      const capture = captureChannels(name);
+      const producer = mock.fn(
+        async (reqs: readonly { readonly id: string }[]) =>
+          reqs.map((req) => ({
+            content: `ok-${req.id}`,
+            directives: freshFor100,
+          })),
+      );
+      const getBulk = wrapBulkProducer(
+        cache,
+        { onCacheReadFailure: "throw" },
+        { site_day: producer },
+      );
+      try {
+        // The bypass element's invocation launches before (and independently
+        // of) the read; the read failure then rejects the whole call.
+        const thrown = await expectRejection(() =>
+          getBulk([
+            { id: "site:bypass", directives: { maxAge: 0 } },
+            { id: "site:read" },
+          ]),
+        );
+        expect(thrown).to.equal(readError);
+
+        // The in-flight bypass invocation still settles, stores its result
+        // (store-on-success), and publishes its produce message -- but the
+        // call rejected before delivering its answer, so no fetch message
+        // may ever claim `served-from-producer` for it.
+        await waitUntil(
+          () => capture.produce.length === 1 && capture.storeEntry.length === 1,
+          "bypass invocation settling after the call rejected",
+        );
+        await delay(20);
+        expect(capture.read).to.deep.equal([]);
+        expect(capture.fetch).to.deep.equal([]);
+        expectProduceMessage(capture.produce[0], {
+          cache: name,
+          trigger: "bypass",
+          requests: [{ resourceType: "site_day", resourceId: "site:bypass" }],
+          collapsedCallerCount: 1,
+          outcome: "success",
+        });
       } finally {
         capture.stop();
         await cache.close();
@@ -1201,10 +1330,15 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("wrapBulkProducer: a short result array settles the unanswered element's fetch as producer-error and throws descriptively", async () => {
+    it("wrapBulkProducer: a short result array fails the whole invocation: every element settles producer-error exactly once, nothing stores, produce reports error", async () => {
       const { name, cache } = makeHarness("produce-bulk-short");
       const capture = captureChannels(name);
-      // A buggy producer that drops the second request's result slot.
+      // A buggy producer that returns one result for three requests. An
+      // under-return poisons the positional (result, request) pairing -- a
+      // dropped MIDDLE element would pair later results with the wrong
+      // requests -- so elements before the gap must not report
+      // served-from-producer (the call rejects; nothing is delivered),
+      // elements after it must still settle, and the prefix must not store.
       const siteBulk = mock.fn(
         async (reqs: readonly { readonly id: string }[]) =>
           reqs
@@ -1217,24 +1351,32 @@ describe("diagnostics channels (§6.5)", () => {
       const getBulk = wrapBulkProducer(cache, {}, { site_day: siteBulk });
       try {
         const thrown = await expectRejection(() =>
-          getBulk([{ id: "site:answered" }, { id: "site:dropped" }]),
+          getBulk([{ id: "site:a" }, { id: "site:b" }, { id: "site:c" }]),
         );
         expect(thrown).to.be.instanceOf(Error);
-
-        // One fetch per request element regardless; the unanswered element
-        // settles as producer-error.
-        expect(capture.fetch).to.have.lengthOf(2);
-        const dropped = capture.fetch.find(
-          (m) => m.resourceId === "site:dropped",
+        expect((thrown as Error).message).to.match(
+          /returned 1 results for 3 requests/,
         );
-        expectProducerPathFetch(dropped, {
-          cache: name,
-          resourceType: "site_day",
-          resourceId: "site:dropped",
-          disposition: "producer-error",
-          directivesImpliedBypass: false,
-          collapsed: false,
+
+        // One fetch per request element, every one producer-error.
+        expect(capture.fetch).to.have.lengthOf(3);
+        sortByResourceId(capture.fetch).forEach((message, i) => {
+          expectProducerPathFetch(message, {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: ["site:a", "site:b", "site:c"][i] ?? "",
+            disposition: "producer-error",
+            directivesImpliedBypass: false,
+            collapsed: false,
+          });
         });
+
+        // The invocation settled by rejecting (the contract violation), so
+        // produce reports error -- and the untrustworthy prefix is not
+        // stored.
+        expect(capture.produce).to.have.lengthOf(1);
+        expect(capture.produce[0]?.outcome).to.equal("error");
+        expect(capture.storeEntry).to.deep.equal([]);
       } finally {
         capture.stop();
         await cache.close();

@@ -155,6 +155,93 @@ describe("resource-type classification (§6.1, §6.2)", () => {
     });
   });
 
+  describe("throwing guards (§6.1: a guard that throws is a non-match)", () => {
+    // The §6.1 authoring idiom: guards that parse the id and so THROW on any
+    // id that isn't theirs. A malformed (non-JSON) id must surface as
+    // UnclassifiableIdError -- with the parse failure(s) as `cause` -- not
+    // leak as a bare SyntaxError with no cache/id attribution (§7's
+    // malformed-minted-id simulation).
+    const jsonRegistry = {
+      site_day: resourceType<string>()({
+        matches: (id): id is string =>
+          !("businessId" in (JSON.parse(id) as object)),
+      }),
+      business_slice: resourceType<string>()({
+        matches: (id): id is string =>
+          "businessId" in (JSON.parse(id) as object),
+      }),
+    } satisfies ResourceTypes;
+
+    it("a malformed id with jsonParse-style guards throws UnclassifiableIdError carrying the guard errors as cause", async () => {
+      const name = uniqueCacheName("classify-guard-throw");
+      const cache = new Cache(memoryStoreFor(jsonRegistry), {
+        name,
+        resourceTypes: jsonRegistry,
+      });
+      try {
+        const thrown = assertUnclassifiable(
+          expectSyncThrow(() => cache.classify("site:oops-not-json")),
+          { cacheName: name, id: "site:oops-not-json" },
+        );
+        // Both guards threw, so the cause aggregates both parse errors.
+        const cause = thrown.cause;
+        if (!(cause instanceof AggregateError)) {
+          throw new Error(
+            `expected an AggregateError cause, got: ${String(cause)}`,
+          );
+        }
+        const errors: readonly unknown[] = cause.errors;
+        expect(errors).to.have.lengthOf(2);
+        errors.forEach((e) => expect(e).to.be.instanceOf(SyntaxError));
+
+        // The same protection through store(): a producer minting a
+        // malformed id rejects before persisting (§7), attributably.
+        assertUnclassifiable(
+          await expectRejection(() =>
+            cache.store([
+              {
+                id: "definitely-not-json",
+                content: "x",
+                directives: freshFor100,
+              },
+            ]),
+          ),
+          { cacheName: name, id: "definitely-not-json" },
+        );
+      } finally {
+        await cache.close();
+      }
+    });
+
+    it("a guard that throws is a non-match, not a veto: another guard matching cleanly still classifies", async () => {
+      const name = uniqueCacheName("classify-guard-throw-mixed");
+      // One parsing guard (throws on non-JSON ids) + one prefix guard.
+      const mixedRegistry = {
+        json_thing: resourceType<string>()({
+          matches: (id): id is string => "j" in (JSON.parse(id) as object),
+        }),
+        site_day: resourceType<string>()({ matches: idStartsWith("site:") }),
+      } satisfies ResourceTypes;
+      const cache = new Cache(memoryStoreFor(mixedRegistry), {
+        name,
+        resourceTypes: mixedRegistry,
+      });
+      try {
+        expect(cache.classify("site:1")).to.equal("site_day");
+
+        // When the throwing guard is the only thrower and nothing matches,
+        // the single error is the cause directly (no AggregateError).
+        const thrown = assertUnclassifiable(
+          expectSyncThrow(() => cache.classify("nope")),
+          { cacheName: name, id: "nope" },
+        );
+        expect(thrown.cause).to.be.instanceOf(SyntaxError);
+      } finally {
+        await cache.close();
+      }
+    });
+  });
+
   describe("get / getMany / delete reject on classification failure, before touching the store", () => {
     it("get: rejects with UnclassifiableIdError; the store is never read; no read message is published", async () => {
       const name = uniqueCacheName("get-unclassifiable");

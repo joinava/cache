@@ -87,12 +87,15 @@ The package provides **four** functions for wrapping producers with a cache. The
   ```ts
   const getStories = wrapProducer(cache, {}, {
     story: async (req) => ({ content: await fetchStory(req.id), directives: { freshUntilAge: 60 } }),
-    collection: async (req) => ({
-      content: await fetchCollection(req.id),
-      directives: { freshUntilAge: 60 },
-      // supplementals may target any registry type, covered by this wrapper or not
-      supplementalResources: stories.map((s) => ({ id: `story:${s.id}`, content: s, directives: { freshUntilAge: 60 } })),
-    }),
+    collection: async (req) => {
+      const collection = await fetchCollection(req.id);
+      return {
+        content: collection,
+        directives: { freshUntilAge: 60 },
+        // supplementals may target any registry type, covered by this wrapper or not
+        supplementalResources: collection.stories.map((s) => ({ id: `story:${s.id}`, content: s, directives: { freshUntilAge: 60 } })),
+      };
+    },
   });
   ```
 
@@ -124,7 +127,7 @@ The package publishes telemetry on four [`diagnostics_channel`](https://nodejs.o
 | Channel                       | Cardinality                                                                             | Message highlights                                                                                                                                                                                                                                                        |
 | ----------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `@zingage/cache:read`        | One per cache lookup (`Cache.get`; per request for `getMany`) — including direct callers | `found`: `"usable"` \| `"usable-while-revalidate"` \| `"usable-if-error"` \| `"none"`, evaluated against the request's directives. Bypass requests never appear (they skip the read); a read the store failed emits nothing (the error propagates).                        |
-| `@zingage/cache:fetch`       | One per call of a wrapped producer (per request element, for bulk), at settlement        | `disposition`: `served-from-cache`, `served-stale-while-revalidating`, `served-stale-after-error`, `served-from-producer`, `producer-error`, or `aborted`; `collapsed` (rode an in-flight invocation); producer-path dispositions carry `directivesImpliedBypass`.       |
+| `@zingage/cache:fetch`       | One per call of a wrapped producer (per request element, for bulk), at settlement        | `disposition`: `served-from-cache`, `served-stale-while-revalidating`, `served-stale-after-error`, `served-from-producer`, `producer-error`, or `aborted`; `collapsed` (the settlement rode an in-flight invocation; cache-served settlements report `false` even when they attached a background revalidation as a rider); producer-path dispositions carry `directivesImpliedBypass`.       |
 | `@zingage/cache:produce`     | One per actual producer invocation (foreground misses AND background revalidations)      | `trigger`: `"miss"` \| `"revalidation"` \| `"bypass"` (the invocation's initiating cause; riders never re-label); `requests[]` (`{resourceType, resourceId}`, all one type); `collapsedCallerCount`; `outcome`; `durationMs`. Producer latency and error rate live here. |
 | `@zingage/cache:store-entry` | One per entry passed to `Cache.store()` (supplementals attributed to their own type)     | `resourceId`, `vary`, `validators`, `relationshipToExistingStoredData` (`"is-new"` \| `"unchanged"` \| `"changed"` \| `undefined`).                                                                                                                                       |
 
