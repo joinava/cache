@@ -210,10 +210,16 @@ export function wrapBulkProducer<
 
   // SAFETY: see LooseProducer in wrapProducer.ts -- values are only read
   // after the construction-time keys check, per-request classification, and
-  // the coverage check.
-  const looseProducers = producers as unknown as Readonly<
+  // the coverage check. The record's own entries are snapshotted (as in
+  // wrapProducer) so a post-wrap mutation of the caller's record can't
+  // change coverage later.
+  const looseProducers: Readonly<
     Record<string, LooseBulkProducer<RT, Validators, Params, ErrorType>>
-  >;
+  > = {
+    ...(producers as unknown as Readonly<
+      Record<string, LooseBulkProducer<RT, Validators, Params, ErrorType>>
+    >),
+  };
   const coveredResourceTypes = Object.keys(looseProducers);
 
   if (coveredResourceTypes.length === 0) {
@@ -286,6 +292,20 @@ export function wrapBulkProducer<
           resourceType,
           reqs,
         );
+        // A producer that returns fewer results than requests (or an
+        // undefined element) violated its contract, and the positional
+        // (result, request) pairing is no longer trustworthy -- a dropped
+        // middle element would silently pair later results with the wrong
+        // requests. So nothing is stored and the WHOLE invocation fails:
+        // this throw rejects it, settling every waiting element's fetch as
+        // `producer-error` via the groups' rejection handlers.
+        if (
+          reqs.some((_, i) => requestPairedProducerResults[i] === undefined)
+        ) {
+          throw new Error(
+            `wrapBulkProducer: producer for resource type "${resourceType}" returned ${String(requestPairedProducerResults.length)} results for ${String(reqs.length)} requests (every request must receive a result or an Error element)`,
+          );
+        }
       } catch (error) {
         publishProduce("error");
         throw error;
@@ -474,19 +494,13 @@ export function wrapBulkProducer<
           attached.promise.then(
             (producerResults) =>
               itemsOfType.map((item, i) => {
-                const producerResult = producerResults[i];
-                if (producerResult === undefined) {
-                  // The producer violated its contract by returning fewer
-                  // results than requests. Treat like a per-request error,
-                  // minus the fallback (there's no ErrorType to return).
-                  settleFetch(item, attached.rode, {
-                    disposition: "producer-error",
-                    directivesImpliedBypass: item.directivesImpliedBypass,
-                  });
-                  throw new Error(
-                    `wrapBulkProducer: producer for resource type "${resourceType}" returned ${String(producerResults.length)} results for ${String(itemsOfType.length)} requests`,
-                  );
-                }
+                // Non-null assertion is safe: the invocation task validates
+                // result completeness before resolving (an under-return
+                // rejects the whole invocation, handled below), and riders
+                // share the initiator's exact request batch (it's the
+                // collapse key).
+                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+                const producerResult = producerResults[i]!;
 
                 if (producerResult instanceof Error) {
                   const fallback = usableIfErrorByItem?.get(item);
@@ -570,7 +584,18 @@ export function wrapBulkProducer<
 
               switch (onCacheReadFailure) {
                 case "throw":
-                  // The call never reached a disposition: no fetch messages.
+                  // The call never reached a disposition: no fetch messages
+                  // -- including for the bypass elements. Their in-flight
+                  // invocation keeps running (and stores on success), but
+                  // this call won't deliver its answers, so mark them
+                  // settled WITHOUT publishing: a later
+                  // `served-from-producer` would claim an answer the caller
+                  // never received.
+                  bypassGroups.forEach((group) => {
+                    group.items.forEach((item) => {
+                      item.settled = true;
+                    });
+                  });
                   throw e;
                 case "call-producer":
                   // Pretend the cache returned no results so that we'll fall

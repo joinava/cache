@@ -288,11 +288,17 @@ export default function wrapProducer<
     logger = defaultLoggersByComponent["wrap-producer"],
   } = options ?? {};
 
-  // SAFETY: see LooseProducer. The keys are also captured here, before any
-  // request runs, so a mutated record can't widen coverage later.
-  const looseProducers = producers as unknown as Readonly<
+  // SAFETY: see LooseProducer. The record's own entries are also snapshotted
+  // here, before any request runs, so a post-wrap mutation of the caller's
+  // record can't widen (or otherwise change) coverage later -- dispatch and
+  // the coverage check both consult the snapshot.
+  const looseProducers: Readonly<
     Record<string, LooseProducer<RT, Validators, Params>>
-  >;
+  > = {
+    ...(producers as unknown as Readonly<
+      Record<string, LooseProducer<RT, Validators, Params>>
+    >),
+  };
   const coveredResourceTypes = Object.keys(looseProducers);
 
   if (coveredResourceTypes.length === 0) {

@@ -31,6 +31,9 @@ describe("normalizeProducerDirectives", () => {
     });
   });
 
+  // NB: 2.0 removed the dropped-directive telemetry channel entirely (design
+  // doc §6.5.5); the NaN-containing directives are still silently DROPPED, so
+  // the behavioral assertions below survive with the channel assertions gone.
   describe("storeFor", () => {
     it("drops NaN", () => {
       const result = normalizeProducerDirectives({
@@ -104,7 +107,7 @@ describe("normalizeProducerDirectives", () => {
       });
     });
 
-    it("normalizes finite values", () => {
+    it("normalizes finite values without dropping", () => {
       const result = normalizeProducerDirectives(
         directivesWithMaxStale({
           withoutRevalidation: 10,

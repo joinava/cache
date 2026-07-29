@@ -26,9 +26,10 @@ import type { IsSingleType } from "./utils.js";
  *   over the request's specific id, so its return type is required to match
  *   the spec variant that id selects. Implementing such a producer directly
  *   is awkward (TypeScript can't narrow the function's free type parameter
- *   based on runtime checks on `req.id`), so users are encouraged to build
- *   one with the {@link producerByIdType} helper, which handles per-variant
- *   dispatch and contains the necessary internal cast.
+ *   based on runtime checks on `req.id`) -- which is why the wrappers take a
+ *   record of single-type producers and dispatch by classified resource type
+ *   instead; this multi-variant form survives as the internal erased shape
+ *   those records bridge to.
  *
  * Implementations of this type MUST NOT be `instanceof Error`, as instanceof
  * Error is used elsewhere to detect if the result could not be returned.

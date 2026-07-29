@@ -47,10 +47,22 @@ export class UnclassifiableIdError extends Error {
   readonly cacheName: string;
   readonly id: string;
 
-  constructor(args: { cacheName: string; id: string; message?: string }) {
+  constructor(args: {
+    cacheName: string;
+    id: string;
+    message?: string;
+    /**
+     * When one or more registry guards THREW on this id (rather than
+     * returning false), the error(s) land here (an `AggregateError` when
+     * more than one threw) so the underlying parse failure stays
+     * debuggable from the log line. See {@link Cache.classify}.
+     */
+    cause?: unknown;
+  }) {
     super(
       args.message ??
         `Cache "${args.cacheName}": id ${JSON.stringify(args.id)} matches no resource type in the registry`,
+      args.cause === undefined ? undefined : { cause: args.cause },
     );
     this.cacheName = args.cacheName;
     this.id = args.id;
@@ -274,11 +286,23 @@ export default class Cache<
    * Classification runs on every get/getMany request id, every stored entry
    * id (primary and supplemental), and every delete id -- classification
    * failures reject the operation BEFORE touching the store.
+   *
+   * A guard that THROWS is treated as not matching: guards routinely reject
+   * foreign ids by failing to parse them (e.g. a `JSON.parse`-based guard
+   * fed a non-JSON id), so a throw is a "no" -- and when no type ends up
+   * matching, the guard error(s) surface as the
+   * {@link UnclassifiableIdError}'s `cause` rather than leaking as a raw
+   * parse error with no cache/id attribution.
    */
   public classify(id: string): ResourceTypeName<RT> {
-    const matched = this.#resourceTypeEntries
-      .filter(([, spec]) => spec.matches(id))
-      .map(([name]) => name);
+    const evaluated = this.#resourceTypeEntries.map(([name, spec]) => {
+      try {
+        return { name, matched: spec.matches(id) };
+      } catch (error) {
+        return { name, matched: false, error };
+      }
+    });
+    const matched = evaluated.filter((it) => it.matched).map((it) => it.name);
 
     if (matched.length === 1) {
       // Non-null assertion is safe: length was just checked.
@@ -287,7 +311,22 @@ export default class Cache<
     }
 
     if (matched.length === 0) {
-      throw new UnclassifiableIdError({ cacheName: this.name, id });
+      const guardErrors = evaluated.flatMap((it) =>
+        "error" in it ? [it.error] : [],
+      );
+      throw new UnclassifiableIdError({
+        cacheName: this.name,
+        id,
+        cause:
+          guardErrors.length === 0
+            ? undefined
+            : guardErrors.length === 1
+              ? guardErrors[0]
+              : new AggregateError(
+                  guardErrors,
+                  "one or more registry guards threw while classifying",
+                ),
+      });
     }
 
     throw new AmbiguousResourceTypeError({
@@ -375,6 +414,23 @@ export default class Cache<
     this.#logger("trace", "received request", { id, params, normalizedParams });
     this.#logger("trace", "requested entries from the store");
 
+    // Unlike producer invocations, store reads are NOT collapsed: N
+    // concurrent identical requests perform N row fetches. If hot-key read
+    // load ever warrants deduping them, the right shape is a PENDING-ONLY
+    // promise share right here, keyed by (id, normalizedParams) -- never a
+    // reuse window (a lookup RESULT is a freshness decision evaluated at a
+    // specific `now`, so sharing one across a window serves decisions
+    // computed against a stale clock; sharing only while the fetch is
+    // in-flight bounds the skew to the read's own duration, which callers
+    // already experience). Keying by (id, params) rather than the full
+    // request lets different-directive callers share the I/O, because
+    // classification (#processCacheEntries) stays per-caller -- which also
+    // keeps `read` messages one-per-logical-request. The wrappers would be
+    // the wrong layer for this: they'd miss direct get()/getMany() callers
+    // and could only collapse whole-request keys. Not built today because a
+    // point read is cheap next to the producer calls collapsing exists to
+    // protect; the read channel measures per-id read rates, so the evidence
+    // would be visible before the need is real.
     const cacheEntries = await this.#dataStore.get(
       id satisfies ReadonlyDeep<Id> as Id,
       normalizedParams,
@@ -609,9 +665,28 @@ export default class Cache<
    * Deletes all stored entries for resources with the given id (regardless of
    * variant). The id is classified against the registry first; a
    * classification failure rejects the call before touching the store.
+   *
+   * After `close()`, behaves like {@link Cache.store} (deletes are writes):
+   * throws or silently no-ops per the `onStoreAfterClose` option.
    */
   public async delete(id: SpecOf<RT>["id"]): Promise<void> {
     this.classify(id);
+
+    if (this.#closed) {
+      if (this.#onStoreAfterClose === "throw") {
+        this.#logger(
+          "trace",
+          "received delete request when closed and throwing",
+        );
+        throw new Error("Store has been closed...");
+      }
+      this.#logger(
+        "trace",
+        "received delete request when closed, so doing nothing",
+      );
+      return;
+    }
+
     return this.#dataStore.delete(id);
   }
 

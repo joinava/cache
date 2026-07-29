@@ -1,28 +1,38 @@
 import { expect } from "chai";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { setTimeout as delay } from "timers/promises";
+import type { ReadonlyDeep } from "type-fest";
 
-import Cache, { UnclassifiableIdError } from "../Cache.js";
-import { MemoryStore } from "../index.js";
+import Cache from "../Cache.js";
 import {
   idStartsWith,
+  MemoryStore,
   resourceType,
   soleResourceType,
-} from "../types/00_ResourceTypes.js";
-import type { AnyParams, AnyValidators, CacheSpec, Entry } from "../types/index.js";
+  type ResourceTypes,
+  type SpecOf,
+} from "../index.js";
+import type { AnyParams, AnyValidators, Entry } from "../types/index.js";
 import {
   wrapBulkComputingProducer,
   wrapComputingProducer,
 } from "./wrapComputingProducer.js";
 
-type Spec = CacheSpec<string, string>;
-type Input = { text: string };
-
-const computedResourceTypes = { computed: soleResourceType<string>() };
-const cacheOptions = {
-  name: "computing-test",
-  resourceTypes: computedResourceTypes,
+// 2.0: computing wrappers take (cache, options, branches) with per-covered-
+// type { matchesInput, hashInput, produce } branches; the
+// computingProducerByInputType builder is deleted. The 1.6.0 `isCacheable`
+// test was removed with the option itself (§6.3). All computing-wrapper calls
+// pass explicit type arguments: `Input` inference degrades to `unknown` when
+// branch functions are pre-typed references (see the acceptance report).
+const testRegistry = {
+  computed: soleResourceType<string>(),
+} satisfies ResourceTypes;
+const testCacheOptions = {
+  name: "wrap-computing-producer-test",
+  resourceTypes: testRegistry,
 };
+
+type Input = { text: string };
 
 const hashInput = (input: Input): string => `computed:${input.text}`;
 
@@ -32,7 +42,7 @@ const result = (content: string) => ({
 });
 
 const contentOf = (
-  entry: Entry<Spec, AnyValidators, AnyParams> | Error,
+  entry: Entry<SpecOf<typeof testRegistry>, AnyValidators, AnyParams> | Error,
 ): string => {
   if (entry instanceof Error) {
     throw entry;
@@ -41,10 +51,13 @@ const contentOf = (
 };
 
 describe("wrapComputingProducer", () => {
-  let cache: Cache<typeof computedResourceTypes>;
+  let cache: Cache<typeof testRegistry>;
 
   beforeEach(() => {
-    cache = new Cache(new MemoryStore(), cacheOptions);
+    cache = new Cache(
+      new MemoryStore<SpecOf<typeof testRegistry>>(),
+      testCacheOptions,
+    );
   });
 
   afterEach(async () => cache.close());
@@ -53,9 +66,11 @@ describe("wrapComputingProducer", () => {
     const producer = mock.fn(async (input: Input) =>
       result(input.text.toUpperCase()),
     );
-    const compute = wrapComputingProducer(cache, {}, {
-      computed: { hashInput, produce: producer },
-    });
+    const compute = wrapComputingProducer<Input, typeof testRegistry, "computed">(
+      cache,
+      {},
+      { computed: { hashInput, produce: producer } },
+    );
 
     const first = await compute({ text: "hello" });
     expect(first.content).to.eq("HELLO");
@@ -70,9 +85,11 @@ describe("wrapComputingProducer", () => {
     const producer = mock.fn(async (input: Input) =>
       result(input.text.toUpperCase()),
     );
-    const compute = wrapComputingProducer(cache, {}, {
-      computed: { hashInput, produce: producer },
-    });
+    const compute = wrapComputingProducer<Input, typeof testRegistry, "computed">(
+      cache,
+      {},
+      { computed: { hashInput, produce: producer } },
+    );
 
     await compute({ text: "a" });
     await compute({ text: "b" });
@@ -81,15 +98,19 @@ describe("wrapComputingProducer", () => {
 
   it("supports an async hashInput", async () => {
     const producer = mock.fn(async (input: Input) => result(input.text));
-    const compute = wrapComputingProducer(cache, {}, {
-      computed: {
-        hashInput: async (input: Input) => {
-          await delay(1);
-          return `computed:${input.text}`;
+    const compute = wrapComputingProducer<Input, typeof testRegistry, "computed">(
+      cache,
+      {},
+      {
+        computed: {
+          hashInput: async (input) => {
+            await delay(1);
+            return `computed:${input.text}`;
+          },
+          produce: producer,
         },
-        produce: producer,
       },
-    });
+    );
 
     await compute({ text: "x" });
     await compute({ text: "x" });
@@ -101,7 +122,7 @@ describe("wrapComputingProducer", () => {
       await delay(20);
       return result(input.text);
     });
-    const compute = wrapComputingProducer(
+    const compute = wrapComputingProducer<Input, typeof testRegistry, "computed">(
       cache,
       { collapseOverlappingRequestsTime: 0 },
       { computed: { hashInput, produce: producer } },
@@ -129,9 +150,11 @@ describe("wrapComputingProducer", () => {
             ]
           : [],
     }));
-    const compute = wrapComputingProducer(cache, {}, {
-      computed: { hashInput, produce: producer },
-    });
+    const compute = wrapComputingProducer<Input, typeof testRegistry, "computed">(
+      cache,
+      {},
+      { computed: { hashInput, produce: producer } },
+    );
 
     await compute({ text: "primary" });
     expect(producer.mock.callCount()).to.eq(1);
@@ -140,19 +163,16 @@ describe("wrapComputingProducer", () => {
     expect(side.content).to.eq("SIDE");
     expect(producer.mock.callCount()).to.eq(1);
   });
-
-  it("throws at construction time on a keyless branches record", () => {
-    expect(() => wrapComputingProducer(cache, {}, {})).to.throw(
-      /cannot be empty/,
-    );
-  });
 });
 
 describe("wrapBulkComputingProducer", () => {
-  let cache: Cache<typeof computedResourceTypes>;
+  let cache: Cache<typeof testRegistry>;
 
   beforeEach(() => {
-    cache = new Cache(new MemoryStore(), cacheOptions);
+    cache = new Cache(
+      new MemoryStore<SpecOf<typeof testRegistry>>(),
+      testCacheOptions,
+    );
   });
 
   afterEach(async () => cache.close());
@@ -161,9 +181,11 @@ describe("wrapBulkComputingProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text.toUpperCase())),
     );
-    const compute = wrapBulkComputingProducer(cache, {}, {
-      computed: { hashInput, produce: producer },
-    });
+    const compute = wrapBulkComputingProducer<
+      Input,
+      typeof testRegistry,
+      "computed"
+    >(cache, {}, { computed: { hashInput, produce: producer } });
 
     await compute([{ text: "b" }]);
     expect(producer.mock.callCount()).to.eq(1);
@@ -186,9 +208,11 @@ describe("wrapBulkComputingProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text)),
     );
-    const compute = wrapBulkComputingProducer(cache, {}, {
-      computed: { hashInput, produce: producer },
-    });
+    const compute = wrapBulkComputingProducer<
+      Input,
+      typeof testRegistry,
+      "computed"
+    >(cache, {}, { computed: { hashInput, produce: producer } });
 
     const results = await compute([]);
     expect(results).to.deep.eq([]);
@@ -199,9 +223,11 @@ describe("wrapBulkComputingProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text.toUpperCase())),
     );
-    const compute = wrapBulkComputingProducer(cache, {}, {
-      computed: { hashInput, produce: producer },
-    });
+    const compute = wrapBulkComputingProducer<
+      Input,
+      typeof testRegistry,
+      "computed"
+    >(cache, {}, { computed: { hashInput, produce: producer } });
 
     await compute([{ text: "a" }, { text: "b" }]);
     const results = await compute([{ text: "a" }, { text: "b" }]);
@@ -210,58 +236,56 @@ describe("wrapBulkComputingProducer", () => {
   });
 });
 
-// --- multi-branch computing wrappers: heterogeneous, correlated variants ---
+// --- heterogeneous branches: correlated (input kind, id space, content) ---
+//
+// (Successor of the 1.6.0 computingProducerByInputType tests. NOTE, logged in
+// the acceptance report: 1.6.0's builder — with its single wrapper-wide
+// hashInput — could cache a supplemental of a DIFFERENT variant than the
+// primary; §6.4's ComputingProducerResult types a branch's supplementals
+// against the branch's OWN spec, so cross-type computing supplementals are no
+// longer expressible and that 1.6.0 test has no 2.0 equivalent. Same-branch
+// supplementals are covered above and below.)
 
 type Story = { id: string; title: string };
 type StoryInput = { kind: "story"; id: string };
 type CollInput = { kind: "collection"; ids: string[] };
 type VInput = StoryInput | CollInput;
 
-const makeStory = (id: string): Story => ({ id, title: `Story ${id}` });
-const isStory = (input: unknown): input is VInput =>
-  (input as Partial<StoryInput>).kind === "story";
-const isCollection = (input: unknown): input is VInput =>
-  (input as Partial<CollInput>).kind === "collection";
-
-const variantResourceTypes = {
+const storiesRegistry = {
   story: resourceType<Story>()({ matches: idStartsWith("extract:story:") }),
   collection: resourceType<Story[]>()({
     matches: idStartsWith("extract:collection:"),
   }),
-};
+} satisfies ResourceTypes;
 
-const hashStoryInput = (input: VInput): `extract:story:${string}` => {
-  if (input.kind !== "story") {
-    throw new Error("story branch got a non-story input");
-  }
-  return `extract:story:${input.id}`;
-};
-const hashCollectionInput = (
-  input: VInput,
-): `extract:collection:${string}` => {
-  if (input.kind !== "collection") {
-    throw new Error("collection branch got a non-collection input");
-  }
-  return `extract:collection:${input.ids.join(",")}`;
-};
+const makeStory = (id: string): Story => ({ id, title: `Story ${id}` });
+const isStory = (input: unknown): input is VInput =>
+  (input as { kind?: unknown }).kind === "story";
+const isCollection = (input: unknown): input is VInput =>
+  (input as { kind?: unknown }).kind === "collection";
 
-describe("wrapComputingProducer with multiple branches", () => {
-  let cache: Cache<typeof variantResourceTypes>;
+describe("computing wrappers with heterogeneous branches", () => {
+  let cache: Cache<typeof storiesRegistry>;
 
   beforeEach(() => {
-    cache = new Cache(new MemoryStore(), {
-      name: "computing-variants-test",
-      resourceTypes: variantResourceTypes,
+    cache = new Cache(new MemoryStore<SpecOf<typeof storiesRegistry>>(), {
+      name: "computing-branches-test",
+      resourceTypes: storiesRegistry,
     });
   });
 
   afterEach(async () => cache.close());
 
-  it("dispatches by matchesInput and returns the right content per branch", async () => {
-    const compute = wrapComputingProducer(cache, {}, {
+  it("dispatches by matchesInput and returns the right (typed) content per branch", async () => {
+    const compute = wrapComputingProducer<
+      VInput,
+      typeof storiesRegistry,
+      "story" | "collection"
+    >(cache, {}, {
       story: {
         matchesInput: isStory,
-        hashInput: hashStoryInput,
+        hashInput: (input): `extract:story:${string}` =>
+          `extract:story:${(input as StoryInput).id}`,
         produce: async (input) => ({
           content: makeStory((input as StoryInput).id),
           directives: { freshUntilAge: 100 },
@@ -269,7 +293,8 @@ describe("wrapComputingProducer with multiple branches", () => {
       },
       collection: {
         matchesInput: isCollection,
-        hashInput: hashCollectionInput,
+        hashInput: (input): `extract:collection:${string}` =>
+          `extract:collection:${(input as CollInput).ids.join(",")}`,
         produce: async (input) => ({
           content: (input as CollInput).ids.map(makeStory),
           directives: { freshUntilAge: 100 },
@@ -284,171 +309,60 @@ describe("wrapComputingProducer with multiple branches", () => {
     expect(collection.content).to.deep.eq([makeStory("1"), makeStory("2")]);
   });
 
-  it("throws for an input that no branch's matchesInput accepts", async () => {
-    const compute = wrapComputingProducer(cache, {}, {
-      story: {
-        matchesInput: isStory,
-        hashInput: hashStoryInput,
-        produce: async (input) => ({
-          content: makeStory((input as StoryInput).id),
+  it("caches same-branch supplementals under their input's hash across branch dispatch", async () => {
+    const storyProduce = mock.fn(async (input: ReadonlyDeep<VInput>) => ({
+      content: makeStory((input as StoryInput).id),
+      directives: { freshUntilAge: 100 },
+      supplementalResources: [
+        // A related story this computation produced as a byproduct: same
+        // branch (story), keyed by ITS input, so compute({...related}) hits.
+        {
+          input: {
+            kind: "story",
+            id: `${(input as StoryInput).id}-related`,
+          } satisfies StoryInput as VInput,
+          content: makeStory(`${(input as StoryInput).id}-related`),
           directives: { freshUntilAge: 100 },
-        }),
-      },
-      collection: {
-        matchesInput: isCollection,
-        hashInput: hashCollectionInput,
-        produce: async (input) => ({
-          content: (input as CollInput).ids.map(makeStory),
-          directives: { freshUntilAge: 100 },
-        }),
-      },
-    });
-
-    await compute({ kind: "wat" } as unknown as VInput).then(
-      () => {
-        throw new Error("should have rejected");
-      },
-      (e: unknown) => {
-        expect((e as Error).message).to.match(/no branch matched the input/);
-      },
-    );
-  });
-
-  it("throws at construction when a multi-branch wrapper is missing matchesInput", () => {
-    expect(() =>
-      wrapComputingProducer(cache, {}, {
-        story: {
-          // no matchesInput
-          hashInput: hashStoryInput,
-          produce: async (input) => ({
-            content: makeStory((input as StoryInput).id),
-            directives: { freshUntilAge: 100 },
-          }),
         },
-        collection: {
-          matchesInput: isCollection,
-          hashInput: hashCollectionInput,
-          produce: async (input) => ({
-            content: (input as CollInput).ids.map(makeStory),
-            directives: { freshUntilAge: 100 },
-          }),
-        },
-      }),
-    ).to.throw(/matchesInput/);
-  });
+      ],
+    }));
+    const collectionProduce = mock.fn(async (input: ReadonlyDeep<VInput>) => ({
+      content: (input as CollInput).ids.map(makeStory),
+      directives: { freshUntilAge: 100 },
+    }));
 
-  it("throws UnclassifiableIdError, naming the branch, when hashInput mints an id of another type", async () => {
-    const compute = wrapComputingProducer(cache, {}, {
+    const compute = wrapComputingProducer<
+      VInput,
+      typeof storiesRegistry,
+      "story" | "collection"
+    >(cache, {}, {
       story: {
         matchesInput: isStory,
-        // BUG under test: mints collection-shaped ids from the story branch.
-        hashInput: (input: VInput) =>
-          `extract:collection:${(input as StoryInput).id}` as unknown as `extract:story:${string}`,
-        produce: async (input) => ({
-          content: makeStory((input as StoryInput).id),
-          directives: { freshUntilAge: 100 },
-        }),
+        hashInput: (input): `extract:story:${string}` =>
+          `extract:story:${(input as StoryInput).id}`,
+        produce: storyProduce,
       },
       collection: {
         matchesInput: isCollection,
-        hashInput: hashCollectionInput,
-        produce: async (input) => ({
-          content: (input as CollInput).ids.map(makeStory),
-          directives: { freshUntilAge: 100 },
-        }),
+        hashInput: (input): `extract:collection:${string}` =>
+          `extract:collection:${(input as CollInput).ids.join(",")}`,
+        produce: collectionProduce,
       },
     });
 
-    await compute({ kind: "story", id: "1" }).then(
-      () => {
-        throw new Error("should have rejected");
-      },
-      (e: unknown) => {
-        expect(e).to.be.instanceOf(UnclassifiableIdError);
-        expect((e as Error).message).to.include('branch "story"');
-        expect((e as Error).message).to.include('"collection"');
-      },
-    );
-  });
+    const s1 = await compute({ kind: "story", id: "1" });
+    expect(s1.content).to.deep.eq(makeStory("1"));
+    expect(storyProduce.mock.callCount()).to.eq(1);
 
-  it("throws UnclassifiableIdError, naming the branch, when hashInput mints an unclassifiable id", async () => {
-    const compute = wrapComputingProducer(cache, {}, {
-      story: {
-        matchesInput: isStory,
-        // BUG under test: mints ids outside every registry type's id space.
-        hashInput: (input: VInput) =>
-          `bogus:${(input as StoryInput).id}` as unknown as `extract:story:${string}`,
-        produce: async (input) => ({
-          content: makeStory((input as StoryInput).id),
-          directives: { freshUntilAge: 100 },
-        }),
-      },
-      collection: {
-        matchesInput: isCollection,
-        hashInput: hashCollectionInput,
-        produce: async (input) => ({
-          content: (input as CollInput).ids.map(makeStory),
-          directives: { freshUntilAge: 100 },
-        }),
-      },
-    });
+    // The supplemental was cached under its own (story) input's hash, so
+    // computing it directly never invokes the producer again...
+    const related = await compute({ kind: "story", id: "1-related" });
+    expect(related.content).to.deep.eq(makeStory("1-related"));
+    expect(storyProduce.mock.callCount()).to.eq(1);
 
-    await compute({ kind: "story", id: "1" }).then(
-      () => {
-        throw new Error("should have rejected");
-      },
-      (e: unknown) => {
-        expect(e).to.be.instanceOf(UnclassifiableIdError);
-        expect((e as Error).message).to.include('branch "story"');
-      },
-    );
+    // ...and collection dispatch still works independently.
+    const coll = await compute({ kind: "collection", ids: ["9"] });
+    expect(coll.content).to.deep.eq([makeStory("9")]);
+    expect(collectionProduce.mock.callCount()).to.eq(1);
   });
 });
-
-// Compile-time correlation checks: these branch records must fail to
-// type-check, proving the branch → (id, content) correlation.
-
-// eslint-disable-next-line @typescript-eslint/no-unused-expressions
-() => {
-  const cache = null as unknown as Cache<typeof variantResourceTypes>;
-
-  wrapComputingProducer(cache, {}, {
-    story: {
-      matchesInput: isStory,
-      hashInput: hashStoryInput,
-      // @ts-expect-error -- the story branch's `produce` must return Story content, not Story[]
-      produce: async (input) => ({
-        content: [makeStory((input as StoryInput).id)],
-        directives: { freshUntilAge: 1 },
-      }),
-    },
-    collection: {
-      matchesInput: isCollection,
-      hashInput: hashCollectionInput,
-      produce: async (input) => ({
-        content: (input as CollInput).ids.map(makeStory),
-        directives: { freshUntilAge: 1 },
-      }),
-    },
-  });
-
-  wrapComputingProducer(cache, {}, {
-    story: {
-      matchesInput: isStory,
-      // @ts-expect-error -- the story branch's hashInput must mint story-typed ids
-      hashInput: hashCollectionInput,
-      produce: async (input) => ({
-        content: makeStory((input as StoryInput).id),
-        directives: { freshUntilAge: 1 },
-      }),
-    },
-    collection: {
-      matchesInput: isCollection,
-      hashInput: hashCollectionInput,
-      produce: async (input) => ({
-        content: (input as CollInput).ids.map(makeStory),
-        directives: { freshUntilAge: 1 },
-      }),
-    },
-  });
-};
