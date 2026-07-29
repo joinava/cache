@@ -1,20 +1,29 @@
 import { expect } from "chai";
 import fc from "fast-check";
-import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { after, before, describe, it, mock } from "node:test";
 import { makeTestWithFixture } from "test-with-fixture";
 
 import { setTimeout as delay } from "timers/promises";
 import { dummyEntryData, postgresStoreFixture } from "../test/fixtures.js";
 import Cache from "./Cache.js";
-import {
-  STORE_ENTRY_RESULT_CHANNEL_NAME,
-  type StoreEntryResultMessage,
-} from "./diagnostics.js";
+import { soleResourceType, type ResourceTypes } from "./index.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 import type PostgresStore from "./stores/PostgresStore/PostgresStore.js";
 import type { CacheSpec } from "./types/00_CacheSpec.js";
 import { type JSON } from "./types/utils.js";
+
+// These suites exercise id-structure-agnostic Cache behavior, so they use a
+// sole-type registry (2.0 requires every cache to name itself and declare its
+// resource types). Classification-specific behavior is covered in
+// resourceTypeClassification.test.ts; store-entry channel payloads in
+// diagnosticsChannels.test.ts.
+const testResourceTypes = {
+  entries: soleResourceType<JSON>(),
+} satisfies ResourceTypes;
+const cacheOptions = {
+  name: "cache-test",
+  resourceTypes: testResourceTypes,
+};
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 describe("Cache", { concurrency: true }, () => {
@@ -71,7 +80,7 @@ describe("Cache", { concurrency: true }, () => {
             default:
               throw new Error(`Unknown store: ${storeName}`);
           }
-          return { cache: new Cache(store) };
+          return { cache: new Cache(store, cacheOptions) };
         });
 
         describe("totally-uncached responses", () => {
@@ -406,7 +415,7 @@ describe("Cache", { concurrency: true }, () => {
       // acquire locks in one global order and merely wait on each other. This
       // property drives concurrent same-slot batches in forward and reversed
       // input orders; without deterministic ordering it deadlocks reliably.
-      const cache = new Cache(postgresStore);
+      const cache = new Cache(postgresStore, cacheOptions);
 
       await fc.assert(
         fc.asyncProperty(
@@ -454,7 +463,7 @@ describe("Cache", { concurrency: true }, () => {
     });
 
     it("should only keep the entry with the newest birth date when storing multiple entries with same id and vary", async () => {
-      const cache = new Cache(postgresStore);
+      const cache = new Cache(postgresStore, cacheOptions);
       const id = randomURI();
       const vary = emptyVary;
 
@@ -515,7 +524,7 @@ describe("Cache", { concurrency: true }, () => {
 
   describe("events", () => {
     it("should emit an event for each stored entry", async () => {
-      const cache = new Cache(memoryStore);
+      const cache = new Cache(memoryStore, cacheOptions);
       const listener = mock.fn();
       const results = [
         {
@@ -541,139 +550,15 @@ describe("Cache", { concurrency: true }, () => {
       expect(listener.mock.calls[1]?.arguments[1]).to.eq(Infinity);
     });
 
-    describe("store-entry-result diagnostics channel", () => {
-      // Other tests in this file run concurrently and also call store(), so
-      // each test filters channel messages down to the ids it stored.
-      const collectMessagesForIds = (ids: readonly string[]) => {
-        const messages: StoreEntryResultMessage[] = [];
-        const listener = (msg: unknown) => {
-          const message = msg as StoreEntryResultMessage;
-          if (ids.includes(message.id)) {
-            messages.push(message);
-          }
-        };
-        subscribe(STORE_ENTRY_RESULT_CHANNEL_NAME, listener);
-        return {
-          messages,
-          unsubscribe: () =>
-            unsubscribe(STORE_ENTRY_RESULT_CHANNEL_NAME, listener),
-        };
-      };
-
-      it("publishes the entry's id, vary, and validators with each reported relationship", async () => {
-        const cache = new Cache(memoryStore);
-        const id = randomURI();
-        const vary = { someParam: "someValue" };
-        const collector = collectMessagesForIds([id]);
-
-        try {
-          await cache.store([
-            {
-              id,
-              vary,
-              content: ["v1"],
-              validators: { etag: "a" },
-              directives: { freshUntilAge: 60 },
-            },
-          ]);
-          await cache.store([
-            {
-              id,
-              vary,
-              content: ["v1"],
-              validators: { etag: "a" },
-              directives: { freshUntilAge: 60 },
-            },
-          ]);
-          await cache.store([
-            {
-              id,
-              vary,
-              content: ["v2"],
-              validators: { etag: "b" },
-              directives: { freshUntilAge: 60 },
-            },
-          ]);
-
-          expect(collector.messages).to.deep.equal([
-            {
-              id,
-              vary,
-              validators: { etag: "a" },
-              relationshipToExistingStoredData: "is-new",
-            },
-            {
-              id,
-              vary,
-              validators: { etag: "a" },
-              relationshipToExistingStoredData: "unchanged",
-            },
-            {
-              id,
-              vary,
-              validators: { etag: "b" },
-              relationshipToExistingStoredData: "changed",
-            },
-          ]);
-        } finally {
-          collector.unsubscribe();
-        }
-      });
-
-      it("publishes an undefined relationship for entries whose relationship was not reported", async () => {
-        const cache = new Cache(memoryStore);
-        const idWithValidators = randomURI();
-        const idWithoutValidators = randomURI();
-        const collector = collectMessagesForIds([
-          idWithValidators,
-          idWithoutValidators,
-        ]);
-
-        try {
-          // One store() call with a mixed batch: only the entry with
-          // validators gets a relationship; the other's event carries
-          // undefined (empty validators => nothing to compare on).
-          await cache.store([
-            {
-              id: idWithoutValidators,
-              vary: emptyVary,
-              content: ["no-validators"],
-              directives: { freshUntilAge: 60 },
-            },
-            {
-              id: idWithValidators,
-              vary: emptyVary,
-              content: ["with-validators"],
-              validators: { rowVersion: 1 },
-              directives: { freshUntilAge: 60 },
-            },
-          ]);
-
-          expect(collector.messages).to.deep.equal([
-            {
-              id: idWithoutValidators,
-              vary: emptyVary,
-              validators: {},
-              relationshipToExistingStoredData: undefined,
-            },
-            {
-              id: idWithValidators,
-              vary: emptyVary,
-              validators: { rowVersion: 1 },
-              relationshipToExistingStoredData: "is-new",
-            },
-          ]);
-        } finally {
-          collector.unsubscribe();
-        }
-      });
-    });
+    // (The 1.6.0 store-entry-result channel suite that lived here moved to
+    // diagnosticsChannels.test.ts: 2.0 renamed the channel to
+    // @zingage/cache:store-entry and attributed its messages.)
   });
 
   describe("AbortSignal support", () => {
     describe("Cache.get", () => {
       it("should reject immediately with an already-aborted signal", async () => {
-        const cache = new Cache(memoryStore);
+        const cache = new Cache(memoryStore, cacheOptions);
         const controller = new AbortController();
         controller.abort(new Error("pre-aborted"));
 
@@ -690,7 +575,7 @@ describe("Cache", { concurrency: true }, () => {
 
       it("should forward the signal to the store's get method", async () => {
         const signalCapture: (AbortSignal | undefined)[] = [];
-        const store = new MemoryStore();
+        const store = new MemoryStore<CacheSpec<string, JSON>>();
         const origGet = store.get.bind(store);
         store.get = (async (
           id: string,
@@ -701,7 +586,7 @@ describe("Cache", { concurrency: true }, () => {
           return origGet(id, params);
         }) as typeof store.get;
 
-        const cache = new Cache(store);
+        const cache = new Cache(store, cacheOptions);
         const controller = new AbortController();
 
         try {
@@ -718,7 +603,7 @@ describe("Cache", { concurrency: true }, () => {
       });
 
       it("should still return results normally when signal is not aborted", async () => {
-        const cache = new Cache(memoryStore);
+        const cache = new Cache(memoryStore, cacheOptions);
         const id = randomURI();
         await cache.store([
           {
@@ -740,7 +625,7 @@ describe("Cache", { concurrency: true }, () => {
 
     describe("Cache.getMany", () => {
       it("should reject immediately with an already-aborted signal", async () => {
-        const cache = new Cache(memoryStore);
+        const cache = new Cache(memoryStore, cacheOptions);
         const controller = new AbortController();
         controller.abort(new Error("pre-aborted-many"));
 
@@ -756,7 +641,7 @@ describe("Cache", { concurrency: true }, () => {
 
       it("should forward the signal to the store's getMany method", async () => {
         const signalCapture: (AbortSignal | undefined)[] = [];
-        const store = new MemoryStore();
+        const store = new MemoryStore<CacheSpec<string, JSON>>();
         const origGetMany = store.getMany.bind(store);
         store.getMany = (async (
           requests: any,
@@ -766,7 +651,7 @@ describe("Cache", { concurrency: true }, () => {
           return origGetMany(requests);
         }) as typeof store.getMany;
 
-        const cache = new Cache(store);
+        const cache = new Cache(store, cacheOptions);
         const controller = new AbortController();
 
         try {
@@ -783,7 +668,7 @@ describe("Cache", { concurrency: true }, () => {
       });
 
       it("should still return results normally when signal is not aborted", async () => {
-        const cache = new Cache(memoryStore);
+        const cache = new Cache(memoryStore, cacheOptions);
         const ids = [randomURI(), randomURI()];
         await cache.store(
           ids.map((id, i) => ({

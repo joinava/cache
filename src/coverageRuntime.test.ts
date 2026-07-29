@@ -272,10 +272,16 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         content: `computed-${input.key}`,
         directives: freshFor100,
       }));
-      const compute = wrapComputingProducer(cache, {}, {
+      // Explicit type args: `Input` inference degrades to `unknown` when a
+      // branch's functions are pre-typed references (like mock.fn results)
+      // rather than inline closures -- see the final report.
+      const compute = wrapComputingProducer<
+        SoleInput,
+        typeof registry,
+        "site_day"
+      >(cache, {}, {
         site_day: {
-          hashInput: (input: SoleInput): `site:${string}` =>
-            `site:${input.key}`,
+          hashInput: (input): `site:${string}` => `site:${input.key}`,
           produce,
         },
       });
@@ -321,19 +327,21 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         content: `biz-computed-${input.key}`,
         directives: freshFor100,
       }));
-      const compute = wrapComputingProducer(cache, {}, {
+      const compute = wrapComputingProducer<
+        BranchedInput,
+        typeof registry,
+        "site_day" | "business_slice"
+      >(cache, {}, {
         site_day: {
           matchesInput: (input: unknown): input is BranchedInput =>
             isBranchedInput(input) && input.kind === "site",
-          hashInput: (input: BranchedInput): `site:${string}` =>
-            `site:${input.key}`,
+          hashInput: (input): `site:${string}` => `site:${input.key}`,
           produce: siteProduce,
         },
         business_slice: {
           matchesInput: (input: unknown): input is BranchedInput =>
             isBranchedInput(input) && input.kind === "biz",
-          hashInput: (input: BranchedInput): `biz:${string}` =>
-            `biz:${input.key}`,
+          hashInput: (input): `biz:${string}` => `biz:${input.key}`,
           produce: bizProduce,
         },
       });
@@ -461,16 +469,21 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         content: `computed-${input.key}`,
         directives: freshFor100,
       }));
-      // `matchesInput` is type-forbidden on single-coverage wrappers, so it's
-      // smuggled in at the value level (a spread typed as `object` erases the
-      // property from the compile-time view without a lying cast) to prove
-      // the runtime ignores it rather than consulting it.
+      // `matchesInput` is documented as forbidden-and-ignored on
+      // single-coverage wrappers; it's smuggled in at the value level (a
+      // spread typed as `object` erases the property from the compile-time
+      // view without a lying cast) to prove the runtime ignores it rather
+      // than consulting it.
       const branch = {
         hashInput: (input: SoleInput): `site:${string}` => `site:${input.key}`,
         produce,
         ...({ matchesInput: () => false } as object),
       };
-      const compute = wrapComputingProducer(cache, {}, { site_day: branch });
+      const compute = wrapComputingProducer<
+        SoleInput,
+        typeof registry,
+        "site_day"
+      >(cache, {}, { site_day: branch });
       try {
         const res = await compute({ key: "a" });
         expect(res.content).to.equal("computed-a");
