@@ -3,12 +3,14 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { setTimeout as delay } from "timers/promises";
 import type { ReadonlyDeep } from "type-fest";
 
+import { expectRejection } from "../../test/v2AcceptanceHelpers.js";
 import Cache from "../Cache.js";
 import {
   idStartsWith,
   MemoryStore,
   resourceType,
   soleResourceType,
+  UnclassifiableIdError,
   type ResourceTypes,
   type SpecOf,
 } from "../index.js";
@@ -163,6 +165,34 @@ describe("wrapComputingProducer", () => {
     expect(side.content).to.eq("SIDE");
     expect(producer.mock.callCount()).to.eq(1);
   });
+
+  it("call-time directives: maxAge 0 forces recomputation of a memoized input (restored 1.6.0 parity)", async () => {
+    const producer = mock.fn(async (input: Input) =>
+      result(input.text.toUpperCase()),
+    );
+    const compute = wrapComputingProducer<Input, typeof testRegistry, "computed">(
+      cache,
+      {},
+      { computed: { hashInput, produce: producer } },
+    );
+
+    expect((await compute({ text: "hello" })).content).to.eq("HELLO");
+    expect((await compute({ text: "hello" })).content).to.eq("HELLO");
+    expect(producer.mock.callCount()).to.eq(1);
+
+    // Bypass directives skip the cache read and force producer contact,
+    // exactly as on a plain wrapped producer.
+    const forced = await compute(
+      { text: "hello" },
+      { directives: { maxAge: 0 } },
+    );
+    expect(forced.content).to.eq("HELLO");
+    expect(producer.mock.callCount()).to.eq(2);
+
+    // Plain calls still serve from cache (the memoized entry stands).
+    expect((await compute({ text: "hello" })).content).to.eq("HELLO");
+    expect(producer.mock.callCount()).to.eq(2);
+  });
 });
 
 describe("wrapBulkComputingProducer", () => {
@@ -234,17 +264,38 @@ describe("wrapBulkComputingProducer", () => {
     expect(results.map(contentOf)).to.deep.eq(["A", "B"]);
     expect(producer.mock.callCount()).to.eq(1);
   });
+
+  it("call-time directives apply to every element: maxAge 0 recomputes a memoized batch (restored 1.6.0 parity)", async () => {
+    const producer = mock.fn(async (inputs: readonly Input[]) =>
+      inputs.map((input) => result(input.text.toUpperCase())),
+    );
+    const compute = wrapBulkComputingProducer<
+      Input,
+      typeof testRegistry,
+      "computed"
+    >(cache, {}, { computed: { hashInput, produce: producer } });
+
+    expect((await compute([{ text: "a" }, { text: "b" }])).map(contentOf))
+      .to.deep.eq(["A", "B"]);
+    expect((await compute([{ text: "a" }, { text: "b" }])).map(contentOf))
+      .to.deep.eq(["A", "B"]);
+    expect(producer.mock.callCount()).to.eq(1);
+
+    const forced = await compute([{ text: "a" }, { text: "b" }], {
+      directives: { maxAge: 0 },
+    });
+    expect(forced.map(contentOf)).to.deep.eq(["A", "B"]);
+    expect(producer.mock.callCount()).to.eq(2);
+  });
 });
 
 // --- heterogeneous branches: correlated (input kind, id space, content) ---
 //
-// (Successor of the 1.6.0 computingProducerByInputType tests. NOTE, logged in
-// the acceptance report: 1.6.0's builder — with its single wrapper-wide
-// hashInput — could cache a supplemental of a DIFFERENT variant than the
-// primary; §6.4's ComputingProducerResult types a branch's supplementals
-// against the branch's OWN spec, so cross-type computing supplementals are no
-// longer expressible and that 1.6.0 test has no 2.0 equivalent. Same-branch
-// supplementals are covered above and below.)
+// (Successor of the 1.6.0 computingProducerByInputType tests, including its
+// cross-variant supplemental coverage: supplementals may be input-keyed for
+// ANY covered branch — routed by `matchesInput`, hashed by the routed
+// branch's `hashInput` — or id-keyed for any registry type, restored to full
+// 1.6.0 parity on 2026-07-29.)
 
 type Story = { id: string; title: string };
 type StoryInput = { kind: "story"; id: string };
@@ -364,5 +415,220 @@ describe("computing wrappers with heterogeneous branches", () => {
     const coll = await compute({ kind: "collection", ids: ["9"] });
     expect(coll.content).to.deep.eq([makeStory("9")]);
     expect(collectionProduce.mock.callCount()).to.eq(1);
+  });
+
+  it("input-keyed supplementals may target OTHER covered branches: routed by matchesInput, hashed by the routed branch's hashInput (restored 1.6.0 parity)", async () => {
+    const collectionProduce = mock.fn(async (input: ReadonlyDeep<VInput>) => ({
+      content: (input as CollInput).ids.map(makeStory),
+      directives: { freshUntilAge: 100 },
+    }));
+    const compute = wrapComputingProducer<
+      VInput,
+      typeof storiesRegistry,
+      "story" | "collection"
+    >(cache, {}, {
+      story: {
+        matchesInput: isStory,
+        hashInput: (input): `extract:story:${string}` =>
+          `extract:story:${(input as StoryInput).id}`,
+        produce: async (input) => ({
+          content: makeStory((input as StoryInput).id),
+          directives: { freshUntilAge: 100 },
+          supplementalResources: [
+            // A byproduct belonging to the OTHER branch: keyed by a
+            // collection input, so the wrapper must route it via
+            // matchesInput to the collection branch and hash it with ITS
+            // hashInput.
+            {
+              input: {
+                kind: "collection",
+                ids: [(input as StoryInput).id],
+              } satisfies CollInput as VInput,
+              content: [makeStory((input as StoryInput).id)],
+              directives: { freshUntilAge: 100 },
+            },
+          ],
+        }),
+      },
+      collection: {
+        matchesInput: isCollection,
+        hashInput: (input): `extract:collection:${string}` =>
+          `extract:collection:${(input as CollInput).ids.join(",")}`,
+        produce: collectionProduce,
+      },
+    });
+
+    const s7 = await compute({ kind: "story", id: "7" });
+    expect(s7.content).to.deep.eq(makeStory("7"));
+
+    // The cross-branch supplemental is a hit for the collection branch: its
+    // producer is never invoked.
+    const coll = await compute({ kind: "collection", ids: ["7"] });
+    expect(coll.content).to.deep.eq([makeStory("7")]);
+    expect(collectionProduce.mock.callCount()).to.eq(0);
+  });
+
+  it("id-keyed supplementals may target ANY registry type -- even one no wrapper covers (restored plain-producer parity)", async () => {
+    const snapshotRegistry = {
+      story: resourceType<Story>()({ matches: idStartsWith("extract:story:") }),
+      collection: resourceType<Story[]>()({
+        matches: idStartsWith("extract:collection:"),
+      }),
+      // Never covered by any wrapper: written only as a supplemental,
+      // read via serve-if-present Cache.get.
+      site_snapshot: resourceType<string>()({
+        matches: idStartsWith("snapshot:"),
+      }),
+    } satisfies ResourceTypes;
+    const snapshotCache = new Cache(
+      new MemoryStore<SpecOf<typeof snapshotRegistry>>(),
+      { name: "computing-id-keyed-suppl-test", resourceTypes: snapshotRegistry },
+    );
+    try {
+      const compute = wrapComputingProducer<
+        VInput,
+        typeof snapshotRegistry,
+        "story" | "collection"
+      >(snapshotCache, {}, {
+        story: {
+          matchesInput: isStory,
+          hashInput: (input): `extract:story:${string}` =>
+            `extract:story:${(input as StoryInput).id}`,
+          produce: async (input) => ({
+            content: makeStory((input as StoryInput).id),
+            directives: { freshUntilAge: 100 },
+            supplementalResources: [
+              // Id-keyed: a plain ProducerResultResource, stored under its
+              // own natural id and classified at store time.
+              {
+                id: `snapshot:${(input as StoryInput).id}`,
+                content: `raw-html-${(input as StoryInput).id}`,
+                directives: { freshUntilAge: 100 },
+              },
+            ],
+          }),
+        },
+        collection: {
+          matchesInput: isCollection,
+          hashInput: (input): `extract:collection:${string}` =>
+            `extract:collection:${(input as CollInput).ids.join(",")}`,
+          produce: async (input) => ({
+            content: (input as CollInput).ids.map(makeStory),
+            directives: { freshUntilAge: 100 },
+          }),
+        },
+      });
+
+      const s3 = await compute({ kind: "story", id: "3" });
+      expect(s3.content).to.deep.eq(makeStory("3"));
+
+      // The supplemental store is fire-and-forget behind the wrapper, so
+      // poll via direct Cache.get (which never triggers producers).
+      const readSnapshot = async () =>
+        (
+          await snapshotCache.get({
+            id: "snapshot:3",
+            params: {},
+            directives: {},
+          })
+        ).usable;
+      let entry = await readSnapshot();
+      let attempts = 0;
+      while (entry === undefined && attempts < 200) {
+        await delay(5);
+        attempts += 1;
+        entry = await readSnapshot();
+      }
+      expect(entry?.content).to.eq("raw-html-3");
+    } finally {
+      await snapshotCache.close();
+    }
+  });
+
+  it("a supplemental input matching no covered branch rejects the invocation loudly", async () => {
+    const compute = wrapComputingProducer<
+      VInput,
+      typeof storiesRegistry,
+      "story" | "collection"
+    >(cache, {}, {
+      story: {
+        matchesInput: isStory,
+        hashInput: (input): `extract:story:${string}` =>
+          `extract:story:${(input as StoryInput).id}`,
+        produce: async (input) => ({
+          content: makeStory((input as StoryInput).id),
+          directives: { freshUntilAge: 100 },
+          supplementalResources: [
+            {
+              // Matches neither branch's matchesInput.
+              input: { kind: "neither" } as unknown as VInput,
+              content: makeStory("x"),
+              directives: { freshUntilAge: 100 },
+            },
+          ],
+        }),
+      },
+      collection: {
+        matchesInput: isCollection,
+        hashInput: (input): `extract:collection:${string}` =>
+          `extract:collection:${(input as CollInput).ids.join(",")}`,
+        produce: async (input) => ({
+          content: (input as CollInput).ids.map(makeStory),
+          directives: { freshUntilAge: 100 },
+        }),
+      },
+    });
+
+    const thrown = await expectRejection(() =>
+      compute({ kind: "story", id: "9" }),
+    );
+    expect(thrown).to.be.instanceOf(Error);
+    expect((thrown as Error).message).to.match(/no branch matched/);
+  });
+
+  it("a supplemental whose routed branch mints a misclassified id rejects loudly, naming that branch", async () => {
+    const compute = wrapComputingProducer<
+      VInput,
+      typeof storiesRegistry,
+      "story" | "collection"
+    >(cache, {}, {
+      story: {
+        matchesInput: isStory,
+        hashInput: (input): `extract:story:${string}` =>
+          `extract:story:${(input as StoryInput).id}`,
+        produce: async (input) => ({
+          content: makeStory((input as StoryInput).id),
+          directives: { freshUntilAge: 100 },
+          supplementalResources: [
+            // Routed to the collection branch, whose buggy hashInput below
+            // mints a story-prefixed id.
+            {
+              input: { kind: "collection", ids: ["9"] } satisfies CollInput as VInput,
+              content: [makeStory("9")],
+              directives: { freshUntilAge: 100 },
+            },
+          ],
+        }),
+      },
+      collection: {
+        matchesInput: isCollection,
+        // BUG under test: mints an id in the story branch's id space. The
+        // type system rejects this honestly, so the buggy value is cast
+        // through -- the runtime mint-check is the net for exactly these
+        // type-level bypasses.
+        hashInput: (input): `extract:collection:${string}` =>
+          `extract:story:${(input as CollInput).ids.join(",")}` as unknown as `extract:collection:${string}`,
+        produce: async (input) => ({
+          content: (input as CollInput).ids.map(makeStory),
+          directives: { freshUntilAge: 100 },
+        }),
+      },
+    });
+
+    const thrown = await expectRejection(() =>
+      compute({ kind: "story", id: "9" }),
+    );
+    expect(thrown).to.be.instanceOf(UnclassifiableIdError);
+    expect((thrown as Error).message).to.match(/branch "collection"/);
   });
 });

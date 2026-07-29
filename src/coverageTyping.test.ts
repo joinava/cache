@@ -491,6 +491,57 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         await cache.close();
       }
     });
+
+    it("computing supplementals (restored 1.6.0 parity): cross-branch input-keyed and id-keyed cross-type accepted; id-keyed mismatches rejected", async () => {
+      const cache = new Cache(memoryStoreFor(registry), {
+        name: uniqueCacheName("typing-computing-supplementals"),
+        resourceTypes: registry,
+      });
+      try {
+        if (false as boolean) {
+          // A covered branch's produce may return input-keyed supplementals
+          // for ANY covered branch and id-keyed supplementals for ANY
+          // registry type (extra_blob is uncovered here): compiles.
+          void wrapComputingProducer<
+            BranchedInput,
+            typeof registry,
+            "site_day" | "business_slice"
+          >(cache, {}, {
+            site_day: {
+              matchesInput: isInput,
+              hashInput: siteHash,
+              produce: async (_input: BranchedInput) => ({
+                content: { visits: [] as number[] },
+                directives: freshFor1,
+                supplementalResources: [
+                  {
+                    input: { kind: "biz", key: "b" } as BranchedInput,
+                    content: { visits: [] as number[] },
+                    directives: freshFor1,
+                  },
+                  {
+                    id: "extra:1" as ExtraId,
+                    content: { blob: "x" },
+                    directives: freshFor1,
+                  },
+                ],
+              }),
+            },
+            business_slice: {
+              matchesInput: isInput,
+              hashInput: bizHash,
+              produce: bizProduceFn,
+            },
+          });
+
+          // prettier-ignore
+          // @ts-expect-error an id-keyed supplemental's (id, content) must correlate: an extra_blob id cannot carry site_day content
+          void wrapComputingProducer<BranchedInput, typeof registry, "site_day">(cache, {}, { site_day: { hashInput: siteHash, produce: async (_input: BranchedInput) => ({ content: { visits: [] as number[] }, directives: freshFor1, supplementalResources: [{ id: "extra:1" as ExtraId, content: { visits: [] as number[] }, directives: freshFor1 }] }) } });
+        }
+      } finally {
+        await cache.close();
+      }
+    });
   });
 
   describe("TypedChannel export (§6.5)", () => {
