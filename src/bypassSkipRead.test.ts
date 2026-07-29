@@ -14,6 +14,7 @@ import Cache from "./Cache.js";
 import {
   idStartsWith,
   resourceType,
+  wrapBulkProducer,
   type ResourceTypes,
 } from "./index.js";
 import wrapProducer from "./utils/wrapProducer.js";
@@ -78,7 +79,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
         cache: name,
         trigger: "bypass",
         requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-        collapsedCallerCount: 0,
+        collapsedCallerCount: 1,
         outcome: "success",
       });
 
@@ -216,7 +217,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       const triggers = capture.produce.map((m) => m.trigger).sort();
       expect(triggers).to.deep.equal(["bypass", "miss"]);
       capture.produce.forEach((m) => {
-        expect(m.collapsedCallerCount).to.equal(0);
+        expect(m.collapsedCallerCount).to.equal(1);
       });
 
       // Only the plain request consulted the cache.
@@ -257,6 +258,107 @@ describe("bypass requests skip the cache read (§6.3)", () => {
     }
   });
 
+  it("wrapBulkProducer: bypass elements skip the read (no read messages) while plain elements in the same call read and cache normally", async () => {
+    const { name, getSpy, getManySpy, cache } = makeHarness("bypass-bulk");
+    const capture = captureChannels(name);
+    const bulkProducer = mock.fn(
+      async (reqs: readonly { readonly id: string }[]) =>
+        reqs.map((req) => ({
+          content: `content-${req.id}`,
+          directives: { freshUntilAge: 100 },
+        })),
+    );
+    const getBulk = wrapBulkProducer(
+      cache,
+      { collapseOverlappingRequestsTime: 0 },
+      { site_day: bulkProducer },
+    );
+    const requests = [
+      { id: "site:plain-a" },
+      { id: "site:bypass-a", directives: { maxAge: 0 } },
+      { id: "site:plain-b" },
+    ] as const;
+    try {
+      // First call: the bypass element must reach the producer WITHOUT any
+      // cache read; the plain elements read (miss) and then produce. The
+      // collapse key includes directives, so bypass and plain elements never
+      // share a batch -- and (contract adjudication) the bypass batch
+      // dispatches BEFORE the plain elements' cache read, so it is the first
+      // producer call.
+      const results = await getBulk(requests);
+      const contents = results.map((r) => {
+        if (r instanceof Error) throw r;
+        return r.content;
+      });
+      expect(contents).to.deep.equal([
+        "content-site:plain-a",
+        "content-site:bypass-a",
+        "content-site:plain-b",
+      ]);
+
+      expect(bulkProducer.mock.callCount()).to.equal(2);
+      expect(
+        bulkProducer.mock.calls[0]?.arguments[0]?.map((r) => r.id),
+      ).to.deep.equal(["site:bypass-a"]);
+      expect(
+        bulkProducer.mock.calls[1]?.arguments[0]?.map((r) => r.id).sort(),
+      ).to.deep.equal(["site:plain-a", "site:plain-b"]);
+
+      // Only the plain elements appear on the read channel.
+      expect(
+        capture.read.map((m) => m.resourceId).sort(),
+      ).to.deep.equal(["site:plain-a", "site:plain-b"]);
+
+      // Fetch per element: bypass flagged, plain not.
+      expect(capture.fetch).to.have.lengthOf(3);
+      capture.fetch.forEach((m) => {
+        expect(m.disposition).to.equal("served-from-producer");
+        expect(m.directivesImpliedBypass).to.equal(
+          m.resourceId === "site:bypass-a",
+        );
+      });
+
+      // Two invocations, one per directive class.
+      expect(capture.produce).to.have.lengthOf(2);
+      expect(capture.produce.map((m) => m.trigger).sort()).to.deep.equal([
+        "bypass",
+        "miss",
+      ]);
+
+      // Second call: the plain elements now hit the cache; the bypass
+      // element STILL reaches the producer (structurally guaranteed contact).
+      await waitUntil(
+        () => capture.storeEntry.length === 3,
+        "first call's results stored",
+      );
+      bulkProducer.mock.resetCalls();
+      const second = await getBulk(requests);
+      const secondContents = second.map((r) => {
+        if (r instanceof Error) throw r;
+        return r.content;
+      });
+      expect(secondContents).to.deep.equal([
+        "content-site:plain-a",
+        "content-site:bypass-a",
+        "content-site:plain-b",
+      ]);
+      expect(bulkProducer.mock.callCount()).to.equal(1);
+      expect(
+        bulkProducer.mock.calls[0]?.arguments[0]?.map((r) => r.id),
+      ).to.deep.equal(["site:bypass-a"]);
+
+      // And a PURE-bypass bulk call performs no store read of any shape.
+      const readsBefore = getSpy.mock.callCount() + getManySpy.mock.callCount();
+      await getBulk([{ id: "site:bypass-a", directives: { maxAge: 0 } }]);
+      expect(
+        getSpy.mock.callCount() + getManySpy.mock.callCount(),
+      ).to.equal(readsBefore);
+    } finally {
+      capture.stop();
+      await cache.close();
+    }
+  });
+
   it("two identical concurrent bypass requests DO collapse onto one invocation", async () => {
     const { name, getSpy, cache } = makeHarness("bypass-peer-collapse");
     const capture = captureChannels(name);
@@ -282,7 +384,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
         cache: name,
         trigger: "bypass",
         requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-        collapsedCallerCount: 1,
+        collapsedCallerCount: 2,
         outcome: "success",
         minDurationMs: 50,
       });

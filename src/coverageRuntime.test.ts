@@ -119,6 +119,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         site_day: siteProducer,
         business_slice: bizProducer,
       });
+      const capture = captureChannels(name);
       try {
         // Reachable only via a cast / loosely-typed id -- the compiler bans
         // typed covered-set violations.
@@ -145,11 +146,17 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         expect(getManySpy.mock.callCount()).to.equal(0);
         expect(siteProducer.mock.callCount()).to.equal(0);
         expect(bizProducer.mock.callCount()).to.equal(0);
+        // ...and, as a pre-dispatch validation failure, it emits NO channel
+        // messages (contract adjudication: no disposition ever existed).
+        expect(capture.read).to.deep.equal([]);
+        expect(capture.fetch).to.deep.equal([]);
+        expect(capture.produce).to.deep.equal([]);
 
         // Positive control for the spy: a covered request does read.
         await getCovered({ id: "site:1" });
         expect(getSpy.mock.callCount()).to.equal(1);
       } finally {
+        capture.stop();
         await cache.close();
       }
     });
@@ -358,6 +365,47 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         await compute({ kind: "biz", key: "2" });
         expect(siteProduce.mock.callCount()).to.equal(1);
         expect(bizProduce.mock.callCount()).to.equal(1);
+      } finally {
+        await cache.close();
+      }
+    });
+
+    it("a multi-branch wrapper missing matchesInput on a branch throws at construction", async () => {
+      // §6.4: matchesInput is "required when the wrapper covers more than one
+      // type". The doc specs the enforcement as compile-time overloads
+      // (§11.5); the implementation enforces it at construction time instead
+      // (see the acceptance report) -- this pins that a multi-branch wrapper
+      // with a matcher-less branch can never be constructed silently.
+      const cache = new Cache(memoryStoreFor(registry), {
+        name: uniqueCacheName("computing-missing-matcher"),
+        resourceTypes: registry,
+      });
+      try {
+        expect(() =>
+          wrapComputingProducer<
+            BranchedInput,
+            typeof registry,
+            "site_day" | "business_slice"
+          >(cache, {}, {
+            site_day: {
+              // no matchesInput
+              hashInput: (input): `site:${string}` => `site:${input.key}`,
+              produce: async (input) => ({
+                content: `site-computed-${input.key}`,
+                directives: freshFor100,
+              }),
+            },
+            business_slice: {
+              matchesInput: (input: unknown): input is BranchedInput =>
+                isBranchedInput(input) && input.kind === "biz",
+              hashInput: (input): `biz:${string}` => `biz:${input.key}`,
+              produce: async (input) => ({
+                content: `biz-computed-${input.key}`,
+                directives: freshFor100,
+              }),
+            },
+          }),
+        ).to.throw();
       } finally {
         await cache.close();
       }

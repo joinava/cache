@@ -262,6 +262,71 @@ describe("resource-type classification (§6.1, §6.2)", () => {
     });
   });
 
+  describe("classification failures through the wrappers", () => {
+    it("an unclassifiable request id rejects the wrapped call pre-dispatch: no read, no fetch, no produce", async () => {
+      // Contract adjudication: pre-dispatch validation failures
+      // (UnclassifiableIdError / AmbiguousResourceTypeError /
+      // NoProducerForResourceTypeError) throw before any disposition exists,
+      // so -- like the failed-read "throw" path -- they emit NO fetch message.
+      const name = uniqueCacheName("wrapper-unclassifiable");
+      const store = memoryStoreFor(twoTypeRegistry);
+      const getSpy = mock.method(store, "get");
+      const cache = new Cache(store, {
+        name,
+        resourceTypes: twoTypeRegistry,
+      });
+      const capture = captureChannels(name);
+      const producer = mock.fn(async (req: { readonly id: string }) => ({
+        content: `content-${req.id}`,
+        directives: freshFor100,
+      }));
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      try {
+        const thrown = await expectRejection(() =>
+          getSite({ id: "unknown:1" as string as `site:${string}` }),
+        );
+        assertUnclassifiable(thrown, { cacheName: name, id: "unknown:1" });
+        expect(producer.mock.callCount()).to.equal(0);
+        expect(getSpy.mock.callCount()).to.equal(0);
+        expect(capture.read).to.deep.equal([]);
+        expect(capture.fetch).to.deep.equal([]);
+        expect(capture.produce).to.deep.equal([]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+  });
+
+  describe("classification runs before the closed check (§6.2 ordering)", () => {
+    it("a closed cache still rejects unclassifiable ids with UnclassifiableIdError, not the closed error", async () => {
+      const name = uniqueCacheName("closed-ordering");
+      const cache = new Cache(memoryStoreFor(twoTypeRegistry), {
+        name,
+        resourceTypes: twoTypeRegistry,
+        onGetAfterClose: "act-empty",
+      });
+      await cache.close();
+      const thrown = await expectRejection(() =>
+        cache.get({
+          id: "unknown:1" as string as `site:${string}`,
+          params: {},
+          directives: {},
+        }),
+      );
+      assertUnclassifiable(thrown, { cacheName: name, id: "unknown:1" });
+
+      // A classifiable id on the same closed cache acts empty, per its option.
+      const res = await cache.get({
+        id: "site:fine",
+        params: {},
+        directives: {},
+      });
+      expect(res.usable).to.equal(undefined);
+      expect(res.validatable).to.deep.equal([]);
+    });
+  });
+
   describe("store() classification (primary and supplemental entry ids)", () => {
     it("rejects a batch containing an unclassifiable id up front: nothing persists, no store-entry messages", async () => {
       const name = uniqueCacheName("store-unclassifiable");

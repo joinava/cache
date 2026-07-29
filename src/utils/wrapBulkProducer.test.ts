@@ -21,7 +21,6 @@ import {
   type SpecOf,
 } from "../index.js";
 import type { NormalizedProducerResult } from "../types/06_Normalization.js";
-import { completeRequest } from "./requestPairedProducerUtils.js";
 import { type mapTuple } from "./utils.js";
 import { wrapBulkProducer } from "./wrapBulkProducer.js";
 

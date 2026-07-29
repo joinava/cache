@@ -220,8 +220,8 @@ export function expectProducerPathFetch(
 
 /**
  * Asserts a fetch message on the cache-read-path branch of the §6.5.2 union.
- * There `directivesImpliedBypass` is typed `?: false`, so both "absent" and
- * "present as false" are legal encodings -- but `true` never is.
+ * There `directivesImpliedBypass` is typed `?: false`, and (per contract
+ * adjudication) cache-read dispositions OMIT the key entirely.
  */
 export function expectCachePathFetch(
   msg: CacheFetchMessage | undefined,
@@ -239,9 +239,8 @@ export function expectCachePathFetch(
   if (msg === undefined) {
     throw new Error("expected a cache-path fetch message, got none");
   }
-  const { directivesImpliedBypass, ...rest } = msg;
-  expect(directivesImpliedBypass ?? false).to.equal(false);
-  expect(rest).to.deep.equal(expected);
+  expect(msg).to.not.have.property("directivesImpliedBypass");
+  expect(msg).to.deep.equal(expected);
 }
 
 /**
@@ -249,6 +248,15 @@ export function expectCachePathFetch(
  * it's bound-checked (a finite number, >= `minDurationMs`); everything else
  * is deep-equaled. `requests` are compared order-insensitively (batch order
  * within one bulk invocation isn't documented).
+ *
+ * On `collapsedCallerCount`: §6.5.3 reads "logical callers that rode this
+ * invocation via request collapsing", which admits two readings -- riders
+ * only (a lone caller's invocation reports 0), or every logical request
+ * attached to the invocation, its trigger included (a lone caller reports 1;
+ * one rider makes 2; a background revalidation reports 1). The §6.5 prose
+ * "N callers ride 1 invocation" supports the second, which is also what the
+ * implementation does; these suites assert that reading. Flagged in the
+ * acceptance report as needing a one-line doc clarification.
  */
 export function expectProduceMessage(
   msg: CacheProduceMessage | undefined,
