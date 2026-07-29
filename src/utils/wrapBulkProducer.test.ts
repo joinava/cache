@@ -1004,7 +1004,13 @@ describe("wrapBulkProducer", () => {
 
     if (actual.date === expected.date) {
       return assert.deepEqual(actual, expected);
-    } else if (Math.abs(actual.date.getTime() - expected.date.getTime()) < 10) {
+      // The two results come from two independent producer invocations (the
+      // single and bulk wrappers don't share a collapse registry), so their
+      // `date` stamps legitimately differ by scheduler latency — observed
+      // >10ms under full-suite load. The bound only needs to reject entries
+      // from a wrong source (the arbitraries' seeded entries carry far-past
+      // dates), so seconds-level is plenty.
+    } else if (Math.abs(actual.date.getTime() - expected.date.getTime()) < 5000) {
       return assert.deepEqual(omit(actual, ["date"]), omit(expected, ["date"]));
     }
 
