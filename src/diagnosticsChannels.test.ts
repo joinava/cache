@@ -1,0 +1,1674 @@
+import { expect } from "chai";
+import { describe, it, mock } from "node:test";
+import { setTimeout as delay } from "timers/promises";
+
+import {
+  captureChannels,
+  expectCachePathFetch,
+  expectProducerPathFetch,
+  expectProduceMessage,
+  expectRejection,
+  memoryStoreFor,
+  uniqueCacheName,
+  V2_CHANNEL_NAMES,
+  waitUntil,
+} from "../test/v2AcceptanceHelpers.js";
+import Cache from "./Cache.js";
+import {
+  CACHE_FETCH_CHANNEL_NAME,
+  CACHE_PRODUCE_CHANNEL_NAME,
+  CACHE_READ_CHANNEL_NAME,
+  CACHE_STORE_ENTRY_CHANNEL_NAME,
+  cacheFetchChannel,
+  cacheProduceChannel,
+  cacheReadChannel,
+  cacheStoreEntryChannel,
+  idStartsWith,
+  resourceType,
+  soleResourceType,
+  wrapBulkProducer,
+  type CacheFetchMessage,
+  type CacheProduceMessage,
+  type CacheReadMessage,
+  type CacheStoreEntryMessage,
+  type ResourceTypes,
+} from "./index.js";
+import wrapProducer from "./utils/wrapProducer.js";
+
+/**
+ * Conformance tests for the four §6.5 diagnostics channels: exact channel
+ * names, full message payloads (field-by-field), the documented emission
+ * points (read per lookup, fetch per logical call at SETTLEMENT, produce per
+ * actual producer invocation, store-entry per stored entry), and correct
+ * `{ cache, resourceType }` attribution everywhere -- including supplemental
+ * writes attributed to their OWN resource type. Ends with §7's golden
+ * end-to-end simulation.
+ */
+
+const registry = {
+  site_day: resourceType<string>()({ matches: idStartsWith("site:") }),
+  business_slice: resourceType<string>()({ matches: idStartsWith("biz:") }),
+} satisfies ResourceTypes;
+
+const soleVisitsRegistry = {
+  visits: soleResourceType<string>(),
+} satisfies ResourceTypes;
+
+const freshFor100 = { freshUntilAge: 100 };
+const secondsAgo = (s: number) => new Date(Date.now() - s * 1000);
+
+/** Directives whose entry is, ~1s after `date`, stale but within a long SWR window. */
+const swrWindowDirectives = {
+  freshUntilAge: 0.5,
+  maxStale: { withoutRevalidation: 0, whileRevalidate: 3600, ifError: 3600 },
+};
+
+/** Directives whose entry is, ~1s after `date`, stale, outside SWR, within if-error. */
+const ifErrorWindowDirectives = {
+  freshUntilAge: 0.5,
+  maxStale: { withoutRevalidation: 0, whileRevalidate: 0, ifError: 3600 },
+};
+
+const makeHarness = (label: string) => {
+  const name = uniqueCacheName(label);
+  const store = memoryStoreFor(registry);
+  const cache = new Cache(store, { name, resourceTypes: registry });
+  return { name, store, cache };
+};
+
+const sortByResourceId = <T extends { resourceId: string }>(
+  messages: readonly T[],
+): T[] =>
+  [...messages].sort((a, b) =>
+    a.resourceId < b.resourceId ? -1 : a.resourceId > b.resourceId ? 1 : 0,
+  );
+
+describe("diagnostics channels (§6.5)", () => {
+  describe("channel names and typed-channel exports", () => {
+    it("exports exactly the documented channel-name constants", () => {
+      expect(CACHE_READ_CHANNEL_NAME).to.equal("@zingage/cache:read");
+      expect(CACHE_FETCH_CHANNEL_NAME).to.equal("@zingage/cache:fetch");
+      expect(CACHE_PRODUCE_CHANNEL_NAME).to.equal("@zingage/cache:produce");
+      expect(CACHE_STORE_ENTRY_CHANNEL_NAME).to.equal(
+        "@zingage/cache:store-entry",
+      );
+    });
+
+    it("the typed channel objects publish on those exact names and support subscribe/unsubscribe", async () => {
+      const { name, cache } = makeHarness("typed-channels");
+
+      expect(cacheReadChannel.name).to.equal(V2_CHANNEL_NAMES.read);
+      expect(cacheFetchChannel.name).to.equal(V2_CHANNEL_NAMES.fetch);
+      expect(cacheProduceChannel.name).to.equal(V2_CHANNEL_NAMES.produce);
+      expect(cacheStoreEntryChannel.name).to.equal(V2_CHANNEL_NAMES.storeEntry);
+
+      const reads: CacheReadMessage[] = [];
+      const fetches: CacheFetchMessage[] = [];
+      const produces: CacheProduceMessage[] = [];
+      const storeEntries: CacheStoreEntryMessage[] = [];
+      const onRead = (m: CacheReadMessage) => {
+        if (m.cache === name) reads.push(m);
+      };
+      const onFetch = (m: CacheFetchMessage) => {
+        if (m.cache === name) fetches.push(m);
+      };
+      const onProduce = (m: CacheProduceMessage) => {
+        if (m.cache === name) produces.push(m);
+      };
+      const onStoreEntry = (m: CacheStoreEntryMessage) => {
+        if (m.cache === name) storeEntries.push(m);
+      };
+      cacheReadChannel.subscribe(onRead);
+      cacheFetchChannel.subscribe(onFetch);
+      cacheProduceChannel.subscribe(onProduce);
+      cacheStoreEntryChannel.subscribe(onStoreEntry);
+      try {
+        const producer = mock.fn(async (req: { readonly id: string }) => ({
+          content: `content-${req.id}`,
+          directives: freshFor100,
+        }));
+        const getSite = wrapProducer(cache, {}, { site_day: producer });
+        await getSite({ id: "site:typed" });
+        await waitUntil(
+          () => storeEntries.length >= 1 && produces.length >= 1,
+          "typed channels received the miss cascade",
+        );
+
+        expect(reads.length).to.be.at.least(1);
+        expect(fetches.length).to.be.at.least(1);
+        expect(produces.length).to.be.at.least(1);
+        expect(storeEntries.length).to.be.at.least(1);
+      } finally {
+        expect(cacheReadChannel.unsubscribe(onRead)).to.equal(true);
+        expect(cacheFetchChannel.unsubscribe(onFetch)).to.equal(true);
+        expect(cacheProduceChannel.unsubscribe(onProduce)).to.equal(true);
+        expect(cacheStoreEntryChannel.unsubscribe(onStoreEntry)).to.equal(true);
+        await cache.close();
+      }
+    });
+  });
+
+  describe("read channel (§6.5.1)", () => {
+    it("direct Cache.get on a miss publishes exactly one fully-attributed message with found: 'none'", async () => {
+      const { name, cache } = makeHarness("read-miss");
+      const capture = captureChannels(name);
+      try {
+        await cache.get({ id: "site:missing", params: {}, directives: {} });
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:missing",
+            found: "none",
+          },
+        ]);
+        // A direct read involves no wrapper: nothing else is published.
+        expect(capture.fetch).to.deep.equal([]);
+        expect(capture.produce).to.deep.equal([]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("found: 'usable' when the request is satisfiable from cache alone", async () => {
+      const { name, cache } = makeHarness("read-usable");
+      await cache.store([
+        { id: "site:a", content: "fresh", directives: freshFor100 },
+      ]);
+      const capture = captureChannels(name);
+      try {
+        const res = await cache.get({
+          id: "site:a",
+          params: {},
+          directives: {},
+        });
+        expect(res.usable?.content).to.equal("fresh");
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable",
+          },
+        ]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("found: 'usable-while-revalidate' when only usable paired with a background refresh", async () => {
+      const { name, cache } = makeHarness("read-swr");
+      await cache.store([
+        {
+          id: "site:a",
+          content: "stale",
+          directives: swrWindowDirectives,
+          date: secondsAgo(1),
+        },
+      ]);
+      const capture = captureChannels(name);
+      try {
+        const res = await cache.get({
+          id: "site:a",
+          params: {},
+          directives: {},
+        });
+        expect(res.usableWhileRevalidate?.content).to.equal("stale");
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable-while-revalidate",
+          },
+        ]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("found: 'usable-if-error' when only usable as a producer-failure fallback", async () => {
+      const { name, cache } = makeHarness("read-if-error");
+      await cache.store([
+        {
+          id: "site:a",
+          content: "stale",
+          directives: ifErrorWindowDirectives,
+          date: secondsAgo(1),
+        },
+      ]);
+      const capture = captureChannels(name);
+      try {
+        const res = await cache.get({
+          id: "site:a",
+          params: {},
+          directives: {},
+        });
+        expect(res.usableIfError?.content).to.equal("stale");
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable-if-error",
+          },
+        ]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("merely-validatable entries report found: 'none' (conditional revalidation is reserved)", async () => {
+      const { name, cache } = makeHarness("read-validatable");
+      await cache.store([
+        {
+          id: "site:a",
+          content: "expired-but-validatable",
+          directives: { freshUntilAge: 0.5 },
+          validators: { etag: "w/1" },
+          date: secondsAgo(1),
+        },
+      ]);
+      const capture = captureChannels(name);
+      try {
+        const res = await cache.get({
+          id: "site:a",
+          params: {},
+          directives: {},
+        });
+        // Self-check of the fixture: the entry really is merely validatable.
+        expect(res.usable).to.equal(undefined);
+        expect(res.usableWhileRevalidate).to.equal(undefined);
+        expect(res.usableIfError).to.equal(undefined);
+        expect(res.validatable).to.have.lengthOf(1);
+
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "none",
+          },
+        ]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("getMany publishes one message PER request (duplicates included), each independently attributed", async () => {
+      const { name, cache } = makeHarness("read-getmany");
+      await cache.store([
+        { id: "site:a", content: "fresh", directives: freshFor100 },
+      ]);
+      const capture = captureChannels(name);
+      try {
+        await cache.getMany([
+          { id: "site:a", params: {}, directives: {} },
+          { id: "biz:b", params: {}, directives: {} },
+          { id: "site:a", params: {}, directives: {} },
+        ]);
+        expect(capture.read).to.have.lengthOf(3);
+        expect(sortByResourceId(capture.read)).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "business_slice",
+            resourceId: "biz:b",
+            found: "none",
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable",
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable",
+          },
+        ]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("a failed cache read publishes NO read message; the error propagates from Cache.get", async () => {
+      const { name, store, cache } = makeHarness("read-failure");
+      const readError = new Error("store exploded");
+      store.get = async () => {
+        throw readError;
+      };
+      const capture = captureChannels(name);
+      try {
+        const thrown = await expectRejection(() =>
+          cache.get({ id: "site:a", params: {}, directives: {} }),
+        );
+        expect(thrown).to.equal(readError);
+        expect(capture.read).to.deep.equal([]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+  });
+
+  describe("fetch channel (§6.5.2)", () => {
+    it("served-from-cache: a hit settles the fetch without producer contact", async () => {
+      const { name, cache } = makeHarness("fetch-hit");
+      await cache.store([
+        { id: "site:a", content: "cached", directives: freshFor100 },
+      ]);
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => ({
+        content: "never",
+        directives: freshFor100,
+      }));
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      try {
+        const res = await getSite({ id: "site:a" });
+        expect(res.content).to.equal("cached");
+        expect(producer.mock.callCount()).to.equal(0);
+
+        expect(capture.fetch).to.have.lengthOf(1);
+        expectCachePathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "served-from-cache",
+          collapsed: false,
+        });
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable",
+          },
+        ]);
+        expect(capture.produce).to.deep.equal([]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("served-from-producer is published at SETTLEMENT, after the producer resolves -- not at classification time", async () => {
+      const { name, cache } = makeHarness("fetch-settlement");
+      const capture = captureChannels(name);
+      const { promise: gate, resolve: releaseProducer } =
+        Promise.withResolvers<void>();
+      const producer = mock.fn(async (req: { readonly id: string }) => {
+        await gate;
+        return { content: `content-${req.id}`, directives: freshFor100 };
+      });
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      try {
+        const pending = getSite({ id: "site:a" });
+        await waitUntil(
+          () => producer.mock.callCount() === 1,
+          "producer invoked",
+        );
+        await delay(20);
+        // The request has been classified and missed, but has NOT settled:
+        // 1.6.0 published its result message here; 2.0 must not have.
+        expect(capture.fetch).to.deep.equal([]);
+        expect(capture.produce).to.deep.equal([]);
+
+        releaseProducer();
+        const res = await pending;
+        expect(res.content).to.equal("content-site:a");
+        expect(capture.fetch).to.have.lengthOf(1);
+        expectProducerPathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "served-from-producer",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+        expectProduceMessage(capture.produce[0], {
+          cache: name,
+          trigger: "miss",
+          requests: [{ resourceType: "site_day", resourceId: "site:a" }],
+          collapsedCallerCount: 0,
+          outcome: "success",
+          minDurationMs: 15,
+        });
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("producer-error: the error propagates; the fetch message arrives only after the producer rejects", async () => {
+      const { name, cache } = makeHarness("fetch-producer-error");
+      const capture = captureChannels(name);
+      const producerError = new Error("origin down");
+      const { promise: gate, resolve: releaseProducer } =
+        Promise.withResolvers<void>();
+      const producer = mock.fn(async () => {
+        await gate;
+        throw producerError;
+      });
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      try {
+        const pending = getSite({ id: "site:a" });
+        await waitUntil(
+          () => producer.mock.callCount() === 1,
+          "producer invoked",
+        );
+        await delay(20);
+        expect(capture.fetch).to.deep.equal([]);
+
+        releaseProducer();
+        const thrown = await expectRejection(pending);
+        expect(thrown).to.equal(producerError);
+
+        expect(capture.fetch).to.have.lengthOf(1);
+        expectProducerPathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "producer-error",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+        expectProduceMessage(capture.produce[0], {
+          cache: name,
+          trigger: "miss",
+          requests: [{ resourceType: "site_day", resourceId: "site:a" }],
+          collapsedCallerCount: 0,
+          outcome: "error",
+          minDurationMs: 15,
+        });
+        expect(capture.storeEntry).to.deep.equal([]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("served-stale-while-revalidating settles first; the revalidation's produce message arrives after (trigger: 'revalidation')", async () => {
+      const { name, cache } = makeHarness("fetch-swr");
+      await cache.store([
+        {
+          id: "site:a",
+          content: "stale-v1",
+          directives: swrWindowDirectives,
+          date: secondsAgo(1),
+        },
+      ]);
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => {
+        await delay(30);
+        return { content: "fresh-v2", directives: freshFor100 };
+      });
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      try {
+        const res = await getSite({ id: "site:a" });
+        expect(res.content).to.equal("stale-v1");
+        expect(capture.fetch).to.have.lengthOf(1);
+        expectCachePathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "served-stale-while-revalidating",
+          collapsed: false,
+        });
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable-while-revalidate",
+          },
+        ]);
+
+        // The background revalidation settles AFTER the fetch already shipped.
+        await waitUntil(
+          () => capture.produce.length === 1,
+          "revalidation produce message",
+        );
+        expectProduceMessage(capture.produce[0], {
+          cache: name,
+          trigger: "revalidation",
+          requests: [{ resourceType: "site_day", resourceId: "site:a" }],
+          collapsedCallerCount: 0,
+          outcome: "success",
+          minDurationMs: 20,
+        });
+        const fetchIndex = capture.all.findIndex(
+          (m) => m.channel === "fetch",
+        );
+        const produceIndex = capture.all.findIndex(
+          (m) => m.channel === "produce",
+        );
+        expect(fetchIndex).to.be.greaterThanOrEqual(0);
+        expect(produceIndex).to.be.greaterThan(fetchIndex);
+
+        // The revalidated content lands in the cache.
+        await waitUntil(
+          () => capture.storeEntry.length === 1,
+          "revalidated entry stored",
+        );
+        expect(capture.storeEntry[0]).to.deep.equal({
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          vary: {},
+          validators: {},
+          relationshipToExistingStoredData: undefined,
+        });
+        const after = await getSite({ id: "site:a" });
+        expect(after.content).to.equal("fresh-v2");
+        expect(producer.mock.callCount()).to.equal(1);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("a failed background revalidation reports produce outcome: 'error' while the stale serve already succeeded", async () => {
+      const { name, cache } = makeHarness("fetch-swr-error");
+      await cache.store([
+        {
+          id: "site:a",
+          content: "stale-v1",
+          directives: swrWindowDirectives,
+          date: secondsAgo(1),
+        },
+      ]);
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => {
+        await delay(10);
+        throw new Error("origin down");
+      });
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      try {
+        const res = await getSite({ id: "site:a" });
+        expect(res.content).to.equal("stale-v1");
+
+        await waitUntil(
+          () => capture.produce.length === 1,
+          "failed revalidation produce message",
+        );
+        expectProduceMessage(capture.produce[0], {
+          cache: name,
+          trigger: "revalidation",
+          requests: [{ resourceType: "site_day", resourceId: "site:a" }],
+          collapsedCallerCount: 0,
+          outcome: "error",
+        });
+        // The logical request settled as a stale serve -- exactly one fetch,
+        // and it is not an error disposition.
+        expect(capture.fetch).to.have.lengthOf(1);
+        expectCachePathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "served-stale-while-revalidating",
+          collapsed: false,
+        });
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("served-stale-after-error: a foreground producer failure falls back to the if-error entry", async () => {
+      const { name, cache } = makeHarness("fetch-stale-after-error");
+      await cache.store([
+        {
+          id: "site:a",
+          content: "stale-v1",
+          directives: ifErrorWindowDirectives,
+          date: secondsAgo(1),
+        },
+      ]);
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => {
+        await delay(10);
+        throw new Error("origin down");
+      });
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      try {
+        const res = await getSite({ id: "site:a" });
+        expect(res.content).to.equal("stale-v1");
+
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable-if-error",
+          },
+        ]);
+        expect(capture.fetch).to.have.lengthOf(1);
+        expectCachePathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "served-stale-after-error",
+          collapsed: false,
+        });
+        expectProduceMessage(capture.produce[0], {
+          cache: name,
+          trigger: "miss",
+          requests: [{ resourceType: "site_day", resourceId: "site:a" }],
+          collapsedCallerCount: 0,
+          outcome: "error",
+        });
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("aborted: the fetch settles as 'aborted' BEFORE the invocation's produce message; the result is still stored", async () => {
+      const { name, cache } = makeHarness("fetch-abort-mid-producer");
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => {
+        await delay(80);
+        return { content: "slow-but-stored", directives: freshFor100 };
+      });
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      const controller = new AbortController();
+      try {
+        const pending = getSite(
+          { id: "site:a" },
+          { signal: controller.signal },
+        );
+        await waitUntil(
+          () => producer.mock.callCount() === 1,
+          "producer invoked",
+        );
+        controller.abort(new Error("caller-gone"));
+        const thrown = await expectRejection(pending);
+        expect((thrown as Error).message).to.equal("caller-gone");
+
+        // The aborted fetch settled before its invocation did (§6.5's
+        // temporal decoupling): the producer is still running here (it takes
+        // another ~65ms), so no produce message can exist yet.
+        await waitUntil(
+          () => capture.fetch.length === 1,
+          "aborted fetch message",
+          500,
+        );
+        expectProducerPathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "aborted",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+        expect(capture.produce).to.deep.equal([]);
+
+        // The collapsed producer call keeps running and stores its result.
+        await waitUntil(
+          () => capture.produce.length === 1,
+          "abandoned invocation settled",
+        );
+        expectProduceMessage(capture.produce[0], {
+          cache: name,
+          trigger: "miss",
+          requests: [{ resourceType: "site_day", resourceId: "site:a" }],
+          collapsedCallerCount: 0,
+          outcome: "success",
+          minDurationMs: 50,
+        });
+        await waitUntil(
+          () => capture.storeEntry.length === 1,
+          "abandoned result stored",
+        );
+        const after = await getSite({ id: "site:a" });
+        expect(after.content).to.equal("slow-but-stored");
+        expect(producer.mock.callCount()).to.equal(1);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("an abort landing during the cache read settles as 'aborted' (emitted nothing in 1.6.0); the producer is never contacted", async () => {
+      const { name, store, cache } = makeHarness("fetch-abort-during-read");
+      const { promise: storeRead, resolve: releaseStoreRead } =
+        Promise.withResolvers<never[]>();
+      store.get = (async () => storeRead) as typeof store.get;
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => ({
+        content: "never",
+        directives: freshFor100,
+      }));
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      const controller = new AbortController();
+      try {
+        const pending = getSite(
+          { id: "site:a" },
+          { signal: controller.signal },
+        );
+        await delay(10);
+        controller.abort(new Error("cancelled-during-read"));
+        releaseStoreRead([]);
+
+        const thrown = await expectRejection(pending);
+        expect((thrown as Error).message).to.equal("cancelled-during-read");
+
+        await waitUntil(
+          () => capture.fetch.length === 1,
+          "aborted fetch message",
+          500,
+        );
+        expect(producer.mock.callCount()).to.equal(0);
+        expect(capture.produce).to.deep.equal([]);
+        expectProducerPathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "aborted",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("a pre-aborted signal settles as 'aborted' (the only no-message path is the failed-read 'throw' one)", async () => {
+      const { name, cache } = makeHarness("fetch-pre-aborted");
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => ({
+        content: "never",
+        directives: freshFor100,
+      }));
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      const controller = new AbortController();
+      controller.abort(new Error("pre-aborted"));
+      try {
+        const thrown = await expectRejection(() =>
+          getSite({ id: "site:a" }, { signal: controller.signal }),
+        );
+        expect((thrown as Error).message).to.equal("pre-aborted");
+
+        await waitUntil(
+          () => capture.fetch.length === 1,
+          "aborted fetch message",
+          500,
+        );
+        expect(producer.mock.callCount()).to.equal(0);
+        expect(capture.read).to.deep.equal([]);
+        expect(capture.produce).to.deep.equal([]);
+        expectProducerPathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "aborted",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("riders: a concurrent identical request rides the in-flight invocation -- no new read/produce, fetch collapsed: true, collapsedCallerCount 1 (§7)", async () => {
+      const { name, cache } = makeHarness("fetch-rider");
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => {
+        await delay(80);
+        return { content: "shared", directives: freshFor100 };
+      });
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      try {
+        const first = getSite({ id: "site:a" });
+        await delay(10);
+        const second = getSite({ id: "site:a" });
+        const [res1, res2] = await Promise.all([first, second]);
+        expect(res1.content).to.equal("shared");
+        expect(res2.content).to.equal("shared");
+        expect(producer.mock.callCount()).to.equal(1);
+
+        // §7: the rider adds no new read and no new produce.
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "none",
+          },
+        ]);
+        expect(capture.produce).to.have.lengthOf(1);
+        expectProduceMessage(capture.produce[0], {
+          cache: name,
+          trigger: "miss",
+          requests: [{ resourceType: "site_day", resourceId: "site:a" }],
+          collapsedCallerCount: 1,
+          outcome: "success",
+          minDurationMs: 50,
+        });
+
+        expect(capture.fetch).to.have.lengthOf(2);
+        const fetches = [...capture.fetch].sort(
+          (a, b) => Number(a.collapsed) - Number(b.collapsed),
+        );
+        expectProducerPathFetch(fetches[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "served-from-producer",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+        expectProducerPathFetch(fetches[1], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "served-from-producer",
+          directivesImpliedBypass: false,
+          collapsed: true,
+        });
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("onCacheReadFailure default ('call-producer'): the failed read emits no read message; the fetch settles normally", async () => {
+      const { name, store, cache } = makeHarness("fetch-read-failure-default");
+      store.get = async () => {
+        throw new Error("store exploded");
+      };
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => ({
+        content: "from-producer",
+        directives: freshFor100,
+      }));
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      try {
+        const res = await getSite({ id: "site:a" });
+        expect(res.content).to.equal("from-producer");
+        expect(capture.read).to.deep.equal([]);
+        expect(capture.fetch).to.have.lengthOf(1);
+        expectProducerPathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "served-from-producer",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("onCacheReadFailure: 'throw' rethrows with NO read and NO fetch message (the request never reached a disposition)", async () => {
+      const { name, store, cache } = makeHarness("fetch-read-failure-throw");
+      const readError = new Error("store exploded");
+      store.get = async () => {
+        throw readError;
+      };
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => ({
+        content: "never",
+        directives: freshFor100,
+      }));
+      const getSite = wrapProducer(
+        cache,
+        { onCacheReadFailure: "throw" },
+        { site_day: producer },
+      );
+      try {
+        const thrown = await expectRejection(() => getSite({ id: "site:a" }));
+        expect(thrown).to.equal(readError);
+        expect(producer.mock.callCount()).to.equal(0);
+        expect(capture.read).to.deep.equal([]);
+        expect(capture.fetch).to.deep.equal([]);
+        expect(capture.produce).to.deep.equal([]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("sole-type caches attribute every message to the sole resource type, even with the trivial guard", async () => {
+      const name = uniqueCacheName("fetch-sole-type");
+      const cache = new Cache(memoryStoreFor(soleVisitsRegistry), {
+        name,
+        resourceTypes: soleVisitsRegistry,
+      });
+      const capture = captureChannels(name);
+      const producer = mock.fn(async (req: { readonly id: string }) => ({
+        content: `content-${req.id}`,
+        directives: freshFor100,
+      }));
+      const getVisits = wrapProducer(cache, {}, { visits: producer });
+      try {
+        await getVisits({ id: "no-structure-at-all" });
+        await waitUntil(
+          () => capture.storeEntry.length === 1 && capture.produce.length === 1,
+          "sole-type miss cascade",
+        );
+        expect(capture.read[0]?.resourceType).to.equal("visits");
+        expect(capture.fetch[0]?.resourceType).to.equal("visits");
+        expect(capture.produce[0]?.requests).to.deep.equal([
+          { resourceType: "visits", resourceId: "no-structure-at-all" },
+        ]);
+        expect(capture.storeEntry[0]?.resourceType).to.equal("visits");
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+  });
+
+  describe("produce channel (§6.5.3)", () => {
+    it("durationMs measures invocation time", async () => {
+      const { name, cache } = makeHarness("produce-duration");
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => {
+        await delay(60);
+        return { content: "slow", directives: freshFor100 };
+      });
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      try {
+        await getSite({ id: "site:a" });
+        expect(capture.produce).to.have.lengthOf(1);
+        const message = capture.produce[0];
+        expect(message?.durationMs).to.be.a("number");
+        expect(message?.durationMs).to.be.at.least(40);
+        expect(message?.durationMs).to.be.below(10_000);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("wrapBulkProducer: one invocation (and one produce message) per resource type per window; batches never mix types", async () => {
+      const { name, cache } = makeHarness("produce-bulk");
+      const capture = captureChannels(name);
+      const siteBulk = mock.fn(
+        async (reqs: readonly { readonly id: string }[]) =>
+          reqs.map((req) => ({
+            content: `site-content-${req.id}`,
+            directives: freshFor100,
+          })),
+      );
+      const bizBulk = mock.fn(
+        async (reqs: readonly { readonly id: string }[]) =>
+          reqs.map((req) => ({
+            content: `biz-content-${req.id}`,
+            directives: freshFor100,
+          })),
+      );
+      const getBulk = wrapBulkProducer(cache, {}, {
+        site_day: siteBulk,
+        business_slice: bizBulk,
+      });
+      try {
+        const results = await getBulk([
+          { id: "site:a" },
+          { id: "biz:b" },
+          { id: "site:c" },
+        ]);
+
+        // Results stay request-paired across the type partition.
+        const contents = results.map((r) => {
+          if (r instanceof Error) throw r;
+          return r.content;
+        });
+        expect(contents).to.deep.equal([
+          "site-content-site:a",
+          "biz-content-biz:b",
+          "site-content-site:c",
+        ]);
+
+        // Each type's producer saw one batch containing ONLY its own ids.
+        expect(siteBulk.mock.callCount()).to.equal(1);
+        expect(bizBulk.mock.callCount()).to.equal(1);
+        expect(
+          siteBulk.mock.calls[0]?.arguments[0]?.map((r) => r.id).sort(),
+        ).to.deep.equal(["site:a", "site:c"]);
+        expect(
+          bizBulk.mock.calls[0]?.arguments[0]?.map((r) => r.id),
+        ).to.deep.equal(["biz:b"]);
+
+        // One produce message per type; requests[] type-pure.
+        expect(capture.produce).to.have.lengthOf(2);
+        const siteProduce = capture.produce.find(
+          (m) => m.requests[0]?.resourceType === "site_day",
+        );
+        const bizProduce = capture.produce.find(
+          (m) => m.requests[0]?.resourceType === "business_slice",
+        );
+        expect(siteProduce?.trigger).to.equal("miss");
+        expect(siteProduce?.outcome).to.equal("success");
+        expect(sortByResourceId(siteProduce?.requests ?? [])).to.deep.equal([
+          { resourceType: "site_day", resourceId: "site:a" },
+          { resourceType: "site_day", resourceId: "site:c" },
+        ]);
+        expect(bizProduce?.trigger).to.equal("miss");
+        expect(bizProduce?.outcome).to.equal("success");
+        expect(bizProduce?.requests).to.deep.equal([
+          { resourceType: "business_slice", resourceId: "biz:b" },
+        ]);
+
+        // One read and one fetch per request element.
+        expect(capture.read).to.have.lengthOf(3);
+        expect(capture.fetch).to.have.lengthOf(3);
+        const fetches = sortByResourceId(capture.fetch);
+        expectProducerPathFetch(fetches[0], {
+          cache: name,
+          resourceType: "business_slice",
+          resourceId: "biz:b",
+          disposition: "served-from-producer",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+        expectProducerPathFetch(fetches[1], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "served-from-producer",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+        expectProducerPathFetch(fetches[2], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:c",
+          disposition: "served-from-producer",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("wrapBulkProducer: per-request Error elements are returned in place; their fetch settles as producer-error", async () => {
+      const { name, cache } = makeHarness("produce-bulk-errors");
+      const capture = captureChannels(name);
+      const perRequestError = new Error("this one failed");
+      const siteBulk = mock.fn(
+        async (reqs: readonly { readonly id: string }[]) =>
+          reqs.map((req) =>
+            req.id === "site:bad"
+              ? perRequestError
+              : { content: `ok-${req.id}`, directives: freshFor100 },
+          ),
+      );
+      const getBulk = wrapBulkProducer(cache, {}, { site_day: siteBulk });
+      try {
+        const results = await getBulk([{ id: "site:ok" }, { id: "site:bad" }]);
+        const first = results[0];
+        if (first instanceof Error) throw first;
+        expect(first.content).to.equal("ok-site:ok");
+        expect(results[1]).to.equal(perRequestError);
+
+        expect(capture.fetch).to.have.lengthOf(2);
+        const fetches = sortByResourceId(capture.fetch);
+        expectProducerPathFetch(fetches[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:bad",
+          disposition: "producer-error",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+        expectProducerPathFetch(fetches[1], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:ok",
+          disposition: "served-from-producer",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+
+        // One invocation covered both requests. (Its `outcome` for a resolved
+        // batch containing per-request Errors is not pinned by the doc, so
+        // only the invocation-level shape is asserted here.)
+        expect(capture.produce).to.have.lengthOf(1);
+        expect(capture.produce[0]?.trigger).to.equal("miss");
+        expect(sortByResourceId(capture.produce[0]?.requests ?? [])).to.deep.equal([
+          { resourceType: "site_day", resourceId: "site:bad" },
+          { resourceType: "site_day", resourceId: "site:ok" },
+        ]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+  });
+
+  describe("store-entry channel (§6.5.4)", () => {
+    it("publishes one fully-attributed message per stored entry, carrying vary, validators, and the store-reported relationship", async () => {
+      const { name, cache } = makeHarness("store-entry-basic");
+      const capture = captureChannels(name);
+      const vary = { someParam: "someValue" };
+      try {
+        await cache.store([
+          {
+            id: "site:a",
+            vary,
+            content: "v1",
+            validators: { contentHash: "a" },
+            directives: freshFor100,
+          },
+        ]);
+        await cache.store([
+          {
+            id: "site:a",
+            vary,
+            content: "v1",
+            validators: { contentHash: "a" },
+            directives: freshFor100,
+          },
+        ]);
+        await cache.store([
+          {
+            id: "site:a",
+            vary,
+            content: "v2",
+            validators: { contentHash: "b" },
+            directives: freshFor100,
+          },
+        ]);
+
+        expect(capture.storeEntry).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            vary,
+            validators: { contentHash: "a" },
+            relationshipToExistingStoredData: "is-new",
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            vary,
+            validators: { contentHash: "a" },
+            relationshipToExistingStoredData: "unchanged",
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            vary,
+            validators: { contentHash: "b" },
+            relationshipToExistingStoredData: "changed",
+          },
+        ]);
+        // The StoreOrigin concept was cut: the message has no initiator field.
+        expect(capture.storeEntry[0]).to.not.have.property("origin");
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("relationshipToExistingStoredData is undefined when not comparable (empty validators)", async () => {
+      const { name, cache } = makeHarness("store-entry-uncomparable");
+      const capture = captureChannels(name);
+      try {
+        await cache.store([
+          {
+            id: "site:no-validators",
+            content: "a",
+            directives: freshFor100,
+          },
+          {
+            id: "site:with-validators",
+            content: "b",
+            validators: { rowVersion: 1 },
+            directives: freshFor100,
+          },
+        ]);
+        expect(sortByResourceId(capture.storeEntry)).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:no-validators",
+            vary: {},
+            validators: {},
+            relationshipToExistingStoredData: undefined,
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:with-validators",
+            vary: {},
+            validators: { rowVersion: 1 },
+            relationshipToExistingStoredData: "is-new",
+          },
+        ]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("in-call same-slot duplicates still emit one message each; the losing duplicate's relationship is undefined", async () => {
+      const { name, cache } = makeHarness("store-entry-duplicates");
+      const capture = captureChannels(name);
+      try {
+        await cache.store([
+          {
+            id: "site:dup",
+            content: "older",
+            validators: { contentHash: "old" },
+            directives: freshFor100,
+            date: secondsAgo(2),
+          },
+          {
+            id: "site:dup",
+            content: "newer",
+            validators: { contentHash: "new" },
+            directives: freshFor100,
+            date: secondsAgo(1),
+          },
+        ]);
+        expect(capture.storeEntry).to.have.lengthOf(2);
+        const relationships = capture.storeEntry
+          .map((m) => m.relationshipToExistingStoredData)
+          .sort((a, b) => String(a).localeCompare(String(b)));
+        expect(relationships).to.deep.equal(["is-new", undefined]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("supplemental entries are attributed to THEIR OWN resource type, not the producing flow's", async () => {
+      const { name, cache } = makeHarness("store-entry-supplemental");
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => ({
+        content: "site-content",
+        validators: { contentHash: "h-site" },
+        directives: freshFor100,
+        supplementalResources: [
+          {
+            id: "biz:1" as const,
+            content: "slice-1",
+            validators: { contentHash: "h-b1" },
+            directives: freshFor100,
+          },
+          {
+            id: "biz:2" as const,
+            content: "slice-2",
+            validators: { contentHash: "h-b2" },
+            directives: freshFor100,
+          },
+        ],
+      }));
+      const getSite = wrapProducer(cache, {}, { site_day: producer });
+      try {
+        await getSite({ id: "site:a" });
+        await waitUntil(
+          () => capture.storeEntry.length === 3,
+          "primary + supplemental store-entry messages",
+        );
+        expect(sortByResourceId(capture.storeEntry)).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "business_slice",
+            resourceId: "biz:1",
+            vary: {},
+            validators: { contentHash: "h-b1" },
+            relationshipToExistingStoredData: "is-new",
+          },
+          {
+            cache: name,
+            resourceType: "business_slice",
+            resourceId: "biz:2",
+            vary: {},
+            validators: { contentHash: "h-b2" },
+            relationshipToExistingStoredData: "is-new",
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            vary: {},
+            validators: { contentHash: "h-site" },
+            relationshipToExistingStoredData: "is-new",
+          },
+        ]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+  });
+
+  describe("§7 execution pattern: the golden end-to-end simulation", () => {
+    it("walks the documented message stream: miss cascade, rider, slice hit, SWR revalidation, outage", async () => {
+      const name = uniqueCacheName("golden-e2e");
+      const store = memoryStoreFor(registry);
+      const cache = new Cache(store, { name, resourceTypes: registry });
+      const capture = captureChannels(name);
+
+      const siteId = "site:X" as const;
+      const bizIds = ["biz:B1", "biz:B2"] as const;
+      const phase = { producerHealthy: true };
+      const outageError = new Error("vendor outage");
+      const siteProducer = mock.fn(async (req: { readonly id: string }) => {
+        await delay(25);
+        if (!phase.producerHealthy) throw outageError;
+        return {
+          content: "site-visits-v1",
+          validators: { contentHash: "h1" },
+          directives: {
+            freshUntilAge: 0.1,
+            maxStale: { withoutRevalidation: 0, whileRevalidate: 100, ifError: 100 },
+          },
+          supplementalResources: bizIds.map((id) => ({
+            id,
+            content: `slice-${id}`,
+            validators: { contentHash: `h-${id}` },
+            directives: freshFor100,
+          })),
+        };
+      });
+      const bizProducer = mock.fn(async (req: { readonly id: string }) => ({
+        content: `derived-${req.id}`,
+        directives: freshFor100,
+      }));
+      const getVisits = wrapProducer(cache, {}, {
+        site_day: siteProducer,
+        business_slice: bizProducer,
+      });
+
+      try {
+        // ---- t=0: first read of site:X (miss), with a concurrent rider ----
+        const initiator = getVisits({ id: siteId });
+        await delay(8);
+        const rider = getVisits({ id: siteId });
+        const [initiatorRes, riderRes] = await Promise.all([initiator, rider]);
+        expect(initiatorRes.content).to.equal("site-visits-v1");
+        expect(riderRes.content).to.equal("site-visits-v1");
+        expect(siteProducer.mock.callCount()).to.equal(1);
+
+        await waitUntil(
+          () => capture.storeEntry.length === 3 && capture.fetch.length === 2,
+          "t=0 miss cascade fully published",
+        );
+
+        expect(capture.read).to.deep.equal([
+          { cache: name, resourceType: "site_day", resourceId: siteId, found: "none" },
+        ]);
+        expect(capture.produce).to.have.lengthOf(1);
+        expectProduceMessage(capture.produce[0], {
+          cache: name,
+          trigger: "miss",
+          requests: [{ resourceType: "site_day", resourceId: siteId }],
+          collapsedCallerCount: 1,
+          outcome: "success",
+          minDurationMs: 15,
+        });
+        expect(sortByResourceId(capture.storeEntry)).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "business_slice",
+            resourceId: "biz:B1",
+            vary: {},
+            validators: { contentHash: "h-biz:B1" },
+            relationshipToExistingStoredData: "is-new",
+          },
+          {
+            cache: name,
+            resourceType: "business_slice",
+            resourceId: "biz:B2",
+            vary: {},
+            validators: { contentHash: "h-biz:B2" },
+            relationshipToExistingStoredData: "is-new",
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: siteId,
+            vary: {},
+            validators: { contentHash: "h1" },
+            relationshipToExistingStoredData: "is-new",
+          },
+        ]);
+        const t0Fetches = [...capture.fetch].sort(
+          (a, b) => Number(a.collapsed) - Number(b.collapsed),
+        );
+        expectProducerPathFetch(t0Fetches[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: siteId,
+          disposition: "served-from-producer",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+        expectProducerPathFetch(t0Fetches[1], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: siteId,
+          disposition: "served-from-producer",
+          directivesImpliedBypass: false,
+          collapsed: true,
+        });
+
+        // §7 presents the t=0 flow as a cascade beginning
+        // read -> produce -> store-entry x3, with the fetches settling after
+        // the read. (The relative order of the fetch settlements vs the
+        // store-entry publishes is NOT asserted: the doc leaves open whether
+        // callers settle before the fire-and-forget store completes.)
+        const channelOrder = capture.all.map((m) => m.channel);
+        expect(channelOrder.indexOf("read")).to.equal(0);
+        expect(channelOrder.indexOf("produce")).to.be.greaterThan(
+          channelOrder.indexOf("read"),
+        );
+        expect(channelOrder.indexOf("store-entry")).to.be.greaterThan(
+          channelOrder.indexOf("produce"),
+        );
+        expect(channelOrder.indexOf("fetch")).to.be.greaterThan(
+          channelOrder.indexOf("read"),
+        );
+
+        // ---- t=1: business B1's slice, served from cache ----
+        const t1Start = capture.all.length;
+        const sliceRes = await getVisits({ id: "biz:B1" });
+        expect(sliceRes.content).to.equal("slice-biz:B1");
+        expect(bizProducer.mock.callCount()).to.equal(0);
+        const t1Messages = capture.all.slice(t1Start);
+        expect(t1Messages).to.have.lengthOf(2);
+        expect(t1Messages[0]).to.deep.equal({
+          channel: "read",
+          message: {
+            cache: name,
+            resourceType: "business_slice",
+            resourceId: "biz:B1",
+            found: "usable",
+          },
+        });
+        expect(t1Messages[1]?.channel).to.equal("fetch");
+        expectCachePathFetch(
+          t1Messages[1]?.channel === "fetch" ? t1Messages[1].message : undefined,
+          {
+            cache: name,
+            resourceType: "business_slice",
+            resourceId: "biz:B1",
+            disposition: "served-from-cache",
+            collapsed: false,
+          },
+        );
+
+        // ---- t=2 (> TTL, inside SWR window): stale serve + revalidation ----
+        await delay(150); // site entry (freshUntilAge 0.1) is now stale
+        const t2Start = capture.all.length;
+        // No consumer directives: the producer's generous whileRevalidate
+        // window (100s) selects the SWR path regardless of exactly how stale
+        // the entry has become by now.
+        const swrRes = await getVisits({ id: siteId });
+        expect(swrRes.content).to.equal("site-visits-v1");
+        const t2Read = capture.all[t2Start];
+        expect(t2Read).to.deep.equal({
+          channel: "read",
+          message: {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: siteId,
+            found: "usable-while-revalidate",
+          },
+        });
+        const t2Fetch = capture.fetch.at(-1);
+        expectCachePathFetch(t2Fetch, {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: siteId,
+          disposition: "served-stale-while-revalidating",
+          collapsed: false,
+        });
+
+        // The revalidation settles after the fetch already shipped...
+        await waitUntil(
+          () => capture.produce.length === 2,
+          "revalidation produce message",
+        );
+        expectProduceMessage(capture.produce[1], {
+          cache: name,
+          trigger: "revalidation",
+          requests: [{ resourceType: "site_day", resourceId: siteId }],
+          collapsedCallerCount: 0,
+          outcome: "success",
+          minDurationMs: 15,
+        });
+        // ...and the vendor data didn't move (same contentHash), so the
+        // re-stored entries report "unchanged".
+        await waitUntil(
+          () => capture.storeEntry.length === 6,
+          "revalidation store-entry messages",
+        );
+        const t2StoreEntries = capture.storeEntry.slice(3);
+        expect(
+          sortByResourceId(t2StoreEntries).map((m) => ({
+            resourceId: m.resourceId,
+            resourceType: m.resourceType,
+            relationship: m.relationshipToExistingStoredData,
+          })),
+        ).to.deep.equal([
+          { resourceId: "biz:B1", resourceType: "business_slice", relationship: "unchanged" },
+          { resourceId: "biz:B2", resourceType: "business_slice", relationship: "unchanged" },
+          { resourceId: siteId, resourceType: "site_day", relationship: "unchanged" },
+        ]);
+        expect(siteProducer.mock.callCount()).to.equal(2);
+
+        // ---- producer outage; foreground caller inside the if-error window ----
+        phase.producerHealthy = false;
+        await delay(150); // the revalidated entry (freshUntilAge 0.1) is stale again
+        const t3Start = capture.all.length;
+        const ifErrorRes = await getVisits({
+          id: siteId,
+          // Consumer directives put this request outside the SWR window but
+          // inside the if-error window.
+          directives: {
+            maxStale: { withoutRevalidation: 0, whileRevalidate: 0, ifError: 100 },
+          },
+        });
+        expect(ifErrorRes.content).to.equal("site-visits-v1");
+        expect(capture.all[t3Start]).to.deep.equal({
+          channel: "read",
+          message: {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: siteId,
+            found: "usable-if-error",
+          },
+        });
+        expectCachePathFetch(capture.fetch.at(-1), {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: siteId,
+          disposition: "served-stale-after-error",
+          collapsed: false,
+        });
+        expect(capture.produce).to.have.lengthOf(3);
+        expectProduceMessage(capture.produce[2], {
+          cache: name,
+          trigger: "miss",
+          requests: [{ resourceType: "site_day", resourceId: siteId }],
+          collapsedCallerCount: 0,
+          outcome: "error",
+          minDurationMs: 15,
+        });
+
+        // ---- outage, caller OUTSIDE the if-error window: the error surfaces ----
+        const t4Start = capture.all.length;
+        const thrown = await expectRejection(() =>
+          getVisits({
+            id: siteId,
+            directives: {
+              maxStale: { withoutRevalidation: 0, whileRevalidate: 0, ifError: 0 },
+            },
+          }),
+        );
+        expect(thrown).to.equal(outageError);
+        expect(capture.all[t4Start]).to.deep.equal({
+          channel: "read",
+          message: {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: siteId,
+            found: "none",
+          },
+        });
+        expectProducerPathFetch(capture.fetch.at(-1), {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: siteId,
+          disposition: "producer-error",
+          directivesImpliedBypass: false,
+          collapsed: false,
+        });
+        expectProduceMessage(capture.produce[3], {
+          cache: name,
+          trigger: "miss",
+          requests: [{ resourceType: "site_day", resourceId: siteId }],
+          collapsedCallerCount: 0,
+          outcome: "error",
+          minDurationMs: 15,
+        });
+
+        // ---- final sweep: totals and universal attribution ----
+        expect(capture.read).to.have.lengthOf(5);
+        expect(capture.fetch).to.have.lengthOf(6);
+        expect(capture.produce).to.have.lengthOf(4);
+        expect(capture.storeEntry).to.have.lengthOf(6);
+        expect(siteProducer.mock.callCount()).to.equal(4);
+        expect(bizProducer.mock.callCount()).to.equal(0);
+        capture.all.forEach(({ channel, message }) => {
+          expect(message.cache).to.equal(name);
+          if (channel === "produce") {
+            message.requests.forEach((r) => {
+              expect(["site_day", "business_slice"]).to.include(r.resourceType);
+            });
+          } else {
+            expect(["site_day", "business_slice"]).to.include(
+              message.resourceType,
+            );
+          }
+        });
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+  });
+});
