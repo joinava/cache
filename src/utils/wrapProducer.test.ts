@@ -117,31 +117,94 @@ describe("wrapProducer", () => {
   });
 
   it("should not call the fetcher again during the freshness window", async () => {
-    await sut({ id: "myUrl" });
-    await delay(30);
-    await sut({ id: "myUrl" });
+    // A wide self-owned freshness window: the shared fixture's 100ms window
+    // is routinely exceeded by (first call + 30ms delay) under full-suite
+    // load, flaking this test. The subject — a second request within the
+    // freshness window must not refetch — is unchanged.
+    const freshFetcher = mock.fn(
+      async (_req: { id: string }) =>
+        ({
+          content: "fresh",
+          directives: { freshUntilAge: 30 },
+        }) satisfies RequestPairedProducerResult<any, any, any>,
+    );
+    const freshSut = wrapProducer(
+      cache,
+      { collapseOverlappingRequestsTime: 0 },
+      { resources: freshFetcher },
+    );
 
-    expect(fetcher.mock.callCount()).to.eq(1);
+    await freshSut({ id: "myUrl" });
+    await delay(30);
+    await freshSut({ id: "myUrl" });
+
+    expect(freshFetcher.mock.callCount()).to.eq(1);
   });
 
   it("should call but not block on the fetcher during the staleWhileRefresh window, if any", async () => {
+    // Per-test wrapper with wide windows: the fixture's 100ms/400ms windows
+    // require the second request to land inside a 400ms wall-clock band,
+    // which full-suite load stalls (>1s observed) can miss. First result:
+    // 1s fresh + 30s SWR band; refreshed results are hour-fresh so the
+    // settle-polling below can never trigger further revalidations.
+    let producerCalls = 0;
+    const swrFetcher = mock.fn(async () => {
+      producerCalls += 1;
+      return {
+        content: `produced-${producerCalls}`,
+        directives:
+          producerCalls === 1
+            ? {
+                freshUntilAge: 1,
+                maxStale: {
+                  withoutRevalidation: 0,
+                  whileRevalidate: 30,
+                  ifError: 30,
+                },
+              }
+            : { freshUntilAge: 3600 },
+      } satisfies RequestPairedProducerResult<any, any, any>;
+    });
+    const swrSut = wrapProducer(
+      cache,
+      { collapseOverlappingRequestsTime: 0 },
+      { resources: swrFetcher },
+    );
+
     // Load content into the cache.
-    const res1 = await sut({ id: "myUrl", params: {} });
+    const res1 = await swrSut({ id: "myUrl", params: {} });
 
-    // get into the stale while validate window
-    await delay(150);
+    // Get past the 1s freshness window (structurally guaranteed — the timer
+    // can only fire later than its deadline) into the 30s-wide SWR band.
+    await delay(1100);
 
-    // request cached data, which should come back to us immediately w/ the old
-    // result (faster than the fetcher loads), while a second load is triggered.
-    const res2 = await sut({ id: "myUrl" });
+    // Request cached data, which should come back to us immediately w/ the
+    // old result (faster than the fetcher loads), while a second load is
+    // triggered.
+    const res2 = await swrSut({ id: "myUrl" });
     expect(res1.content).to.deep.eq(res2.content);
 
-    // After the fetcher resolves, we should see that second load result
-    // if we query the cache again.
-    await delay(10);
-    const res3 = await sut({ id: "myUrl" });
+    // Wait for the refresh's fire-and-forget store to become visible using
+    // DIRECT cache reads, which never trigger producers. Polling through the
+    // wrapper instead would serve-stale again on every pre-visibility poll
+    // and fire an extra revalidation each time, breaking the exact
+    // call-count below. The old entry is past its 1s freshness, so `usable`
+    // is populated if and only if the refreshed (hour-fresh) entry landed.
+    const waitForRefreshedEntry = async (attempt: number): Promise<void> => {
+      const direct = await cache.get({
+        id: "myUrl",
+        params: {},
+        directives: {},
+      });
+      if (direct.usable !== undefined || attempt >= 200) return;
+      await delay(25);
+      return waitForRefreshedEntry(attempt + 1);
+    };
+    await waitForRefreshedEntry(0);
+
+    const res3 = await swrSut({ id: "myUrl" });
     expect(res2.content).to.not.deep.eq(res3.content);
-    expect(fetcher.mock.callCount()).to.eq(2);
+    expect(swrFetcher.mock.callCount()).to.eq(2);
   });
 
   it("should call the fetcher again and block after the expiration window", async () => {
@@ -170,14 +233,19 @@ describe("wrapProducer", () => {
 
   it("should use the cached response if fetcher rejects during the staleIfError window", async () => {
     const testError = new Error("test");
+    // Windows sized so each phase keeps seconds of margin: the original
+    // 50ms/100ms windows required the stale-if-error request to land inside
+    // a 100ms-wide wall-clock band, which full-suite load stalls (>1s
+    // observed) routinely miss. Phase boundaries: fresh until 1s, if-error
+    // usable until 5s.
     const testResult = {
       content: { body: { test: true }, headers: {} },
       directives: {
-        freshUntilAge: 0.05,
+        freshUntilAge: 1,
         maxStale: {
           withoutRevalidation: 0,
           whileRevalidate: 0,
-          ifError: 0.1,
+          ifError: 4,
         },
       },
     } satisfies RequestPairedProducerResult<any, any, any>;
@@ -204,7 +272,7 @@ describe("wrapProducer", () => {
     const firstRes = await sut2({ id: "someUrl" });
     expect(firstRes).to.deep.include(testResult);
 
-    await delay(80);
+    await delay(1100); // past 1s freshness, well inside the 5s if-error bound
 
     // first res is expired, and the fetcher errored, but we should
     // be able to reuse the first res anyway because of staleIfError.
@@ -212,7 +280,7 @@ describe("wrapProducer", () => {
     expect(secondRes).to.deep.include(testResult);
     expect(customTestFetcher.mock.callCount()).to.eq(2);
 
-    await delay(120);
+    await delay(4600); // now past the 5s if-error bound
 
     // now, the staleIfError window should be up, so we have to go back
     // to the fetcher, but it errors again, so we should get that error.

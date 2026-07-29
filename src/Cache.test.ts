@@ -166,35 +166,39 @@ describe("Cache", { concurrency: true }, () => {
               async ({ cache }) => {
                 const uri = randomURI();
                 const content = contentGenerator();
+                // Backdated entry: freshness (29s) is already expired while
+                // the staleWhileRefresh window (1h) stays open — no sleep,
+                // no wall-clock race. The previous live 10ms/1s windows
+                // required the read to land within 1.01s of storing, which
+                // full-suite load stalls (>1.1s observed) missed.
                 await cache.store([
                   {
                     id: uri,
                     vary: { accept: "text/html" },
                     content,
+                    date: new Date(Date.now() - 30_000),
                     directives: {
-                      freshUntilAge: 0.01,
+                      freshUntilAge: 29,
                       maxStale: {
                         withoutRevalidation: 0,
-                        whileRevalidate: 1,
-                        ifError: 1,
+                        whileRevalidate: 3600,
+                        ifError: 3600,
                       },
                     },
                   },
                 ]);
 
-                return delay(20).then(async () => {
-                  const res = await cache.get({
-                    id: uri,
-                    params: { accept: "text/html" },
-                    directives: {},
-                  });
+                const res = await cache.get({
+                  id: uri,
+                  params: { accept: "text/html" },
+                  directives: {},
+                });
 
-                  expect(res.usable).to.eq(undefined);
-                  expect(res.usableIfError).to.eq(undefined);
-                  expect(res.validatable).to.deep.eq([]);
-                  expect(res.usableWhileRevalidate).to.deep.include({
-                    content,
-                  });
+                expect(res.usable).to.eq(undefined);
+                expect(res.usableIfError).to.eq(undefined);
+                expect(res.validatable).to.deep.eq([]);
+                expect(res.usableWhileRevalidate).to.deep.include({
+                  content,
                 });
               },
             );
@@ -285,40 +289,45 @@ describe("Cache", { concurrency: true }, () => {
               async ({ cache }) => {
                 const uri = randomURI();
                 const content = contentGenerator();
+                // Backdated entry: freshness (29s) is already expired at
+                // store time while the staleWhileRefresh window (1h) stays
+                // open, so no sleep is needed and no wall-clock race exists.
+                // The previous live 10ms/600ms windows raced real-store
+                // round trips under full-suite load (observed elapsed >
+                // 600ms → usableWhileRevalidate undefined → flake).
                 await cache.store([
                   {
                     id: uri,
                     ...emptyVary,
                     content,
+                    date: new Date(Date.now() - 30_000),
                     directives: {
-                      freshUntilAge: 0.01,
+                      freshUntilAge: 29,
                       maxStale: {
                         withoutRevalidation: 0,
-                        whileRevalidate: 0.6,
-                        ifError: 0.6,
+                        whileRevalidate: 3600,
+                        ifError: 3600,
                       },
                     },
                     validators: { etag: "w/11111" },
                   },
                 ]);
 
-                return delay(15).then(async () => {
-                  const res = await cache.get({
-                    id: uri,
-                    params: {},
-                    directives: {},
-                  });
-
-                  expect(res.usable).to.eq(undefined);
-                  expect(res.usableIfError).to.eq(undefined);
-                  expect(res.usableWhileRevalidate).to.deep.include({
-                    content,
-                    validators: { etag: "w/11111" },
-                  });
-                  expect(res.validatable).to.deep.eq([
-                    res.usableWhileRevalidate,
-                  ]);
+                const res = await cache.get({
+                  id: uri,
+                  params: {},
+                  directives: {},
                 });
+
+                expect(res.usable).to.eq(undefined);
+                expect(res.usableIfError).to.eq(undefined);
+                expect(res.usableWhileRevalidate).to.deep.include({
+                  content,
+                  validators: { etag: "w/11111" },
+                });
+                expect(res.validatable).to.deep.eq([
+                  res.usableWhileRevalidate,
+                ]);
               },
             );
           });
