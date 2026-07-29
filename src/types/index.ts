@@ -27,6 +27,7 @@ export type {
   ProducerResult,
   ProducerResultResource,
   ProducerResultResourceForId,
+  ProducerResultResourceObject,
   Vary,
 } from "./04_ProducerResult.js";
 export type {
@@ -42,6 +43,7 @@ export type {
   NormalizedConsumerMaxStale,
   NormalizedParams,
   NormalizedProducerDirectives,
+  NormalizedProducerMaxStale,
   NormalizedProducerResult,
   NormalizedProducerResultResource,
   NormalizedVary,
@@ -54,4 +56,4 @@ export type {
   StoreGetManyRequest,
   StoreGetManyResult,
 } from "./06_Store.js";
-export { components, type Logger } from "./07_Logger.js";
+export { components, type ComponentName, type Logger } from "./07_Logger.js";

@@ -71,6 +71,9 @@ export class NoProducerForResourceTypeError extends Error {
   }
 }
 
+// The unused `Params` is part of the public 2.0 contract's declared shape;
+// it's kept so params-dependent options can be added without a breaking change.
+// oxlint-disable-next-line no-unused-vars
 export type WrapProducerOptions<Params extends AnyParams> = {
   /**
    * Controls whether the function returned by `wrapProducer`/`wrapBulkProducer`

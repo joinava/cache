@@ -286,21 +286,34 @@ function checkMintedId(
 export function wrapComputingProducer<
   Input,
   RT extends ResourceTypes,
-  Covered extends ResourceTypeName<RT>,
+  // NOTE: `Covered`'s declared constraint is `string` rather than
+  // `ResourceTypeName<RT>` purely for inference: when a mapped type's key
+  // parameter has a constraint that depends on another inference variable
+  // (RT, inferred from `cache`), TS gives up inferring the template's other
+  // variables -- `Input` would collapse to `unknown` at every call site.
+  // Registry membership is still fully enforced: the per-key conditional in
+  // `branches` rejects non-registry keys, and the return type intersects
+  // `Covered` back down to the registry's names.
+  Covered extends string,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 >(
   cache: PublicInterface<Cache<RT, Validators, Params>>,
   options: WrapProducerOptions<Params> | undefined,
   branches: {
-    readonly [K in Covered]: ComputingBranch<Input, RT, K, Validators, Params>;
+    readonly [K in Covered]: K extends ResourceTypeName<RT>
+      ? ComputingBranch<Input, RT, K, Validators, Params>
+      : never;
   },
 ): (
   input: Input,
   options?: { signal?: AbortSignal },
 ) => Promise<
   Entry<
-    SpecForId<SpecOf<RT>, IdOfResourceType<RT[Covered]>>,
+    SpecForId<
+      SpecOf<RT>,
+      IdOfResourceType<RT[Covered & ResourceTypeName<RT>]>
+    >,
     Validators,
     Params
   >
@@ -337,11 +350,11 @@ export function wrapComputingProducer<
   // unresolved generic. Runtime dispatch upholds the contract: each producer
   // only ever receives ids its branch's `hashInput` minted (checked, below,
   // to classify to that branch's type before any request is made).
-  const wrapped = wrapProducer<RT, Covered, Validators, Params>(
+  const wrapped = wrapProducer<RT, Covered & ResourceTypeName<RT>, Validators, Params>(
     cache,
     options,
     producers as unknown as Parameters<
-      typeof wrapProducer<RT, Covered, Validators, Params>
+      typeof wrapProducer<RT, Covered & ResourceTypeName<RT>, Validators, Params>
     >[2],
   );
 
@@ -393,7 +406,9 @@ export function wrapComputingProducer<
 export function wrapBulkComputingProducer<
   Input,
   RT extends ResourceTypes,
-  Covered extends ResourceTypeName<RT>,
+  // See wrapComputingProducer for why this is `string`, not
+  // `ResourceTypeName<RT>`.
+  Covered extends string,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
   ErrorType extends Error = Error,
@@ -401,28 +416,27 @@ export function wrapBulkComputingProducer<
   cache: PublicInterface<Cache<RT, Validators, Params>>,
   options: WrapProducerOptions<Params> | undefined,
   branches: {
-    readonly [K in Covered]: Omit<
-      ComputingBranch<Input, RT, K, Validators, Params>,
-      "produce"
-    > & {
-      produce: (
-        // `input`s are `ReadonlyDeep` for the same reason as the single
-        // variant: they can be shared with other producer calls via the
-        // registry, so a producer must not mutate them.
-        inputs: readonly ReadonlyDeep<Input>[],
-        options?: { signal?: AbortSignal },
-      ) => Promise<
-        (
-          | ComputingProducerResult<
-              Input,
-              SpecForId<SpecOf<RT>, IdOfResourceType<RT[K]>>,
-              Validators,
-              Params
-            >
-          | ErrorType
-        )[]
-      >;
-    };
+    readonly [K in Covered]: K extends ResourceTypeName<RT>
+      ? Omit<ComputingBranch<Input, RT, K, Validators, Params>, "produce"> & {
+          produce: (
+            // `input`s are `ReadonlyDeep` for the same reason as the single
+            // variant: they can be shared with other producer calls via the
+            // registry, so a producer must not mutate them.
+            inputs: readonly ReadonlyDeep<Input>[],
+            options?: { signal?: AbortSignal },
+          ) => Promise<
+            (
+              | ComputingProducerResult<
+                  Input,
+                  SpecForId<SpecOf<RT>, IdOfResourceType<RT[K]>>,
+                  Validators,
+                  Params
+                >
+              | ErrorType
+            )[]
+          >;
+        }
+      : never;
   },
 ): (
   inputs: readonly Input[],
@@ -430,7 +444,10 @@ export function wrapBulkComputingProducer<
 ) => Promise<
   (
     | Entry<
-        SpecForId<SpecOf<RT>, IdOfResourceType<RT[Covered]>>,
+        SpecForId<
+          SpecOf<RT>,
+          IdOfResourceType<RT[Covered & ResourceTypeName<RT>]>
+        >,
         Validators,
         Params
       >
@@ -489,11 +506,11 @@ export function wrapBulkComputingProducer<
   );
 
   // SAFETY: same bridge as wrapComputingProducer's (see there).
-  const wrapped = wrapBulkProducer<RT, Covered, Validators, Params, ErrorType>(
+  const wrapped = wrapBulkProducer<RT, Covered & ResourceTypeName<RT>, Validators, Params, ErrorType>(
     cache,
     options,
     producers as unknown as Parameters<
-      typeof wrapBulkProducer<RT, Covered, Validators, Params, ErrorType>
+      typeof wrapBulkProducer<RT, Covered & ResourceTypeName<RT>, Validators, Params, ErrorType>
     >[2],
   );
 
