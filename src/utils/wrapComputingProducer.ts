@@ -17,6 +17,7 @@ import type {
 import type {
   AnyParams,
   AnyValidators,
+  ConsumerDirectives,
   Entry,
   ProducerResultResource,
   RequestPairedProducerResult,
@@ -66,15 +67,27 @@ import { wrapBulkProducer } from "./wrapBulkProducer.js";
  * branch accepts throws). With exactly one covered type, `matchesInput` is
  * unnecessary and ignored.
  *
- * ## Supplemental resources are keyed by input, not id
+ * ## Supplemental resources: input-keyed or id-keyed
  *
  * Like plain producers, a computing producer can return `supplementalResources`
- * — values it produced as a byproduct that are worth caching. The twist that
- * follows from keys being input-hashes: a supplemental is identified by the
- * **input** it would be computed from, not a bare id. The wrapper hashes each
- * supplemental's input with the producing branch's own `hashInput`, so a
- * later `compute(thatInput)` finds it as a cache hit. (A bare id would be
- * unreachable, since computing lookups only ever go through `hashInput`.)
+ * — values it produced as a byproduct that are worth caching. They come in
+ * two forms, distinguished by which key is present:
+ *
+ * - **Input-keyed** (`{ input, content, … }`): identified by the input the
+ *   value would be computed from. The wrapper routes the input through the
+ *   same `matchesInput` branch selection it applies to call-time inputs,
+ *   hashes it with the routed branch's `hashInput` (so any COVERED branch
+ *   can be the target, not just the producing one), and mint-checks the
+ *   result against that branch's type — a bad mint rejects the invocation
+ *   loudly, naming the branch. A later `compute(thatInput)` finds the entry
+ *   as a cache hit.
+ * - **Id-keyed** (`{ id, content, … }`, a plain {@link ProducerResultResource}):
+ *   for ANY registry type, covered or not — exactly what plain producers'
+ *   supplementals are. Classified by their own id at store time. This makes
+ *   computing wrappers used as "hashed-input producers" (for key privacy
+ *   rather than pure computation) full peers of `wrapProducer`: derive the
+ *   primary key by hashing, and still supplementally store other resources
+ *   under their natural ids.
  *
  * @module
  */
@@ -89,26 +102,47 @@ const HASH_CONCURRENCY = 10;
 /**
  * What a computing producer returns: like a plain
  * {@link RequestPairedProducerResult}, but the primary carries no `id` (it's
- * stamped on from the derived hash), and each `supplementalResources` entry is
- * identified by the **input** it would be computed from rather than a bare `id`
- * (otherwise it's a plain {@link ProducerResultResource}). The wrapper hashes
- * each supplemental's input to derive its storage id, so a supplemental is
- * reachable by a later `compute(input)`.
+ * stamped on from the derived hash), and each `supplementalResources` entry
+ * is either **input-keyed** (`{ input, … }` — hashed and mint-checked via
+ * the `matchesInput`-routed covered branch) or **id-keyed** (`{ id, … }` —
+ * a plain {@link ProducerResultResource} for any registry type, classified
+ * at store time). See the module docs.
  */
 export type ComputingProducerResult<
   Input,
   Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
+  /**
+   * The union of specs input-keyed supplementals may target. The wrappers
+   * pass every COVERED branch's spec (inputs route by `matchesInput`, so
+   * any covered branch can produce a supplemental); defaults to `Spec` so a
+   * bare 4-arg instantiation keeps the producing-branch-confined meaning.
+   */
+  CoveredSpec extends CacheSpec = Spec,
+  /**
+   * The union of specs id-keyed supplementals may target. The wrappers pass
+   * the FULL registry union (id-keyed supplementals are classified by their
+   * own id at store time, like plain producers').
+   */
+  RegistrySpec extends CacheSpec = Spec,
 > = Omit<
   RequestPairedProducerResult<Spec, Validators, Params>,
   "id" | "supplementalResources"
 > & {
-  supplementalResources?: (Spec extends unknown
-    ? Omit<ProducerResultResource<Spec, Validators, Params>, "id"> & {
-        input: Input;
-      }
-    : never)[];
+  supplementalResources?: (
+    | (CoveredSpec extends unknown
+        ? Omit<ProducerResultResource<CoveredSpec, Validators, Params>, "id"> & {
+            input: Input;
+            id?: never;
+          }
+        : never)
+    | (RegistrySpec extends unknown
+        ? ProducerResultResource<RegistrySpec, Validators, Params> & {
+            input?: never;
+          }
+        : never)
+  )[];
 };
 
 /**
@@ -121,6 +155,13 @@ export type ComputingBranch<
   K extends ResourceTypeName<RT>,
   Validators extends AnyValidators,
   Params extends AnyParams,
+  /**
+   * The wrapper's FULL coverage (every branch key), so `produce`'s
+   * supplemental type spans all covered branches' specs for input-keyed
+   * entries. Defaults to `K` (producing-branch-confined) for standalone
+   * instantiations; the wrappers pass their inferred `Covered`.
+   */
+  AllCovered extends ResourceTypeName<RT> = K,
 > = {
   /**
    * Input classifier for this branch. Required when the wrapper covers more
@@ -142,7 +183,9 @@ export type ComputingBranch<
       Input,
       SpecForId<SpecOf<RT>, IdOfResourceType<RT[K]>>,
       Validators,
-      Params
+      Params,
+      SpecForId<SpecOf<RT>, IdOfResourceType<RT[AllCovered]>>,
+      SpecOf<RT>
     >
   >;
 };
@@ -302,12 +345,19 @@ export function wrapComputingProducer<
   options: WrapProducerOptions<Params> | undefined,
   branches: {
     readonly [K in Covered]: K extends ResourceTypeName<RT>
-      ? ComputingBranch<Input, RT, K, Validators, Params>
+      ? ComputingBranch<
+          Input,
+          RT,
+          K,
+          Validators,
+          Params,
+          Covered & ResourceTypeName<RT>
+        >
       : never;
   },
 ): (
   input: Input,
-  options?: { signal?: AbortSignal },
+  options?: { directives?: ConsumerDirectives; signal?: AbortSignal },
 ) => Promise<
   Entry<
     SpecForId<
@@ -323,7 +373,11 @@ export function wrapComputingProducer<
     branches,
   );
   const registry = new InputRegistry<Input>();
-  const hashSupplementals = makeSupplementalHasher<Input>();
+  const hashSupplementals = makeSupplementalHasher<Input>(
+    "wrapComputingProducer",
+    branchEntries,
+    cache,
+  );
 
   // The internal producer for each branch recovers the branch's input from
   // the registry and hands it to the branch's `produce`. `registry.get` runs
@@ -340,7 +394,7 @@ export function wrapComputingProducer<
         const result = producerOptions
           ? await branch.produce(input, producerOptions)
           : await branch.produce(input);
-        return hashSupplementals(branch.hashInput, result);
+        return hashSupplementals(result);
       },
     ]),
   );
@@ -360,7 +414,7 @@ export function wrapComputingProducer<
 
   const wrappedComputingProducer = async (
     input: Input,
-    callOptions?: { signal?: AbortSignal },
+    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal },
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
@@ -374,10 +428,18 @@ export function wrapComputingProducer<
     registry.acquire(id, input);
     try {
       return await wrapped(
-        // SAFETY: bridges to `PartialConsumerRequest`, whose id is opaque
-        // against the plain `string` here while `RT` is generic; the id was
-        // just checked to classify to this branch's covered type.
-        { id } as unknown as Parameters<typeof wrapped>[0],
+        // SAFETY: bridges to `PartialConsumerRequest`, whose id/directives
+        // are `ReadonlyDeep`-wrapped and so opaque against the plain types
+        // here while `RT` is generic; the id was just checked to classify to
+        // this branch's covered type. The conditional spread avoids
+        // `directives: undefined` (rejected under
+        // `exactOptionalPropertyTypes`).
+        {
+          id,
+          ...(callOptions?.directives === undefined
+            ? {}
+            : { directives: callOptions.directives }),
+        } as unknown as Parameters<typeof wrapped>[0],
         signal ? { signal } : undefined,
       );
     } finally {
@@ -430,7 +492,12 @@ export function wrapBulkComputingProducer<
                   Input,
                   SpecForId<SpecOf<RT>, IdOfResourceType<RT[K]>>,
                   Validators,
-                  Params
+                  Params,
+                  SpecForId<
+                    SpecOf<RT>,
+                    IdOfResourceType<RT[Covered & ResourceTypeName<RT>]>
+                  >,
+                  SpecOf<RT>
                 >
               | ErrorType
             )[]
@@ -440,7 +507,7 @@ export function wrapBulkComputingProducer<
   },
 ): (
   inputs: readonly Input[],
-  options?: { signal?: AbortSignal },
+  options?: { directives?: ConsumerDirectives; signal?: AbortSignal },
 ) => Promise<
   (
     | Entry<
@@ -472,7 +539,11 @@ export function wrapBulkComputingProducer<
   ) as unknown as [string, LooseBulkBranch][];
   const branchesByName = new Map(branchEntries);
   const registry = new InputRegistry<Input>();
-  const hashSupplementals = makeSupplementalHasher<Input>();
+  const hashSupplementals = makeSupplementalHasher<Input>(
+    "wrapBulkComputingProducer",
+    branchEntries,
+    cache,
+  );
   // Bound concurrent input hashing (see HASH_CONCURRENCY); shared across calls.
   const hashLimit = pLimit(HASH_CONCURRENCY);
 
@@ -495,9 +566,7 @@ export function wrapBulkComputingProducer<
         return producerPromise.then(async (results) =>
           Promise.all(
             results.map(async (result) =>
-              result instanceof Error
-                ? result
-                : hashSupplementals(branch.hashInput, result),
+              result instanceof Error ? result : hashSupplementals(result),
             ),
           ),
         );
@@ -516,7 +585,7 @@ export function wrapBulkComputingProducer<
 
   const wrappedBulkComputingProducer = async (
     inputs: readonly Input[],
-    callOptions?: { signal?: AbortSignal },
+    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal },
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
@@ -551,8 +620,15 @@ export function wrapBulkComputingProducer<
     });
     try {
       return await wrapped(
-        // SAFETY: same bridge as wrapComputingProducer's (see there).
-        ids.map((id) => ({ id })) as unknown as Parameters<typeof wrapped>[0],
+        // SAFETY: same bridge as wrapComputingProducer's (see there). The
+        // call-level directives apply to every element (conditional spread
+        // for `exactOptionalPropertyTypes`, as in the single variant).
+        ids.map((id) => ({
+          id,
+          ...(callOptions?.directives === undefined
+            ? {}
+            : { directives: callOptions.directives }),
+        })) as unknown as Parameters<typeof wrapped>[0],
         signal ? { signal } : undefined,
       );
     } finally {
@@ -573,11 +649,17 @@ export function wrapBulkComputingProducer<
  * (which differs only by how supplementals are keyed); TS can't track the
  * distributive transform across the `Omit`/re-add.
  */
-function makeSupplementalHasher<Input>() {
-  // One limiter shared across every call of the returned hasher.
+function makeSupplementalHasher<Input>(
+  wrapperName: string,
+  branchEntries: readonly [
+    string,
+    Pick<LooseBranch<Input>, "matchesInput" | "hashInput">,
+  ][],
+  cache: { readonly name: string; classify: (id: string) => string },
+) {
+  // One limiter shared across every call of the returned resolver.
   const limit = pLimit(HASH_CONCURRENCY);
   return async (
-    hashInput: (input: Input) => string | Promise<string>,
     result: ComputingProducerResult<Input, CacheSpec, AnyValidators, AnyParams>,
   ): Promise<
     RequestPairedProducerResult<CacheSpec, AnyValidators, AnyParams>
@@ -596,8 +678,29 @@ function makeSupplementalHasher<Input>() {
       supplementalResources: await Promise.all(
         supplementalResources.map(async (resource) =>
           limit(async () => {
+            if (!("input" in resource)) {
+              // Id-keyed: a plain ProducerResultResource for any registry
+              // type, stored as-is (classified by its own id at store time,
+              // exactly like plain producers' supplementals).
+              return resource;
+            }
+            // Input-keyed: route to a covered branch with the same
+            // `matchesInput` selection applied to call-time inputs, hash
+            // with THAT branch's `hashInput`, and mint-check eagerly -- so
+            // a producer minting a bad supplemental id fails the invocation
+            // loudly (named branch) instead of a silent store-time
+            // rejection behind the wrappers' fire-and-forget store.
             const { input, ...rest } = resource;
-            return { ...rest, id: await Promise.resolve(hashInput(input)) };
+            const [branchName, branch] = findBranch(
+              wrapperName,
+              branchEntries,
+              input,
+            );
+            const id = await Promise.resolve(
+              branch.hashInput(input as Input),
+            );
+            checkMintedId(cache, branchName, id);
+            return { ...rest, id };
           }),
         ),
       ),
