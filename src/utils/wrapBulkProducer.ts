@@ -213,13 +213,10 @@ export function wrapBulkProducer<
   // the coverage check. The record's own entries are snapshotted (as in
   // wrapProducer) so a post-wrap mutation of the caller's record can't
   // change coverage later.
-  const looseProducers: Readonly<
-    Record<string, LooseBulkProducer<RT, Validators, Params, ErrorType>>
-  > = {
-    ...(producers as unknown as Readonly<
+  const looseProducers = { ...producers } as unknown as Readonly<
       Record<string, LooseBulkProducer<RT, Validators, Params, ErrorType>>
-    >),
-  };
+    >;
+
   const coveredResourceTypes = Object.keys(looseProducers);
 
   if (coveredResourceTypes.length === 0) {
