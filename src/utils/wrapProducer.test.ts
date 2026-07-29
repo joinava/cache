@@ -3,17 +3,19 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import { setTimeout as delay } from "timers/promises";
 import Cache from "../Cache.js";
-import { MemoryStore } from "../index.js";
+import { MemoryStore, soleResourceType } from "../index.js";
 import type {
   AnyParams,
   AnyValidators,
-  CacheSpec,
   RequestPairedProducerResult,
 } from "../types/index.js";
 import wrapProducer from "./wrapProducer.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 describe("wrapProducer", () => {
+  const resourceTypes = { main: soleResourceType<unknown>() };
+  const cacheOptions = { name: "wrap-producer-test", resourceTypes };
+
   let fetcher: ReturnType<
       typeof mock.fn<
         (it: {
@@ -25,7 +27,7 @@ describe("wrapProducer", () => {
     sut: ReturnType<typeof wrapProducer>;
 
   beforeEach(() => {
-    cache = new Cache(new MemoryStore());
+    cache = new Cache(new MemoryStore(), cacheOptions);
     fetcher = mock.fn(
       async (_req) =>
         ({
@@ -49,7 +51,9 @@ describe("wrapProducer", () => {
         }) satisfies RequestPairedProducerResult<any, any, any>,
     );
 
-    sut = wrapProducer(cache, { collapseOverlappingRequestsTime: 0 }, fetcher);
+    sut = wrapProducer(cache, { collapseOverlappingRequestsTime: 0 }, {
+      main: fetcher,
+    });
   });
 
   afterEach(async () => {
@@ -62,6 +66,19 @@ describe("wrapProducer", () => {
     expect(fetcher.mock.calls[0]?.arguments).to.deep.eq([
       { id: "myUrl", params: {}, directives: {} },
     ]);
+  });
+
+  it("should throw at construction time on a keyless producers record", () => {
+    expect(() => wrapProducer(cache, {}, {})).to.throw(/cannot be empty/);
+    expect(() =>
+      wrapProducer(
+        cache,
+        {},
+        // A bare producer function (the deleted 1.6.0 sugar) has no own
+        // enumerable keys, so it hits the same construction-time throw.
+        (async () => ({ content: 1, directives: { freshUntilAge: 1 } })) as any,
+      ),
+    ).to.throw(/cannot be empty/);
   });
 
   it("should add supplemental resources to the cache", async () => {
@@ -121,7 +138,7 @@ describe("wrapProducer", () => {
   it("should return the error if the fetcher rejects", async () => {
     const testError = new Error("test");
     const rejectingFetcher = mock.fn(async () => Promise.reject(testError));
-    const sut2 = wrapProducer(cache, {}, rejectingFetcher);
+    const sut2 = wrapProducer(cache, {}, { main: rejectingFetcher });
 
     return sut2({ id: "someUrl" }).then(
       () => {
@@ -164,7 +181,7 @@ describe("wrapProducer", () => {
       }
     });
 
-    const sut2 = wrapProducer(cache, {}, customTestFetcher);
+    const sut2 = wrapProducer(cache, {}, { main: customTestFetcher });
 
     const firstRes = await sut2({ id: "someUrl" });
     expect(firstRes).to.deep.include(testResult);
@@ -202,7 +219,7 @@ describe("wrapProducer", () => {
           directives: { freshUntilAge: 0 },
         }) satisfies RequestPairedProducerResult<any, any, any>,
     );
-    const sut2 = wrapProducer(cache, {}, resolveWithErrorFetcher);
+    const sut2 = wrapProducer(cache, {}, { main: resolveWithErrorFetcher });
 
     return sut2({ id: "someUrl2" }).then((it) => {
       expect(it).to.include({ content: test404 });
@@ -214,6 +231,7 @@ describe("wrapProducer", () => {
 
     // Even though producer says the data's good for 100ms,
     // it should get called twice if the client sets its maxAge to 0
+    // (bypass directives skip the cache read entirely).
     await sut({ id: randomId, directives: { maxAge: 0 } });
     await delay(5);
     await sut({ id: randomId, directives: { maxAge: 0 } });
@@ -224,13 +242,74 @@ describe("wrapProducer", () => {
     expect(fetcher.mock.callCount()).to.eq(2);
   });
 
+  describe("bypass directives (maxAge: 0)", () => {
+    it("should skip the cache read entirely but still store the result", async () => {
+      const storeGetSpy = mock.method(cache, "get");
+
+      // Bypass request: no cache read, producer contacted.
+      await sut({ id: "bypass-test", directives: { maxAge: 0 } });
+      expect(storeGetSpy.mock.callCount()).to.eq(0);
+      expect(fetcher.mock.callCount()).to.eq(1);
+
+      // The bypass result was still stored: a plain request now hits.
+      await delay(5);
+      await sut({ id: "bypass-test" });
+      expect(storeGetSpy.mock.callCount()).to.eq(1);
+      expect(fetcher.mock.callCount()).to.eq(1);
+    });
+
+    it("should collapse bypass requests only with identical-directive peers", async () => {
+      const slowFetcher = mock.fn(
+        async () =>
+          new Promise<RequestPairedProducerResult<any, any, any>>((resolve) => {
+            setTimeout(
+              () =>
+                resolve({
+                  content: "shared",
+                  directives: { freshUntilAge: 10 },
+                }),
+              40,
+            );
+          }),
+      );
+      const sut2 = wrapProducer(
+        cache,
+        { collapseOverlappingRequestsTime: 10 },
+        { main: slowFetcher },
+      );
+
+      const req = { id: "bypass-collapse", directives: { maxAge: 0 } };
+      // Two identical bypass requests collapse into one invocation; an
+      // overlapping bypass request with different directives does NOT join
+      // it (the collapse key includes the directives).
+      const [a, b, c] = await Promise.all([
+        sut2(req),
+        sut2(req),
+        sut2({
+          id: "bypass-collapse",
+          directives: {
+            maxAge: 0,
+            maxStale: {
+              withoutRevalidation: 0,
+              whileRevalidate: 0,
+              ifError: 0,
+            },
+          },
+        }),
+      ]);
+      expect(a.content).to.eq("shared");
+      expect(b.content).to.eq("shared");
+      expect(c.content).to.eq("shared");
+      expect(slowFetcher.mock.callCount()).to.eq(2);
+    });
+  });
+
   describe("the onCacheReadFailure setting", async () => {
     const err = new Error("Cache get error 2");
-    type BasicCacheSpec = CacheSpec<string, unknown>;
-    let mockCache: Cache<BasicCacheSpec, AnyValidators, AnyParams>;
+    let mockCache: Cache<typeof resourceTypes, AnyValidators, AnyParams>;
 
     beforeEach(() => {
-      mockCache = new Cache(new MemoryStore());
+      mockCache = new Cache(new MemoryStore(), cacheOptions);
       mockCache.get = async () => {
         throw err;
       };
@@ -244,10 +323,12 @@ describe("wrapProducer", () => {
       const wrappedProducer = wrapProducer(
         mockCache,
         { onCacheReadFailure: "throw" },
-        async ({ id }) => ({
-          content: id,
-          directives: { freshUntilAge: 1 },
-        }),
+        {
+          main: async ({ id }) => ({
+            content: id,
+            directives: { freshUntilAge: 1 },
+          }),
+        },
       );
 
       await wrappedProducer({ id: "test" }).then(
@@ -261,7 +342,7 @@ describe("wrapProducer", () => {
     });
 
     it("should call the producer if configured and cache's get method rejects", async () => {
-      const mockProducer = mock.fn(async ({ id }) => ({
+      const mockProducer = mock.fn(async ({ id }: { id: string }) => ({
         content: id,
         directives: { freshUntilAge: 1 },
       }));
@@ -269,7 +350,7 @@ describe("wrapProducer", () => {
       const wrappedProducer = wrapProducer(
         mockCache,
         { onCacheReadFailure: "call-producer" },
-        mockProducer,
+        { main: mockProducer },
       );
 
       const res = await wrappedProducer({ id: "test" });
@@ -277,12 +358,14 @@ describe("wrapProducer", () => {
     });
 
     it("should call the producer by default if cache's get method rejects", async () => {
-      const mockProducer = mock.fn(async ({ id }) => ({
+      const mockProducer = mock.fn(async ({ id }: { id: string }) => ({
         content: id,
         directives: { freshUntilAge: 1 },
       }));
 
-      const wrappedProducer = wrapProducer(mockCache, {}, mockProducer);
+      const wrappedProducer = wrapProducer(mockCache, {}, {
+        main: mockProducer,
+      });
 
       const res = await wrappedProducer({ id: "test" });
       expect(res.content).to.eq("test");
@@ -311,11 +394,8 @@ describe("wrapProducer", () => {
     it("should reject if signal is aborted before the cache read completes (i.e., before producer is called)", async () => {
       const controller = new AbortController();
       let cacheGetResolve: (v: any) => void;
-      type BasicCacheSpec = CacheSpec<string, unknown>;
 
-      const mockCache = new Cache<BasicCacheSpec, AnyValidators, AnyParams>(
-        new MemoryStore(),
-      );
+      const mockCache = new Cache(new MemoryStore(), cacheOptions);
 
       // Make cache.get hang until we resolve it manually, simulating a slow
       // cache read during which the signal fires.
@@ -332,7 +412,7 @@ describe("wrapProducer", () => {
       const sut2 = wrapProducer(
         mockCache,
         { collapseOverlappingRequestsTime: 0 },
-        producerFn,
+        { main: producerFn },
       );
 
       const resultPromise = sut2(
@@ -343,8 +423,8 @@ describe("wrapProducer", () => {
       await delay(5);
       controller.abort(new Error("cancelled-during-read"));
 
-      // Resolve the cache read after the abort — the throwIfAborted checkpoint
-      // after the cache read should fire.
+      // Resolve the cache read after the abort — the abort checkpoint after
+      // the cache read should fire.
       cacheGetResolve!({ validatable: [] });
 
       try {
@@ -381,7 +461,7 @@ describe("wrapProducer", () => {
       const slowSut = wrapProducer(
         cache,
         { collapseOverlappingRequestsTime: 0 },
-        slowFetcher,
+        { main: slowFetcher },
       );
 
       const resultPromise = slowSut(
@@ -409,33 +489,6 @@ describe("wrapProducer", () => {
       expect(slowFetcher.mock.callCount()).to.eq(1);
     });
 
-    it("should pass signal through to the producer for uncacheable requests", async () => {
-      const controller = new AbortController();
-      let receivedSignal: AbortSignal | undefined;
-
-      const signalCapturingFetcher = mock.fn(
-        async (_req: any, opts?: { signal?: AbortSignal }) => {
-          receivedSignal = opts?.signal;
-          return {
-            content: "test",
-            directives: { freshUntilAge: 1 },
-          } satisfies RequestPairedProducerResult<any, any, any>;
-        },
-      );
-
-      const sut2 = wrapProducer(
-        cache,
-        {
-          collapseOverlappingRequestsTime: 0,
-          isCacheable: () => false,
-        },
-        signalCapturingFetcher,
-      );
-
-      await sut2({ id: "signal-test" }, { signal: controller.signal });
-      expect(receivedSignal).to.eq(controller.signal);
-    });
-
     it("should reject the aborting caller but not the other, and still store the collapsed result", async () => {
       const controller = new AbortController();
 
@@ -456,7 +509,7 @@ describe("wrapProducer", () => {
       const collapsingSut = wrapProducer(
         cache,
         { collapseOverlappingRequestsTime: 10 },
-        slowFetcher,
+        { main: slowFetcher },
       );
 
       const req = { id: "collapse-abort-store" };
@@ -514,7 +567,7 @@ describe("wrapProducer", () => {
       const errorProducer = mock.fn(async () => {
         throw new Error("producer-error");
       });
-      const sut2 = wrapProducer(cache, {}, errorProducer);
+      const sut2 = wrapProducer(cache, {}, { main: errorProducer });
 
       // With an already-aborted signal, the call should reject immediately
       // (before even checking the cache or calling the producer)
@@ -530,13 +583,7 @@ describe("wrapProducer", () => {
 
     it("should not treat abort errors as cache read failures eligible for fallback", async () => {
       const controller = new AbortController();
-      const mockCache = new Cache<
-        CacheSpec<string, unknown>,
-        AnyValidators,
-        AnyParams
-      >(
-        new MemoryStore<CacheSpec<string, unknown>, AnyValidators, AnyParams>(),
-      );
+      const mockCache = new Cache(new MemoryStore(), cacheOptions);
 
       // Make cache.get throw an abort error
       mockCache.get = async (_req, options) => {
@@ -552,7 +599,7 @@ describe("wrapProducer", () => {
       const sut2 = wrapProducer(
         mockCache,
         { onCacheReadFailure: "call-producer" },
-        producerFn,
+        { main: producerFn },
       );
 
       controller.abort(new Error("aborted-during-cache-read"));

@@ -14,6 +14,7 @@ import {
 import Cache from "../Cache.js";
 import {
   MemoryStore,
+  soleResourceType,
   wrapProducer,
   type ProducerDirectives,
 } from "../index.js";
@@ -23,28 +24,33 @@ import { type mapTuple } from "./utils.js";
 import { wrapBulkProducer } from "./wrapBulkProducer.js";
 
 describe("wrapBulkProducer", () => {
+  const cacheOptions = {
+    name: "wrap-bulk-producer-test",
+    resourceTypes: { main: soleResourceType<unknown>() },
+  };
+
   describe("one request given", () => {
     describe("the requested id is usable in the cache", () => {
       it("should return the result from the cache, mimicking wrapProducer", async () => {
         await fc.assert(
           fc.asyncProperty(UsableEntryArb, async ({ entry, consumerDirs }) => {
             const store = new MemoryStore();
-            const cache = new Cache(store);
+            const cache = new Cache(store, cacheOptions);
             try {
               await store.store([{ entry, maxStoreForSeconds: 100 }]);
 
-              const producer = mock.fn(function (_) {
+              const producer = mock.fn(function (_: unknown) {
                 throw new Error("not called");
               });
               const wrappedProducer = wrapProducer(
                 cache,
                 { collapseOverlappingRequestsTime: 0 },
-                producer,
+                { main: producer },
               );
               const wrappedBulkProducer = wrapBulkProducer(
                 cache,
                 { collapseOverlappingRequestsTime: 0 },
-                producer,
+                { main: producer },
               );
 
               const request = { id: entry.id, directives: consumerDirs };
@@ -81,7 +87,7 @@ describe("wrapBulkProducer", () => {
               const store = new MemoryStore();
               const storeMock = mock.method(store, "store");
 
-              const cache = new Cache(store);
+              const cache = new Cache(store, cacheOptions);
               try {
                 await store.store([{ entry, maxStoreForSeconds: 100 }]);
                 storeMock.mock.resetCalls();
@@ -89,12 +95,12 @@ describe("wrapBulkProducer", () => {
                 const singleProducer = mock.fn(producerBase);
                 const bulkProducer = mock.fn(bulkProducerBase);
 
-                const wrappedProducer = wrapProducer(cache, {}, singleProducer);
-                const wrappedBulkProducer = wrapBulkProducer(
-                  cache,
-                  {},
-                  bulkProducer,
-                );
+                const wrappedProducer = wrapProducer(cache, {}, {
+                  main: singleProducer,
+                });
+                const wrappedBulkProducer = wrapBulkProducer(cache, {}, {
+                  main: bulkProducer,
+                });
 
                 const request = { id: entry.id, directives: consumerDirs };
                 const [result, bulkResult] = await Promise.all([
@@ -131,7 +137,7 @@ describe("wrapBulkProducer", () => {
               const store = new MemoryStore();
               const storeMock = mock.method(store, "store");
 
-              const cache = new Cache(store);
+              const cache = new Cache(store, cacheOptions);
               try {
                 await store.store([{ entry, maxStoreForSeconds: 100 }]);
                 storeMock.mock.resetCalls();
@@ -145,12 +151,12 @@ describe("wrapBulkProducer", () => {
                   },
                 );
 
-                const wrappedProducer = wrapProducer(cache, {}, singleProducer);
-                const wrappedBulkProducer = wrapBulkProducer(
-                  cache,
-                  {},
-                  bulkProducer,
-                );
+                const wrappedProducer = wrapProducer(cache, {}, {
+                  main: singleProducer,
+                });
+                const wrappedBulkProducer = wrapBulkProducer(cache, {}, {
+                  main: bulkProducer,
+                });
 
                 const request = { id: entry.id, directives: consumerDirs };
                 const [result, bulkResult] = await Promise.all([
@@ -187,7 +193,7 @@ describe("wrapBulkProducer", () => {
             fc.boolean(),
             async ({ entry, consumerDirs }, shouldStoreEntry) => {
               const store = new MemoryStore();
-              const cache = new Cache(store);
+              const cache = new Cache(store, cacheOptions);
               try {
                 if (shouldStoreEntry) {
                   await store.store([{ entry, maxStoreForSeconds: 100 }]);
@@ -196,12 +202,12 @@ describe("wrapBulkProducer", () => {
                 const singleProducer = mock.fn(producerBase);
                 const bulkProducer = mock.fn(bulkProducerBase);
 
-                const wrappedProducer = wrapProducer(cache, {}, singleProducer);
-                const wrappedBulkProducer = wrapBulkProducer(
-                  cache,
-                  {},
-                  bulkProducer,
-                );
+                const wrappedProducer = wrapProducer(cache, {}, {
+                  main: singleProducer,
+                });
+                const wrappedBulkProducer = wrapBulkProducer(cache, {}, {
+                  main: bulkProducer,
+                });
 
                 const request = { id: entry.id, directives: consumerDirs };
                 const [result, bulkResult] = await Promise.all([
@@ -238,10 +244,19 @@ describe("wrapBulkProducer", () => {
                 minLength: 0,
                 maxLength: 5,
               }),
-              Unusable: fc.array(UnusableEntryArb, {
-                minLength: 0,
-                maxLength: 5,
-              }),
+              // Exclude bypass (maxAge: 0) directives: in 2.0 those skip the
+              // cache read and form their own producer invocation, which is
+              // deliberate behavior tested separately -- this test is about
+              // mixed *cache* states.
+              Unusable: fc.array(
+                UnusableEntryArb.filter(
+                  ({ consumerDirs }) => consumerDirs.maxAge !== 0,
+                ),
+                {
+                  minLength: 0,
+                  maxLength: 5,
+                },
+              ),
               Unstored: fc.array(UsableEntryArb, {
                 minLength: 0,
                 maxLength: 5,
@@ -282,7 +297,7 @@ describe("wrapBulkProducer", () => {
             Unstored,
           }) => {
             const store = new MemoryStore();
-            const cache = new Cache(store);
+            const cache = new Cache(store, cacheOptions);
             try {
               const unstoredIds = Unstored.map(({ entry }) => entry.id);
 
@@ -329,11 +344,9 @@ describe("wrapBulkProducer", () => {
                 }),
               );
 
-              const wrappedBulkProducer = wrapBulkProducer(
-                cache,
-                {},
-                bulkProducer,
-              );
+              const wrappedBulkProducer = wrapBulkProducer(cache, {}, {
+                main: bulkProducer,
+              });
 
               const results = await wrappedBulkProducer(
                 storableGeneratedData
@@ -406,126 +419,67 @@ describe("wrapBulkProducer", () => {
       );
     });
 
-    it("should bypass cache for uncacheable requests and call producer directly", async () => {
-      await fc.assert(
-        fc.asyncProperty(
-          fc.array(
-            fc.record({
-              id: fc.string({ minLength: 1, maxLength: 5 }),
-              params: fc.record({}),
-              directives: fc.record({}),
-            }),
-            { minLength: 0, maxLength: 3 },
-          ),
-          fc.array(
-            fc.record({
-              id: fc.string({ minLength: 6, maxLength: 10 }),
-              params: fc.record({}),
-              directives: fc.record({}),
-            }),
-            { minLength: 0, maxLength: 3 },
-          ),
-          async (cacheableRequests, uncacheableRequests) => {
-            const store = new MemoryStore();
-            const cache = new Cache(store);
-            try {
-              const reqIsCacheable = (id: string) => id.length < 6;
-              const requests = [...cacheableRequests, ...uncacheableRequests];
-              const returnErrorForRequest = (id: string) => id.startsWith("a");
+    it("should skip the cache read for bypass (maxAge: 0) requests and call the producer directly", async () => {
+      const store = new MemoryStore();
+      const cache = new Cache(store, cacheOptions);
+      try {
+        const plainRequests = [{ id: "plain-a" }, { id: "plain-b" }];
+        const bypassRequests = [
+          { id: "bypass-a", directives: { maxAge: 0 } },
+          { id: "bypass-b", directives: { maxAge: 0 } },
+        ];
+        const requests = [...plainRequests, ...bypassRequests];
 
-              const bulkProducer = mock.fn(
-                async (reqs: readonly { id: string }[]) => {
-                  return Promise.all(
-                    reqs.map(async (req) =>
-                      returnErrorForRequest(req.id)
-                        ? new Error("Producer Failure")
-                        : {
-                            content: `content-${req.id}`,
-                            directives: { freshUntilAge: 10 },
-                          },
-                    ),
-                  );
-                },
-              );
+        const bulkProducer = mock.fn(
+          async (reqs: readonly { id: string }[]) =>
+            reqs.map((req) => ({
+              content: `content-${req.id}`,
+              directives: { freshUntilAge: 10 },
+            })),
+        );
 
-              // Create a wrapped bulk producer that caches some requests but not others.
-              const wrappedBulkProducer = wrapBulkProducer(
-                cache,
-                {
-                  collapseOverlappingRequestsTime: 0,
-                  isCacheable: reqIsCacheable,
-                },
-                bulkProducer,
-              );
+        const wrappedBulkProducer = wrapBulkProducer(
+          cache,
+          { collapseOverlappingRequestsTime: 0 },
+          { main: bulkProducer },
+        );
 
-              // Call wrapBulkProducer once
-              await wrappedBulkProducer(requests);
+        // First call: the bypass requests go straight to the producer (as
+        // their own batch, kicked off before the cache read), and the plain
+        // requests miss, producing a second batch.
+        await wrappedBulkProducer(requests);
+        assert.equal(bulkProducer.mock.callCount(), 2);
+        assert.deepEqual(
+          bulkProducer.mock.calls[0]?.arguments[0],
+          bypassRequests.map(completeRequest),
+          "first producer call should be the bypass batch",
+        );
+        assert.deepEqual(
+          bulkProducer.mock.calls[1]?.arguments[0],
+          plainRequests.map(completeRequest),
+          "second producer call should be the plain misses",
+        );
 
-              // Expect the bulk producer to have been called once for the
-              // uncacheable requests, if any, with those requests' ids, and
-              // once for the cacheable requests, if any.
-              if (uncacheableRequests.length > 0) {
-                const uncacheableRequestsCall = bulkProducer.mock.calls[0];
-                assert.deepEqual(
-                  uncacheableRequestsCall?.arguments[0],
-                  uncacheableRequests.map(completeRequest),
-                  "first producer call should include all uncacheable requests",
-                );
-              }
+        // Second call: the plain requests now hit the cache, while the
+        // bypass requests still reach the producer (guaranteed contact).
+        bulkProducer.mock.resetCalls();
+        const results = await wrappedBulkProducer(requests);
 
-              if (cacheableRequests.length > 0) {
-                const cacheableRequestsCall =
-                  bulkProducer.mock.calls[
-                    uncacheableRequests.length > 0 ? 1 : 0
-                  ];
+        assert.equal(bulkProducer.mock.callCount(), 1);
+        assert.deepEqual(
+          bulkProducer.mock.calls[0]?.arguments[0],
+          bypassRequests.map(completeRequest),
+        );
 
-                assert.deepEqual(
-                  cacheableRequestsCall?.arguments[0],
-                  cacheableRequests.map(completeRequest),
-                  "second producer call should include all cacheable requests",
-                );
-              }
-
-              // Now, call the wrapped producer again, and verify that the
-              // uncacheable requests still hit the producer, while the
-              // cacheable requests hit the cache.
-              bulkProducer.mock.resetCalls();
-              await wrappedBulkProducer(requests);
-
-              // ONLY calls the producer for the uncacheable requests, OR
-              // cacheable requests that produced an error on the last call,
-              // since the other cacheable requests are already cached.
-              const failedCacheableRequests = cacheableRequests.filter((it) =>
-                returnErrorForRequest(it.id),
-              );
-
-              assert.equal(
-                bulkProducer.mock.callCount(),
-                (uncacheableRequests.length > 0 ? 1 : 0) +
-                  (failedCacheableRequests.length > 0 ? 1 : 0),
-              );
-
-              if (uncacheableRequests.length > 0) {
-                assert.deepEqual(
-                  bulkProducer.mock.calls[0]?.arguments[0],
-                  uncacheableRequests.map(completeRequest),
-                );
-              }
-
-              if (failedCacheableRequests.length > 0) {
-                assert.deepEqual(
-                  bulkProducer.mock.calls[
-                    uncacheableRequests.length > 0 ? 1 : 0
-                  ]?.arguments[0],
-                  failedCacheableRequests.map(completeRequest),
-                );
-              }
-            } finally {
-              await cache.close();
-            }
-          },
-        ),
-      );
+        // ...and every element still resolved, in order.
+        const entries = results as Exclude<(typeof results)[number], Error>[];
+        assert.deepEqual(
+          entries.map((it) => it.content),
+          requests.map((it) => `content-${it.id}`),
+        );
+      } finally {
+        await cache.close();
+      }
     });
 
     it("should maintain result order matching input request order", async () => {
@@ -551,7 +505,7 @@ describe("wrapBulkProducer", () => {
           async (cachedRequests, uncachedRequests) => {
             // Create fresh cache and pre-populate with some entries
             const store = new MemoryStore();
-            const cache = new Cache(store);
+            const cache = new Cache(store, cacheOptions);
 
             const genericError = new Error("test");
 
@@ -589,7 +543,7 @@ describe("wrapBulkProducer", () => {
               const wrappedBulk = wrapBulkProducer(
                 cache,
                 { collapseOverlappingRequestsTime: 0 },
-                bulkProducer,
+                { main: bulkProducer },
               );
 
               // Call wrapBulkProducer with the requests
@@ -614,7 +568,7 @@ describe("wrapBulkProducer", () => {
     describe("onCacheReadFailure option", () => {
       it("should throw when cache read fails and onCacheReadFailure is 'throw'", async () => {
         const store = new MemoryStore();
-        const cache = new Cache(store);
+        const cache = new Cache(store, cacheOptions);
 
         // Mock cache.getMany to simulate a cache read failure
         const originalGetMany = cache.getMany.bind(cache);
@@ -633,7 +587,7 @@ describe("wrapBulkProducer", () => {
           const wrappedBulkProducer = wrapBulkProducer(
             cache,
             { onCacheReadFailure: "throw" },
-            bulkProducer,
+            { main: bulkProducer },
           );
 
           await assert.rejects(
@@ -651,7 +605,7 @@ describe("wrapBulkProducer", () => {
 
       it("should fall back to producer when cache read fails and onCacheReadFailure is 'call-producer'", async () => {
         const store = new MemoryStore();
-        const cache = new Cache(store);
+        const cache = new Cache(store, cacheOptions);
 
         // Mock cache.getMany to simulate a cache read failure
         const originalGetMany = cache.getMany.bind(cache);
@@ -670,7 +624,7 @@ describe("wrapBulkProducer", () => {
           const wrappedBulkProducer = wrapBulkProducer(
             cache,
             { onCacheReadFailure: "call-producer" },
-            bulkProducer,
+            { main: bulkProducer },
           );
 
           const _results = await wrappedBulkProducer([
@@ -699,7 +653,7 @@ describe("wrapBulkProducer", () => {
     describe("collapseOverlappingRequestsTime option", () => {
       it("should collapse identical overlapping requests within time window", async () => {
         const store = new MemoryStore();
-        const cache = new Cache(store);
+        const cache = new Cache(store, cacheOptions);
 
         try {
           let callCount = 0;
@@ -717,7 +671,7 @@ describe("wrapBulkProducer", () => {
           const wrappedBulkProducer = wrapBulkProducer(
             cache,
             { collapseOverlappingRequestsTime: 1 }, // 1 second window
-            bulkProducer,
+            { main: bulkProducer },
           );
 
           // Make multiple overlapping requests for the same resources
@@ -749,7 +703,7 @@ describe("wrapBulkProducer", () => {
 
       it("should not collapse requests outside the time window", async () => {
         const store = new MemoryStore();
-        const cache = new Cache(store);
+        const cache = new Cache(store, cacheOptions);
 
         try {
           let callCount = 0;
@@ -766,7 +720,7 @@ describe("wrapBulkProducer", () => {
           const wrappedBulkProducer = wrapBulkProducer(
             cache,
             { collapseOverlappingRequestsTime: 0.05 }, // 50ms window
-            bulkProducer,
+            { main: bulkProducer },
           );
 
           // Make requests with delay between them
@@ -793,7 +747,7 @@ describe("wrapBulkProducer", () => {
     describe("supplemental resources", () => {
       it("should cache supplemental resources returned by the bulk producer", async () => {
         const store = new MemoryStore();
-        const cache = new Cache(store);
+        const cache = new Cache(store, cacheOptions);
 
         try {
           const bulkProducer = mock.fn(
@@ -813,7 +767,9 @@ describe("wrapBulkProducer", () => {
             },
           );
 
-          const wrappedBulkProducer = wrapBulkProducer(cache, {}, bulkProducer);
+          const wrappedBulkProducer = wrapBulkProducer(cache, {}, {
+            main: bulkProducer,
+          });
 
           // Request main resources
           const results = await wrappedBulkProducer([
@@ -857,7 +813,7 @@ describe("wrapBulkProducer", () => {
   describe("AbortSignal support", () => {
     it("should reject immediately with an already-aborted signal", async () => {
       const store = new MemoryStore();
-      const cache = new Cache(store);
+      const cache = new Cache(store, cacheOptions);
 
       try {
         const producer = mock.fn(
@@ -868,7 +824,7 @@ describe("wrapBulkProducer", () => {
             })),
         );
 
-        const wrappedBulk = wrapBulkProducer(cache, {}, producer);
+        const wrappedBulk = wrapBulkProducer(cache, {}, { main: producer });
 
         const controller = new AbortController();
         controller.abort(new Error("pre-aborted"));
@@ -890,14 +846,14 @@ describe("wrapBulkProducer", () => {
 
     it("should reject if signal fires before the cache read completes (i.e., before producer is called)", async () => {
       const store = new MemoryStore();
-      const cache = new Cache(store);
+      const cache = new Cache(store, cacheOptions);
 
-      let cacheGetManyResolve: (v: any) => void;
+      let cacheGetManyResolve: (v: unknown) => void;
       const originalGetMany = cache.getMany.bind(cache);
-      cache.getMany = () =>
+      cache.getMany = (() =>
         new Promise((resolve) => {
-          cacheGetManyResolve = resolve;
-        });
+          cacheGetManyResolve = resolve as (v: unknown) => void;
+        })) as typeof cache.getMany;
 
       try {
         const controller = new AbortController();
@@ -912,7 +868,7 @@ describe("wrapBulkProducer", () => {
         const wrappedBulk = wrapBulkProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          producer,
+          { main: producer },
         );
 
         const resultPromise = wrappedBulk(
@@ -923,7 +879,7 @@ describe("wrapBulkProducer", () => {
         await delay(5);
         controller.abort(new Error("cancelled-during-read"));
 
-        // Resolve the cache read after the abort — the throwIfAborted checkpoint
+        // Resolve the cache read after the abort — the abort checkpoint
         // should fire.
         cacheGetManyResolve!([{ validatable: [] }]);
 
@@ -941,7 +897,7 @@ describe("wrapBulkProducer", () => {
 
     it("should reject when signal is aborted mid-producer, but still store the producer's result", async () => {
       const store = new MemoryStore();
-      const cache = new Cache(store);
+      const cache = new Cache(store, cacheOptions);
 
       try {
         const controller = new AbortController();
@@ -966,7 +922,7 @@ describe("wrapBulkProducer", () => {
         const wrappedBulk = wrapBulkProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          slowProducer,
+          { main: slowProducer },
         );
 
         const resultPromise = wrappedBulk(
@@ -995,46 +951,9 @@ describe("wrapBulkProducer", () => {
       }
     });
 
-    it("should pass signal through to the producer for uncacheable requests", async () => {
-      const store = new MemoryStore();
-      const cache = new Cache(store);
-
-      try {
-        const controller = new AbortController();
-        let receivedSignal: AbortSignal | undefined;
-
-        const signalCapturingProducer = mock.fn(
-          async (
-            reqs: readonly { id: string }[],
-            opts?: { signal?: AbortSignal },
-          ) => {
-            receivedSignal = opts?.signal;
-            return reqs.map((r) => ({
-              content: `c-${r.id}`,
-              directives: { freshUntilAge: 1 },
-            }));
-          },
-        );
-
-        const wrappedBulk = wrapBulkProducer(
-          cache,
-          { isCacheable: () => false },
-          signalCapturingProducer,
-        );
-
-        await wrappedBulk(
-          [{ id: "signal-test" }],
-          { signal: controller.signal },
-        );
-        assert.equal(receivedSignal, controller.signal);
-      } finally {
-        await cache.close();
-      }
-    });
-
     it("should still return cache hits even when signal is provided", async () => {
       const store = new MemoryStore();
-      const cache = new Cache(store);
+      const cache = new Cache(store, cacheOptions);
 
       try {
         const producer = mock.fn(
@@ -1048,7 +967,7 @@ describe("wrapBulkProducer", () => {
         const wrappedBulk = wrapBulkProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          producer,
+          { main: producer },
         );
 
         // Populate cache
@@ -1073,14 +992,17 @@ describe("wrapBulkProducer", () => {
 
     it("should not treat abort errors as cache read failures eligible for fallback", async () => {
       const store = new MemoryStore();
-      const cache = new Cache(store);
+      const cache = new Cache(store, cacheOptions);
 
       // Make cache.getMany throw an abort error
       const originalGetMany = cache.getMany.bind(cache);
-      cache.getMany = async (_reqs, options) => {
+      cache.getMany = (async (
+        _reqs: Parameters<typeof originalGetMany>[0],
+        options?: { signal?: AbortSignal },
+      ) => {
         options?.signal?.throwIfAborted();
         return originalGetMany(_reqs);
-      };
+      }) as typeof cache.getMany;
 
       try {
         const producer = mock.fn(
@@ -1094,7 +1016,7 @@ describe("wrapBulkProducer", () => {
         const wrappedBulk = wrapBulkProducer(
           cache,
           { onCacheReadFailure: "call-producer" },
-          producer,
+          { main: producer },
         );
 
         const controller = new AbortController();

@@ -14,18 +14,46 @@ The `Cache` class can only function with a "backing store" that actually holds t
 
 Note that not all backing stores will be able to store all kinds of data, although it's recommended that general-purpose stores be able to store any data that's JSON-serializable. Store implementations can communicate the type of data they support by adding a constraint on their first type parameter, e.g., a store with the signature `class MyStore<Spec extends CacheSpec<string, string[]>, ...>` is indicating that it can only store string arrays. Trying to use a store with a `Cache` instance parameterized for entries of different types will yield a type error.
 
-### Per-id content typing (heterogeneous caches)
+Stores never see resource-type names or classification (below); those are entirely a `Cache` concern, so any `Store` implementation works unchanged.
 
-The `Cache` class is parameterized by a [`CacheSpec`](./src/types/00_CacheSpec.ts), which pairs each `id` type with the corresponding `content` type. In the simple case, all ids return the same kind of content, and `Spec` can stay as the default. To support multiple id-to-content mappings within a single cache, pass a _union_ of `CacheSpec`s; the cache's `get`/`store`/`getMany` methods then narrow the content type based on each request's id, and reject mismatched (id, content) pairs at compile time.
+### The resource-type registry
 
-For example, a cache that holds both individual stories and collections of stories:
+Every `Cache` is built over a **resource-type registry** ([`ResourceTypes`](./src/types/00_ResourceTypes.ts)): a record naming each *kind* of resource the cache can hold, pairing a runtime classifier for that kind's id sub-space (`matches`) with its content type (a type-level phantom). Both constructor options are required:
 
 ```ts
-type StoriesCacheSpec =
-  | CacheSpec<`story:${string}`, Story>
-  | CacheSpec<`collection:${string}`, Story[]>;
+const storiesResourceTypes = {
+  story: resourceType<Story>()({ matches: idStartsWith("story:") }),
+  collection: resourceType<Story[]>()({ matches: idStartsWith("collection:") }),
+} satisfies ResourceTypes;
 
-const cache = new Cache<StoriesCacheSpec>(new MemoryStore());
+const cache = new Cache(store, {
+  name: "stories", // names this cache instance in every diagnostics message
+  resourceTypes: storiesResourceTypes,
+});
+```
+
+The registry's `matches` guards must **partition the id space**: for every id the cache will ever see (requests, primary results, supplemental results, deletes), exactly one entry must match. `cache.classify(id)` evaluates *every* guard: zero matches throws `UnclassifiableIdError`, two or more throws `AmbiguousResourceTypeError` — fail loud over first-match-wins, so a registry overlap is caught the first time it occurs. Classification runs on every `get`/`getMany` request id, every stored entry id (primary *and* supplemental, all validated before anything persists — a producer minting a malformed id can't write a permanently unreadable row), and every `delete` id. Guards should be cheap (prefix checks preferred); ids must carry their type in-band: **an id must be classifiable by inspection**.
+
+Single-type caches can use `soleResourceType`:
+
+```ts
+const cache = new Cache(store, {
+  name: "zendesk_ticket_schemas",
+  resourceTypes: {
+    ticket_schema: soleResourceType<TicketSchema, `zendesk-ticket-schema:${string}`>(),
+  },
+});
+```
+
+Its runtime guard is trivially true (classification never fails on a sole-type cache), while the optional second type argument still narrows the id space *at the type level* — template-literal and branded ids flow through to every request, producer, and entry type. When runtime enforcement is wanted too, write the one-entry registry with a real guard instead.
+
+### Per-id content typing (heterogeneous caches)
+
+The cache's [`CacheSpec`](./src/types/00_CacheSpec.ts) union — which pairs each `id` type with the corresponding `content` type — is **derived from the registry** via `SpecOf`, so the two can never drift:
+
+```ts
+type StoriesCacheSpec = SpecOf<typeof storiesResourceTypes>;
+// = CacheSpec<`story:${string}`, Story> | CacheSpec<`collection:${string}`, Story[]>
 
 // Per-id content narrowing on read:
 const storyRes = await cache.get({ id: "story:1", params: {}, directives: {} });
@@ -44,34 +72,6 @@ await cache.store([
 
 This is particularly useful when a producer that fetches a collection wants to additionally cache each individual entry (via `supplementalResources`), so that point lookups for each entry by id can also be served by the same cache.
 
-#### Single-id-type vs. multi-id-type producers
-
-`RequestPairedProducer` automatically takes one of two shapes depending on whether your `Spec` is a single `CacheSpec` or a union:
-
-- **Single-id-type mode** (one `CacheSpec` variant — the most common case): the producer is a plain non-generic function `(req) => Promise<RequestPairedProducerResult<...>>`. There's only one possible content type, so per-id correlation is trivial.
-- **Multi-id-type mode** (a union of `CacheSpec`s): the producer is generic over the request's specific id, so its return must match the spec variant that id selects. TypeScript can't narrow a free type parameter via runtime checks on `req.id`, so the recommended way to write a multi-id-type producer is via [`producerByIdType`](./src/utils/producerByIdType.ts):
-
-```ts
-const fetcher = wrapProducer<StoriesCacheSpec>(
-  cache,
-  options,
-  producerByIdType<StoriesCacheSpec>()
-    .when(idStartsWith("story:"), async (req) => ({
-      // req.id: `story:${string}`  ⇒  TS requires `content: Story`
-      content: { id: req.id, title: `Story ${req.id}` },
-      directives: { freshUntilAge: 60 },
-    }))
-    .when(idStartsWith("collection:"), async (req) => ({
-      // req.id: `collection:${string}`  ⇒  TS requires `content: Story[]`
-      content: [{ id: "1", title: "a" }, { id: "2", title: "b" }],
-      directives: { freshUntilAge: 60 },
-    }))
-    .build(),
-);
-```
-
-Each `.when(...)` call infers its own narrowed id type from the supplied type guard, so each handler's `req.id` is concrete and the `(id, content)` correlation is fully checked per-branch.
-
 ## Key Files
 
 - [`Cache.ts`](./src/Cache.ts): this defines the basic cache class. Note that the class's job is just to return whether/which previously-stored responses are usable to satisfy an incoming request. It does not handle things like making requests to the producer for new responses when no cached response is usable.
@@ -80,14 +80,52 @@ Each `.when(...)` call infers its own narrowed id type from the supplied type gu
 
 - [`PostgresStore.ts`](./src/stores/PostgresStore/PostgresStore.ts): a store for retaining cached data in Postgres.
 
-The package provides **five** functions for wrapping a producer with a cache. They split along two axes — single vs. bulk, and "lookup" vs. "compute":
+The package provides **four** functions for wrapping producers with a cache. They split along two axes — single vs. bulk, and "lookup" vs. "compute" — and all four take their producers as a **record with one entry per covered resource type**:
 
-- [`wrapProducer.ts`](./src/utils/wrapProducer.ts) — **`wrapProducer`**: the package's most important export, arguably. It takes a producer (i.e., a function that returns some data to cache) and a `Cache` instance, and it returns an equivalent function that will use a cached value when a suitable one is available, but otherwise call through to the underlying producer and store its return value for future requests.
+- [`wrapProducer.ts`](./src/utils/wrapProducer.ts) — **`wrapProducer`**: the package's most important export, arguably. It takes producers (functions that return data to cache, one per covered resource type) and a `Cache` instance, and returns a function that will use a cached value when a suitable one is available, but otherwise classify the request's id, call through to *that resource type's* producer, and store its return value for future requests.
 
-- [`wrapBulkProducer.ts`](./src/utils/wrapBulkProducer.ts) — **`wrapBulkProducer`**: the same idea for a producer that resolves many requests at once. It looks each request up in the cache and calls the underlying producer only for the ones that missed (or need background revalidation).
+  ```ts
+  const getStories = wrapProducer(cache, {}, {
+    story: async (req) => ({ content: await fetchStory(req.id), directives: { freshUntilAge: 60 } }),
+    collection: async (req) => ({
+      content: await fetchCollection(req.id),
+      directives: { freshUntilAge: 60 },
+      // supplementals may target any registry type, covered by this wrapper or not
+      supplementalResources: stories.map((s) => ({ id: `story:${s.id}`, content: s, directives: { freshUntilAge: 60 } })),
+    }),
+  });
+  ```
 
-  `wrapProducer` and `wrapBulkProducer` both treat the cache **`id` as a reference to a mutable entity**: the caller already has the id, and the cached value is whatever that entity currently is — a function of the `id` and time (e.g. "the current `User` for `user:123`"). The id is the natural cache key, so the producer receives it directly.
+  The record's keys are inferred as the wrapper's **coverage** — any non-empty subset of the registry — and bound the returned function's request type: requests for uncovered types are compile errors (and, if reached via casts, throw `NoProducerForResourceTypeError` *before any cache read*). A type with no producer in any wrapper is legal and normal: its entries are written as other producers' supplemental resources (or direct `store()` calls) and read via `Cache.get` — the serve-if-present contract. Partial coverage also makes capability-scoped and split wrappers honest: a second `wrapProducer` call can cover a different subset of the same cache. There is **no bare-function form** — even sole-type caches write `{ <type-name>: producer }` (a keyless record throws at construction time).
 
-- [`wrapComputingProducer.ts`](./src/utils/wrapComputingProducer.ts) — **`wrapComputingProducer`** and **`wrapBulkComputingProducer`**: the "compute" counterparts to the two above, for when the cached value is not an entity looked up by id but an expensive-to-compute **function of some input** — value = `f(input)`, reused whenever the same input recurs (e.g. an LLM extraction over a chunk of text). Here a hash of the input is the natural cache key, but the producer wants the original, un-hashed input to do the work. You pass a single options object (the `cache` lives in it too) with a `hashInput` function (which may return any `string` subtype — e.g. `` `extract:${string}` `` — so the resulting spec composes safely with others), plus a producer that takes the full input; the wrapper derives the cache id from the hash, keeps the input around (reference-counted, so it survives request collapsing without leaking) just long enough to hand it to the producer on a miss, and otherwise behaves like `wrapProducer`/`wrapBulkProducer`. A computing producer may also return `supplementalResources`, but keyed by the **input** they'd be computed from (not a bare id) — the wrapper hashes those inputs, so a later `compute(thatInput)` is a hit.
+  Producers must be **side-effect-free reads of their resource type's origin**: invocations may be collapsed (shared with concurrent logical callers) and their results stored, so producer calls are never 1:1 with callers. Consumers that must reach the origin send bypass directives (`maxAge: 0`) — which skip the cache read entirely, guaranteeing producer contact (the result is still stored, and identical bypass requests still collapse). Producers whose response must not be stored return `storeFor: 0`.
 
-- Also in [`wrapComputingProducer.ts`](./src/utils/wrapComputingProducer.ts) — **`computingProducerByInputType`**: the computing analog of `producerByIdType`, for a *heterogeneous* computing cache. You declare a union of `ComputingVariant<Input, Content>` and add a branch per variant with `.when(guard, produce)`; because each branch's `produce` is authored against a single, narrowed input, the types enforce that it returns that variant's content and that any cross-type `supplementalResources` pair a variant's input with that variant's content (so "computing a collection also caches its individual items" is checked end to end). `.build()` returns an ordinary computing producer to hand to `wrapComputingProducer`. See the file's module doc for more on the "lookup vs. compute" distinction.
+- [`wrapBulkProducer.ts`](./src/utils/wrapBulkProducer.ts) — **`wrapBulkProducer`**: the same idea for producers that resolve many requests at once. It looks each request up in the cache and calls the underlying producers only for the ones that missed (or need background revalidation), grouping requests by classified resource type — one bulk call per type per collapse window; a batch never mixes types.
+
+  `wrapProducer` and `wrapBulkProducer` both treat the cache **`id` as a reference to a mutable entity**: the caller already has the id, and the cached value is whatever that entity currently is — a function of the `id` and time (e.g. "the current `User` for `user:123`"). The id is the natural cache key, so the producers receive it directly.
+
+- [`wrapComputingProducer.ts`](./src/utils/wrapComputingProducer.ts) — **`wrapComputingProducer`** and **`wrapBulkComputingProducer`**: the "compute" counterparts to the two above, for when the cached value is not an entity looked up by id but an expensive-to-compute **function of some input** — value = `f(input)`, reused whenever the same input recurs (e.g. an LLM extraction over a chunk of text). Here a hash of the input is the natural cache key, but the producer wants the original, un-hashed input to do the work.
+
+  You pass `(cache, options, branches)`, where `branches` has one entry per covered resource type: `{ matchesInput?, hashInput, produce }`. `hashInput` derives the branch's cache ids from its inputs (and must mint ids that the branch's own registry guard accepts — checked at runtime by classifying each minted id, vacuous for `soleResourceType` registries where the compile-checked return type is the line of defense). `matchesInput` routes each incoming input to its branch; it's required when the wrapper covers more than one type and ignored when it covers exactly one. The wrapper keeps each input around (reference-counted, so it survives request collapsing without leaking) just long enough to hand it to `produce` on a miss, and otherwise behaves like `wrapProducer`/`wrapBulkProducer`. A computing producer may also return `supplementalResources`, keyed by the **input** they'd be computed from (not a bare id) — the wrapper hashes those inputs with the producing branch's `hashInput`, so a later `compute(thatInput)` is a hit.
+
+  ```ts
+  const extract = wrapComputingProducer(cache, {}, {
+    extraction: {
+      hashInput: (input: Chunk) => `extract:${sha256(canonicalize(input))}` as const,
+      produce: async (input) => ({ content: await runLlm(input), directives: { freshUntilAge: Infinity } }),
+    },
+  });
+  ```
+
+## Diagnostics channels
+
+The package publishes telemetry on four [`diagnostics_channel`](https://nodejs.org/api/diagnostics_channel.html) channels (see [`diagnostics.ts`](./src/diagnostics.ts)). Every message carries `{ cache, resourceType }` attribution — the cache instance's `name` and the classified resource-type name — so subscribers can build per-cache, per-resource-type metrics with no name threading. Each channel exports its name constant, its message type, and a typed channel object (`TypedChannel`).
+
+| Channel                       | Cardinality                                                                             | Message highlights                                                                                                                                                                                                                                                        |
+| ----------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@zingage/cache:read`        | One per cache lookup (`Cache.get`; per request for `getMany`) — including direct callers | `found`: `"usable"` \| `"usable-while-revalidate"` \| `"usable-if-error"` \| `"none"`, evaluated against the request's directives. Bypass requests never appear (they skip the read); a read the store failed emits nothing (the error propagates).                        |
+| `@zingage/cache:fetch`       | One per call of a wrapped producer (per request element, for bulk), at settlement        | `disposition`: `served-from-cache`, `served-stale-while-revalidating`, `served-stale-after-error`, `served-from-producer`, `producer-error`, or `aborted`; `collapsed` (rode an in-flight invocation); producer-path dispositions carry `directivesImpliedBypass`.       |
+| `@zingage/cache:produce`     | One per actual producer invocation (foreground misses AND background revalidations)      | `trigger`: `"miss"` \| `"revalidation"` \| `"bypass"` (the invocation's initiating cause; riders never re-label); `requests[]` (`{resourceType, resourceId}`, all one type); `collapsedCallerCount`; `outcome`; `durationMs`. Producer latency and error rate live here. |
+| `@zingage/cache:store-entry` | One per entry passed to `Cache.store()` (supplementals attributed to their own type)     | `resourceId`, `vary`, `validators`, `relationshipToExistingStoredData` (`"is-new"` \| `"unchanged"` \| `"changed"` \| `undefined`).                                                                                                                                       |
+
+`fetch` and `produce` are the two spans of one story with different subjects and cardinalities: a `fetch` is the consumer-side span (one per logical request); a `produce` is the origin-side span (one per invocation). N collapsed callers ride one invocation, one bulk invocation covers many requests, a stale-while-revalidate refresh settles *after* its triggering fetch already shipped, and an `aborted` fetch settles *before* its invocation does (the collapsed producer call keeps running and stores in the background).

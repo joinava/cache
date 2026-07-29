@@ -6,6 +6,13 @@ import { jsonStringify } from "type-party/runtime/json.js";
 import Cache from "./Cache.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 import type { CacheSpec } from "./types/00_CacheSpec.js";
+import {
+  idStartsWith,
+  resourceType,
+  soleResourceType,
+  type ResourceTypes,
+  type SpecOf,
+} from "./types/00_ResourceTypes.js";
 import type {
   MultiIdTypeRequestPairedProducer,
   SingleIdTypeRequestPairedProducer,
@@ -14,14 +21,9 @@ import type {
   AnyParams,
   AnyValidators,
   RequestPairedProducer,
-  RequestPairedProducerResult,
 } from "./types/index.js";
 import type { IsSingleType } from "./types/utils.js";
-import {
-  idStartsWith,
-  producerByIdType,
-  type ProducerByIdTypeBuilder,
-} from "./utils/producerByIdType.js";
+import { NoProducerForResourceTypeError } from "./utils/wrapProducer.js";
 import wrapProducer from "./utils/wrapProducer.js";
 
 /**
@@ -41,12 +43,26 @@ const expectType = <_T extends true>(): void => {};
  * - id `story:${string}` returns a single `Story`,
  * - id `collection:${string}` returns a `Story[]` (a collection of stories).
  *
- * Both kinds of resources live in the same cache.
+ * Both kinds of resources live in the same cache, as two named resource
+ * types whose guards partition the id space.
  */
 type Story = { readonly id: string; readonly title: string };
+
+const storiesResourceTypes = {
+  story: resourceType<Story>()({ matches: idStartsWith("story:") }),
+  collection: resourceType<Story[]>()({
+    matches: idStartsWith("collection:"),
+  }),
+} satisfies ResourceTypes;
+
 type StoriesCacheSpec =
   | CacheSpec<`story:${string}`, Story>
   | CacheSpec<`collection:${string}`, Story[]>;
+
+const storiesCacheOptions = {
+  name: "per-id-typing-test",
+  resourceTypes: storiesResourceTypes,
+};
 
 describe("Per-id content typing", () => {
   // --------------------------------------------------------------------
@@ -56,6 +72,14 @@ describe("Per-id content typing", () => {
   // runtime; their value is that they fail to *typecheck* if the public
   // surface of the per-id-typing machinery regresses.
   // --------------------------------------------------------------------
+  describe("Type-level: SpecOf derives the spec union from the registry", () => {
+    // THE derivation: the cache's Spec union is computed from the registry
+    // rather than declared beside it, so the two can't drift.
+    expectType<Equal<SpecOf<typeof storiesResourceTypes>, StoriesCacheSpec>>();
+
+    it("compiles", () => {});
+  });
+
   describe("Type-level: IsSingleType<Spec>", () => {
     // Single CacheSpec variant -- the "single-id-type mode" condition.
     expectType<Equal<IsSingleType<CacheSpec>, true>>();
@@ -119,189 +143,136 @@ describe("Per-id content typing", () => {
       >
     >();
 
-    it("accepts a plain async lambda for a single-id-type spec", () => {
-      type Spec = CacheSpec<string, string>;
-      const cache = new Cache<Spec>(new MemoryStore());
+    it("compiles", () => {});
+  });
+
+  describe("Type-level: wrapProducer coverage inference", () => {
+    // Coverage (`Covered`) is inferred from the producers record's keys --
+    // any non-empty subset of the registry -- and bounds the wrapped
+    // function's request ids. These checks mirror the acceptance criteria:
+    // covered ids accepted; uncovered ids and plain `string` rejected;
+    // producer `req` contextually narrowed per key; non-registry keys
+    // rejected; a bare function or empty record infers `Covered = never`
+    // (an uncallable wrapper).
+    it("bounds the wrapped function's ids to the covered types", async () => {
+      const cache = new Cache(new MemoryStore<StoriesCacheSpec>(), storiesCacheOptions);
       try {
-        // No `producerByIdType` needed: in single-id-type mode the
-        // producer is a plain non-generic function, and a vanilla
-        // `async (req) => ({...})` lambda satisfies it.
-        const _f = wrapProducer<Spec>(cache, {}, async (req) => ({
-          content: req.id,
-          directives: { freshUntilAge: 1 },
-        }));
-        void _f;
+        // Partial coverage: only `story` is covered.
+        const fetchStory = wrapProducer(cache, undefined, {
+          story: async (req) => {
+            // (b) contextually typed, not any/string:
+            expectType<Equal<typeof req.id, `story:${string}`>>();
+            return {
+              content: { id: req.id, title: "x" } satisfies Story,
+              directives: { freshUntilAge: 1 },
+              // (e) supplementals may target UNCOVERED types:
+              supplementalResources: [
+                {
+                  id: "collection:related",
+                  content: [] satisfies Story[],
+                  directives: { freshUntilAge: 1 },
+                },
+              ],
+            };
+          },
+        });
+
+        const res = await fetchStory({ id: "story:1" });
+        expectType<Equal<typeof res.content, Story>>();
+        expect(res.content).to.deep.equal({ id: "story:1", title: "x" });
+
+        declareTypeOnly(() => {
+          const collectionId = null as unknown as `collection:${string}`;
+          // @ts-expect-error -- uncovered type's id must be rejected at the call site
+          void fetchStory({ id: collectionId });
+          const looseId = null as unknown as string;
+          // @ts-expect-error -- plain string must be rejected too
+          void fetchStory({ id: looseId });
+        });
       } finally {
-        void cache.close();
+        await cache.close();
+      }
+    });
+
+    it("rejects non-registry keys, mismatched contents, and keyless records at compile time", async () => {
+      const cache = new Cache(new MemoryStore<StoriesCacheSpec>(), storiesCacheOptions);
+      try {
+        if (false as boolean) {
+          wrapProducer(cache, undefined, {
+            // @ts-expect-error -- 'sotry' is not a registry type name
+            sotry: async (req: { id: `story:${string}` }) => ({
+              content: { id: req.id, title: "x" } satisfies Story,
+              directives: { freshUntilAge: 1 },
+            }),
+          });
+
+          wrapProducer(cache, undefined, {
+            // @ts-expect-error -- the story producer must return Story content, not Story[]
+            story: async (_req) => ({
+              content: [] as Story[],
+              directives: { freshUntilAge: 1 },
+            }),
+            collection: async (_req) => ({
+              content: [] satisfies Story[],
+              directives: { freshUntilAge: 1 },
+            }),
+          });
+
+          // A bare function structurally matches the record type as `{}`
+          // (Covered = never): accepted at the wrap site, but the returned
+          // wrapper is uncallable -- and construction throws at runtime.
+          const mistake = wrapProducer(
+            cache,
+            undefined,
+            async (req: { id: `story:${string}` }) => ({
+              content: { id: req.id, title: "x" } satisfies Story,
+              directives: { freshUntilAge: 1 },
+            }),
+          );
+          // @ts-expect-error Covered = never, so no id is accepted
+          void mistake({ id: "story:1" });
+
+          const empty = wrapProducer(cache, undefined, {});
+          // @ts-expect-error empty coverage is equally uncallable
+          void empty({ id: "story:1" });
+        }
+      } finally {
+        await cache.close();
       }
     });
   });
 
-  describe("Type-level: producerByIdType builder", () => {
-    describe("Covered union accumulation", () => {
-      // An empty builder has covered nothing yet.
-      const empty = producerByIdType<StoriesCacheSpec>();
-      expectType<
-        Equal<
-          typeof empty,
-          ProducerByIdTypeBuilder<
-            StoriesCacheSpec,
-            AnyValidators,
-            AnyParams,
-            never
-          >
-        >
-      >();
+  describe("Type-level: soleResourceType", () => {
+    // `Id` (default string) narrows the sole type's id space at the type
+    // level; the runtime guard stays trivially true.
+    type ZendeskSchemaId = `zendesk-ticket-schema:${string}`;
 
-      // After one `.when(...)`, the covered union grows to that branch's
-      // narrowed id.
-      const oneBranch = empty.when(
-        idStartsWith("story:"),
-        async (req) => ({
-          content: { id: req.id, title: "x" } satisfies Story,
-          directives: { freshUntilAge: 1 },
-        }),
-      );
-      expectType<
-        Equal<
-          typeof oneBranch,
-          ProducerByIdTypeBuilder<
-            StoriesCacheSpec,
-            AnyValidators,
-            AnyParams,
-            `story:${string}`
-          >
-        >
-      >();
+    const narrowedRts = {
+      ticket_schema: soleResourceType<{ fields: string[] }, ZendeskSchemaId>(),
+    } satisfies ResourceTypes;
+    type TicketSpec = SpecOf<typeof narrowedRts>;
 
-      // After both `.when(...)` calls, the covered union equals
-      // `Spec["id"]`, satisfying the exhaustiveness check.
-      const twoBranches = oneBranch.when(
-        idStartsWith("collection:"),
-        async (_req) => ({
-          content: [] satisfies Story[],
-          directives: { freshUntilAge: 1 },
-        }),
-      );
-      expectType<
-        Equal<
-          typeof twoBranches,
-          ProducerByIdTypeBuilder<
-            StoriesCacheSpec,
-            AnyValidators,
-            AnyParams,
-            `story:${string}` | `collection:${string}`
-          >
-        >
-      >();
+    // The narrowed Id flows through SpecOf...
+    expectType<Equal<TicketSpec["id"], ZendeskSchemaId>>();
+    expectType<Equal<TicketSpec["content"], { fields: string[] }>>();
 
-      it("compiles", () => {});
+    declareTypeOnly(() => {
+      const bare = null as unknown as string;
+      // @ts-expect-error bare string must NOT satisfy the narrowed sole id
+      const rejected: TicketSpec["id"] = bare;
+      void rejected;
+      const acceptsLiteral: TicketSpec["id"] = "zendesk-ticket-schema:b1:abc";
+      void acceptsLiteral;
     });
 
-    describe(".build() return type by builder state", () => {
-      type ExhaustivenessError<Missing> = readonly [
-        "producerByIdType: builder is non-exhaustive; missing `.when(...)` branches for these ids:",
-        Missing,
-      ];
+    // ...while the no-`Id` form still accepts any string.
+    const defaultRts = {
+      visits: soleResourceType<number[]>(),
+    } satisfies ResourceTypes;
+    expectType<Equal<SpecOf<typeof defaultRts>["id"], string>>();
 
-      // Empty builder: missing both spec variants.
-      const empty = producerByIdType<StoriesCacheSpec>();
-      expectType<
-        Equal<
-          ReturnType<typeof empty.build>,
-          ExhaustivenessError<`story:${string}` | `collection:${string}`>
-        >
-      >();
-
-      // Partial builder: missing only the un-covered variant.
-      const partial = producerByIdType<StoriesCacheSpec>().when(
-        idStartsWith("story:"),
-        async (req) => ({
-          content: { id: req.id, title: "x" } satisfies Story,
-          directives: { freshUntilAge: 1 },
-        }),
-      );
-      expectType<
-        Equal<
-          ReturnType<typeof partial.build>,
-          ExhaustivenessError<`collection:${string}`>
-        >
-      >();
-
-      // Fully exhaustive builder: `.build()` returns a real
-      // `RequestPairedProducer`.
-      const full = partial.when(
-        idStartsWith("collection:"),
-        async (_req) => ({
-          content: [] satisfies Story[],
-          directives: { freshUntilAge: 1 },
-        }),
-      );
-      expectType<
-        Equal<
-          ReturnType<typeof full.build>,
-          RequestPairedProducer<StoriesCacheSpec, AnyValidators, AnyParams>
-        >
-      >();
-
-      it("compiles", () => {});
-    });
-
-    it("narrows handler arguments and return types per branch", () => {
-      // Inline compile-time assertions inside each handler confirm that
-      // `req.id` is the narrowed branch id, and that the handler's
-      // (declared) return type is exactly the result for that variant.
-      const _producer = producerByIdType<StoriesCacheSpec>()
-        .when(idStartsWith("story:"), async (req) => {
-          expectType<Equal<typeof req.id, `story:${string}`>>();
-          const result: RequestPairedProducerResult<
-            StoriesCacheSpec,
-            AnyValidators,
-            AnyParams,
-            `story:${string}`
-          > = {
-            content: { id: req.id, title: "x" },
-            directives: { freshUntilAge: 1 },
-          };
-          // The result's `content` slot is `Story`, not `Story | Story[]`.
-          expectType<Equal<typeof result.content, Story>>();
-          return result;
-        })
-        .when(idStartsWith("collection:"), async (req) => {
-          expectType<Equal<typeof req.id, `collection:${string}`>>();
-          const result: RequestPairedProducerResult<
-            StoriesCacheSpec,
-            AnyValidators,
-            AnyParams,
-            `collection:${string}`
-          > = {
-            content: [],
-            directives: { freshUntilAge: 1 },
-          };
-          expectType<Equal<typeof result.content, Story[]>>();
-          return result;
-        })
-        .build();
-      void _producer;
-    });
-
-    it("rejects mismatched (id, content) pairs inside a `.when(...)` branch", () => {
-      // Compile-time-only: per-branch (id, content) correlation is checked
-      // by `.when`'s handle parameter. Returning Story[] from the `story:*`
-      // branch should be rejected at the offending `.when(...)` call.
-      if (false as boolean) {
-        producerByIdType<StoriesCacheSpec>()
-          // @ts-expect-error -- Story[] not assignable to Story under `story:*`
-          .when(idStartsWith("story:"), async (_req) => ({
-            content: [] as Story[],
-            directives: { freshUntilAge: 1 },
-          }))
-          .when(idStartsWith("collection:"), async (_req) => ({
-            content: [] satisfies Story[],
-            directives: { freshUntilAge: 1 },
-          }))
-          .build();
-      }
+    it("compiles (and the runtime guard accepts every id)", () => {
+      expect(narrowedRts.ticket_schema.matches("anything at all")).to.eq(true);
     });
   });
 
@@ -322,8 +293,6 @@ describe("Per-id content typing", () => {
 
     it("plays nicely with non-overlapping prefixes (returns false at runtime)", () => {
       const id = "collection:home" as AllIds;
-      // No type narrowing in the false branch beyond what Extract gives;
-      // the runtime check is what matters here.
       expect(isStory(id)).to.eq(false);
     });
   });
@@ -333,9 +302,21 @@ describe("Per-id content typing", () => {
   // machinery against an actual `Cache` / `wrapProducer` to confirm the
   // type-level guarantees above hold end-to-end.
   // --------------------------------------------------------------------
+  describe("Cache.classify", () => {
+    it("classifies each id to its own resource type", () => {
+      const cache = new Cache(new MemoryStore<StoriesCacheSpec>(), storiesCacheOptions);
+      expect(cache.classify("story:1")).to.eq("story");
+      expect(cache.classify("collection:top")).to.eq("collection");
+      expectType<
+        Equal<ReturnType<typeof cache.classify>, "story" | "collection">
+      >();
+      void cache.close();
+    });
+  });
+
   describe("Cache.get", () => {
     it("narrows the result content based on the request id", async () => {
-      const cache = new Cache<StoriesCacheSpec>(new MemoryStore());
+      const cache = new Cache(new MemoryStore<StoriesCacheSpec>(), storiesCacheOptions);
       try {
         const story1 = { id: "1", title: "Hello" };
         const story2 = { id: "2", title: "World" };
@@ -388,7 +369,7 @@ describe("Per-id content typing", () => {
     });
 
     it("rejects mismatched (id, content) pairs in cache.store", async () => {
-      const cache = new Cache<StoriesCacheSpec>(new MemoryStore());
+      const cache = new Cache(new MemoryStore<StoriesCacheSpec>(), storiesCacheOptions);
       try {
         // Compile-time only: this call is guarded by `if (false)` so the
         // runtime doesn't actually try to store the bogus value, but TS is
@@ -412,7 +393,7 @@ describe("Per-id content typing", () => {
 
   describe("Cache.getMany", () => {
     it("narrows the result content per request id (tuple typing)", async () => {
-      const cache = new Cache<StoriesCacheSpec>(new MemoryStore());
+      const cache = new Cache(new MemoryStore<StoriesCacheSpec>(), storiesCacheOptions);
       try {
         const story = { id: "42", title: "Mixed" };
         await cache.store([
@@ -450,31 +431,31 @@ describe("Per-id content typing", () => {
 
   describe("wrapProducer", () => {
     it("narrows the wrapped producer's return based on the request id", async () => {
-      const cache = new Cache<StoriesCacheSpec>(new MemoryStore());
+      const cache = new Cache(new MemoryStore<StoriesCacheSpec>(), storiesCacheOptions);
       try {
-        // With multi-id-type specs, the recommended way to write a
-        // per-id-typed producer is via `producerByIdType`: each branch's
-        // `handle` is non-generic over `Id`, so TypeScript fully checks the
-        // (id, content) correlation per-branch with no user-side casts.
-        const fetcher = wrapProducer<StoriesCacheSpec>(
+        // With a multi-type registry, each producer in the record is
+        // non-generic: its `req.id` is the covered type's concrete
+        // (template-literal or branded) id type, so TypeScript fully checks
+        // the (id, content) correlation per entry with no user-side casts.
+        const fetcher = wrapProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          producerByIdType<StoriesCacheSpec>()
-            .when(idStartsWith("story:"), async (req) => ({
+          {
+            story: async (req) => ({
               content: {
                 id: req.id,
                 title: `Story ${req.id}`,
               } satisfies Story,
               directives: { freshUntilAge: 1 },
-            }))
-            .when(idStartsWith("collection:"), async (_req) => ({
+            }),
+            collection: async (_req) => ({
               content: [
                 { id: "1", title: "a" },
                 { id: "2", title: "b" },
               ] satisfies Story[],
               directives: { freshUntilAge: 1 },
-            }))
-            .build(),
+            }),
+          },
         );
 
         const storyResult = await fetcher({ id: "story:abc" });
@@ -497,48 +478,103 @@ describe("Per-id content typing", () => {
       }
     });
 
-    it("rejects a non-exhaustive producerByIdType builder at compile time", async () => {
-      const cache = new Cache<StoriesCacheSpec>(new MemoryStore());
+    it("serves each type independently from two partial wrappers over one cache", async () => {
+      const cache = new Cache(new MemoryStore<StoriesCacheSpec>(), storiesCacheOptions);
       try {
-        // Compile-time only: the builder below covers `story:*` but not
-        // `collection:*`, so its `.build()` returns a
-        // `_NonExhaustiveBuildError` tuple (not a `RequestPairedProducer`),
-        // and `wrapProducer` should reject it. Guarded by `if (false)` so
-        // we don't actually run the bogus producer at runtime.
-        if (false as boolean) {
-          wrapProducer<StoriesCacheSpec>(
-            cache,
-            {},
-            // @ts-expect-error -- non-exhaustive: missing `collection:*` branch
-            producerByIdType<StoriesCacheSpec>()
-              .when(idStartsWith("story:"), async (req) => ({
-                content: { id: req.id, title: "x" } satisfies Story,
-                directives: { freshUntilAge: 1 },
-              }))
-              .build(),
-          );
-        }
+        const fetchStory = wrapProducer(
+          cache,
+          { collapseOverlappingRequestsTime: 0 },
+          {
+            story: async (req) => ({
+              content: { id: req.id, title: "from-story-wrapper" },
+              directives: { freshUntilAge: 100 },
+            }),
+          },
+        );
+        const fetchCollection = wrapProducer(
+          cache,
+          { collapseOverlappingRequestsTime: 0 },
+          {
+            collection: async (_req) => ({
+              content: [{ id: "c", title: "from-collection-wrapper" }],
+              directives: { freshUntilAge: 100 },
+            }),
+          },
+        );
+
+        const story = await fetchStory({ id: "story:s" });
+        const collection = await fetchCollection({ id: "collection:c" });
+        expect(story.content.title).to.eq("from-story-wrapper");
+        expect(collection.content[0]?.title).to.eq("from-collection-wrapper");
       } finally {
         await cache.close();
       }
     });
 
-    it("supports caching supplemental resources of a different spec variant", async () => {
-      const cache = new Cache<StoriesCacheSpec>(new MemoryStore());
+    it("throws NoProducerForResourceTypeError, before any cache read, for a (cast) uncovered id", async () => {
+      const store = new MemoryStore<StoriesCacheSpec>();
+      let storeGetCalls = 0;
+      const origGet = store.get.bind(store);
+      store.get = ((...args: Parameters<typeof origGet>) => {
+        storeGetCalls++;
+        return origGet(...args);
+      }) as typeof store.get;
+
+      const cache = new Cache(store, storiesCacheOptions);
+      try {
+        const fetchStory = wrapProducer(
+          cache,
+          { collapseOverlappingRequestsTime: 0 },
+          {
+            story: async (req) => ({
+              content: { id: req.id, title: "x" },
+              directives: { freshUntilAge: 1 },
+            }),
+          },
+        );
+
+        // Reachable only via a cast (the wrapped function's request type
+        // bans uncovered ids at compile time):
+        await fetchStory({
+          id: "collection:top" as `story:${string}`,
+        }).then(
+          () => {
+            throw new Error("should have rejected");
+          },
+          (e: unknown) => {
+            expect(e).to.be.instanceOf(NoProducerForResourceTypeError);
+            const err = e as NoProducerForResourceTypeError;
+            expect(err.resourceType).to.eq("collection");
+            expect(err.coveredResourceTypes).to.deep.eq(["story"]);
+            expect(err.id).to.eq("collection:top");
+            expect(err.cacheName).to.eq("per-id-typing-test");
+          },
+        );
+
+        // ...and the store was never read.
+        expect(storeGetCalls).to.eq(0);
+      } finally {
+        await cache.close();
+      }
+    });
+
+    it("supports caching supplemental resources of a different resource type", async () => {
+      const cache = new Cache(new MemoryStore<StoriesCacheSpec>(), storiesCacheOptions);
       try {
         const story1: Story = { id: "1", title: "First" };
         const story2: Story = { id: "2", title: "Second" };
 
-        const fetcher = wrapProducer<StoriesCacheSpec>(
+        const fetcher = wrapProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          producerByIdType<StoriesCacheSpec>()
-            .when(idStartsWith("collection:"), async (_req) => ({
+          {
+            collection: async (_req) => ({
               content: [story1, story2] satisfies Story[],
               directives: { freshUntilAge: 100 },
-              // Supplemental resources can target a *different* spec
-              // variant than the request's id (here: individual stories
-              // under a request for a collection).
+              // Supplemental resources can target a *different* resource
+              // type than the request's (here: individual stories under a
+              // request for a collection) -- including types this wrapper
+              // doesn't cover.
               supplementalResources: [
                 {
                   id: "story:1",
@@ -551,14 +587,8 @@ describe("Per-id content typing", () => {
                   directives: { freshUntilAge: 100 },
                 },
               ],
-            }))
-            // Not reached in this test, but included so the producer is
-            // exhaustive over `StoriesCacheSpec`.
-            .when(idStartsWith("story:"), async (req) => ({
-              content: { id: req.id, title: "fallback" } satisfies Story,
-              directives: { freshUntilAge: 1 },
-            }))
-            .build(),
+            }),
+          },
         );
 
         // Fetching the collection should also cache the individual stories.
@@ -590,14 +620,29 @@ describe("Per-id content typing", () => {
    * structurally `string` but are NOT mutually assignable.
    *
    * The cache's per-id narrowing should treat these the same way it treats
-   * template-literal-keyed specs.
+   * template-literal-keyed registries. (For branded ids, the registry guards
+   * inspect the ids' runtime structure -- here, the parsed JSON's keys.)
    */
   describe("with tagged/branded string keys", () => {
     type StoryKey = JsonOf<{ story: string }>;
     type CollectionKey = JsonOf<{ collection: string }>;
-    type BrandedSpec =
-      | CacheSpec<StoryKey, Story>
-      | CacheSpec<CollectionKey, Story[]>;
+
+    const brandedResourceTypes = {
+      story: resourceType<Story>()({
+        matches: (id: string): id is StoryKey =>
+          "story" in (JSON.parse(id) as object),
+      }),
+      collection: resourceType<Story[]>()({
+        matches: (id: string): id is CollectionKey =>
+          "collection" in (JSON.parse(id) as object),
+      }),
+    } satisfies ResourceTypes;
+
+    const brandedCacheOptions = {
+      name: "per-id-typing-branded-test",
+      resourceTypes: brandedResourceTypes,
+    };
+    type BrandedSpec = SpecOf<typeof brandedResourceTypes>;
 
     // Compile-time only: confirm that the two branded ids are mutually
     // non-assignable. (If TS ever changed this, the rest of the per-id
@@ -606,7 +651,7 @@ describe("Per-id content typing", () => {
     expectType<Equal<CollectionKey extends StoryKey ? true : false, false>>();
 
     it("narrows the result content based on the branded request id", async () => {
-      const cache = new Cache<BrandedSpec>(new MemoryStore());
+      const cache = new Cache(new MemoryStore<BrandedSpec>(), brandedCacheOptions);
       try {
         const story: Story = { id: "1", title: "Hello" };
         const storyId = jsonStringify({
@@ -656,7 +701,7 @@ describe("Per-id content typing", () => {
     });
 
     it("rejects mismatched branded (id, content) pairs in cache.store", async () => {
-      const cache = new Cache<BrandedSpec>(new MemoryStore());
+      const cache = new Cache(new MemoryStore<BrandedSpec>(), brandedCacheOptions);
       try {
         const storyId = jsonStringify({
           story: "bogus",
@@ -679,7 +724,7 @@ describe("Per-id content typing", () => {
     });
 
     it("narrows wrapProducer's return type for branded ids", async () => {
-      const cache = new Cache<BrandedSpec>(new MemoryStore());
+      const cache = new Cache(new MemoryStore<BrandedSpec>(), brandedCacheOptions);
       try {
         const storyId = jsonStringify({
           story: "abc",
@@ -688,22 +733,14 @@ describe("Per-id content typing", () => {
           collection: "home",
         }) satisfies string as CollectionKey;
 
-        // For branded keys the structural runtime check has to be written
-        // inline (no `idStartsWith` shortcut). Each branch's `matches` is a
-        // user-defined type guard; once it returns true, `producerByIdType`
-        // narrows `req.id` to the matching branded type and the handler's
-        // return is required to be content for that variant.
-        const isStoryKey = (id: StoryKey | CollectionKey): id is StoryKey =>
-          "story" in (JSON.parse(id) as object);
-        const isCollectionKey = (
-          id: StoryKey | CollectionKey,
-        ): id is CollectionKey => "collection" in (JSON.parse(id) as object);
-
-        const fetcher = wrapProducer<BrandedSpec>(
+        // Each producer's `req.id` is the covered type's branded id, so the
+        // handler's return is required to be content for that type.
+        const fetcher = wrapProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          producerByIdType<BrandedSpec>()
-            .when(isStoryKey, async (req) => {
+          {
+            story: async (req) => {
+              expectType<Equal<typeof req.id, StoryKey>>();
               const parsed = JSON.parse(req.id) as { story: string };
               return {
                 content: {
@@ -712,8 +749,9 @@ describe("Per-id content typing", () => {
                 } satisfies Story,
                 directives: { freshUntilAge: 1 },
               };
-            })
-            .when(isCollectionKey, async (req) => {
+            },
+            collection: async (req) => {
+              expectType<Equal<typeof req.id, CollectionKey>>();
               const parsed = JSON.parse(req.id) as { collection: string };
               return {
                 content: [
@@ -721,8 +759,8 @@ describe("Per-id content typing", () => {
                 ] satisfies Story[],
                 directives: { freshUntilAge: 1 },
               };
-            })
-            .build(),
+            },
+          },
         );
 
         const storyResult = await fetcher({ id: storyId });
@@ -744,3 +782,9 @@ describe("Per-id content typing", () => {
     });
   });
 });
+
+/**
+ * Helper for writing type-level-only assertions that need `declare const`
+ * bindings: the callback is never invoked, it just has to typecheck.
+ */
+function declareTypeOnly(_fn: () => void): void {}
