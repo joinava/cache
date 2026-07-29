@@ -871,15 +871,37 @@ describe("diagnostics channels (§6.5)", () => {
     it("riders: a concurrent identical request performs its own read, then rides the in-flight invocation -- no new produce, fetch collapsed: true, collapsedCallerCount 2 (§7)", async () => {
       const { name, cache } = makeHarness("fetch-rider");
       const capture = captureChannels(name);
+      // Gated rather than delayed, so the initiator's invocation is held
+      // open for as long as the rider's read takes (a fixed pending window
+      // flakes under suite load: the invocation settles and stores first,
+      // turning the would-be rider into a cache hit).
+      let releaseProducer = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseProducer = resolve;
+      });
       const producer = mock.fn(async () => {
-        await delay(80);
+        await gate;
         return { content: "shared", directives: freshFor100 };
       });
       const getSite = wrapProducer(cache, {}, { site_day: producer });
       try {
         const first = getSite({ id: "site:a" });
-        await delay(10);
+        await waitUntil(
+          () => producer.mock.callCount() === 1,
+          "the initiator's invocation starting",
+          10_000,
+        );
         const second = getSite({ id: "site:a" });
+        // The rider publishes its own read BEFORE consulting the collapse
+        // registry, so once its read is visible the attach has already
+        // happened -- on an invocation the gate guarantees is still
+        // in flight.
+        await waitUntil(
+          () => capture.read.length === 2,
+          "the rider's own read",
+          10_000,
+        );
+        releaseProducer();
         const [res1, res2] = await Promise.all([first, second]);
         expect(res1.content).to.equal("shared");
         expect(res2.content).to.equal("shared");
@@ -909,7 +931,6 @@ describe("diagnostics channels (§6.5)", () => {
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
           collapsedCallerCount: 2,
           outcome: "success",
-          minDurationMs: 50,
         });
 
         expect(capture.fetch).to.have.lengthOf(2);
@@ -933,6 +954,7 @@ describe("diagnostics channels (§6.5)", () => {
           collapsed: true,
         });
       } finally {
+        releaseProducer();
         capture.stop();
         await cache.close();
       }
@@ -1711,7 +1733,16 @@ describe("diagnostics channels (§6.5)", () => {
       const bizIds = ["biz:B1", "biz:B2"] as const;
       const phase = { producerHealthy: true };
       const outageError = new Error("vendor outage");
+      // One-shot gate for the t=0 rider phase: holds the FIRST invocation
+      // open until the rider has provably attached (a fixed pending window
+      // flakes under suite load). Once released, later phases' invocations
+      // pass straight through it.
+      let releaseT0Invocation = () => {};
+      const t0Gate = new Promise<void>((resolve) => {
+        releaseT0Invocation = resolve;
+      });
       const siteProducer = mock.fn(async () => {
+        await t0Gate;
         await delay(25);
         if (!phase.producerHealthy) throw outageError;
         return {
@@ -1741,8 +1772,21 @@ describe("diagnostics channels (§6.5)", () => {
       try {
         // ---- t=0: first read of site:X (miss), with a concurrent rider ----
         const initiator = getVisits({ id: siteId });
-        await delay(8);
+        await waitUntil(
+          () => siteProducer.mock.callCount() === 1,
+          "the initiator's invocation starting",
+          10_000,
+        );
         const rider = getVisits({ id: siteId });
+        // The rider publishes its own read BEFORE consulting the collapse
+        // registry, so once its read is visible it has attached to the
+        // still-gated invocation.
+        await waitUntil(
+          () => capture.read.length === 2,
+          "the rider's own read",
+          10_000,
+        );
+        releaseT0Invocation();
         const [initiatorRes, riderRes] = await Promise.all([initiator, rider]);
         expect(initiatorRes.content).to.equal("site-visits-v1");
         expect(riderRes.content).to.equal("site-visits-v1");
@@ -2017,6 +2061,7 @@ describe("diagnostics channels (§6.5)", () => {
           }
         });
       } finally {
+        releaseT0Invocation();
         capture.stop();
         await cache.close();
       }

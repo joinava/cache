@@ -193,8 +193,17 @@ describe("bypass requests skip the cache read (§6.3)", () => {
   it("bypass requests collapse ONLY with identical-directive peers: a concurrent plain request never rides the bypass invocation", async () => {
     const { name, cache } = makeHarness("bypass-no-cross-collapse");
     const capture = captureChannels(name);
+    // Gated rather than delayed: the gate holds the bypass invocation open
+    // (its result unstored) for as long as the plain request's read takes,
+    // so this can't flake under suite load the way a fixed pending window
+    // does (the plain read landing late once made the plain call a cache
+    // hit, collapsing the two invocations this test distinguishes).
+    let releaseProducer = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseProducer = resolve;
+    });
     const producer = mock.fn(async () => {
-      await delay(80);
+      await gate;
       return { content: "produced", directives: freshFor100 };
     });
     const getSite = wrapProducer(cache, {}, { site_day: producer });
@@ -203,11 +212,23 @@ describe("bypass requests skip the cache read (§6.3)", () => {
         id: "site:a",
         directives: { maxAge: 0 },
       });
-      await delay(10);
+      await waitUntil(
+        () => producer.mock.callCount() === 1,
+        "the bypass invocation starting",
+        10_000,
+      );
       // Same id, but different (empty) directives: the collapse key includes
       // directives, so this must trigger its own producer invocation even
-      // though the bypass invocation is still in flight.
+      // though the bypass invocation is still in flight. Under the
+      // cross-collapse bug this wait times out (callCount stays 1) instead
+      // of deadlocking.
       const plainCall = getSite({ id: "site:a" });
+      await waitUntil(
+        () => producer.mock.callCount() === 2,
+        "the plain request starting its own producer invocation",
+        10_000,
+      );
+      releaseProducer();
       const [bypassRes, plainRes] = await Promise.all([bypassCall, plainCall]);
       expect(bypassRes.content).to.equal("produced");
       expect(plainRes.content).to.equal("produced");
@@ -253,6 +274,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
         collapsed: false,
       });
     } finally {
+      releaseProducer();
       capture.stop();
       await cache.close();
     }
