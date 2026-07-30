@@ -161,6 +161,42 @@ describe("bulkProducerByIdType", () => {
     expect(bizBulk.mock.callCount()).to.equal(1);
   });
 
+  it("a sub-producer that fails SYNCHRONOUSLY is isolated to its own type's slots, like a rejection", async () => {
+    // The isolation contract has to cover a synchronous throw, not just a
+    // rejection: a non-async sub-producer that validates its batch (or whose
+    // first synchronous step throws -- the hashed-input wrappers' internal
+    // producers read their input registry synchronously) never reaches a handler
+    // attached to its return value. Failing the whole invocation instead would
+    // discard `business_slice`'s already-computed result and its store, for a
+    // failure only `site_day` had.
+    const boom = new Error("sync boom");
+    const producer = bulkProducerByIdType(registry, {
+      site_day: (reqs) => {
+        expect(reqs.length).to.equal(2);
+        throw boom;
+      },
+      business_slice: async (reqs) =>
+        reqs.map((req) => ({
+          content: `biz-${req.id}`,
+          directives: freshFor100,
+        })),
+    });
+
+    const results = await producer([
+      { ...emptyRequest, id: "site:1" },
+      { ...emptyRequest, id: "biz:1" },
+      { ...emptyRequest, id: "site:2" },
+    ]);
+
+    expect(results[0]).to.equal(boom);
+    expect(results[2]).to.equal(boom);
+    expect(slots(results)).to.deep.equal([
+      "!sync boom",
+      "biz-biz:1",
+      "!sync boom",
+    ]);
+  });
+
   it("a NON-Error rejection is wrapped in an Error naming the resource type, keeping the original as `cause`", async () => {
     // A raw non-Error in a result slot would be read as a successful producer
     // result, so it must not be stored as-is.

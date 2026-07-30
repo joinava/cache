@@ -489,9 +489,17 @@ export default function wrapProducer<
     // A by-id-type producer routes ids itself and has no cache to name in its
     // errors; this is where the cache's name is put back on (see
     // rethrowUnroutableWithCacheName). Every other rejection passes through.
-    const resp = await looseProducer(req).catch((error: unknown) =>
-      rethrowUnroutableWithCacheName(cache.name, error),
-    );
+    //
+    // try/catch rather than a `.catch()` on the returned promise, so that a
+    // producer which fails SYNCHRONOUSLY (a non-async function that routes and
+    // throws before returning a promise) is mapped too -- a handler attached to
+    // the return value never runs for one of those.
+    let resp: LooseResult;
+    try {
+      resp = await looseProducer(req);
+    } catch (error: unknown) {
+      rethrowUnroutableWithCacheName(cache.name, error);
+    }
     logTrace("got response from producer", resp);
     return resp;
   };
