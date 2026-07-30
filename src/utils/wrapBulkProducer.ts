@@ -309,12 +309,14 @@ export function wrapBulkProducer<
         // `producer-error` via the group's rejection handler.
         //
         // Tests FILLED slots rather than the array's `length`, which is not the
-        // same thing: `bulkProducerByIdType` reassembles into a preallocated
-        // array (deliberately leaving an under-returning sub-producer's slots
-        // as holes for this check to catch), so its `length` always equals
-        // `reqs.length` even when results are missing. `every` short-circuits
-        // on the first hole, and the count for the message is only worth
-        // walking the batch for once we know it will be reported.
+        // same thing: a producer that hands back a sparse array, or one holding
+        // an explicit `undefined`, has the right `length` and still answered
+        // nothing at those positions. `undefined` is never a legal result --
+        // every `RequestPairedProducerResult` is an object and every `ErrorType`
+        // an `Error` -- so a hole is unambiguously a contract violation and
+        // never a value a producer meant to return. `every` short-circuits on
+        // the first hole, and the count for the message is only worth walking
+        // the batch for once we know it will be reported.
         const isAnswered = (_: unknown, i: number) =>
           requestPairedProducerResults[i] !== undefined;
         if (!reqs.every(isAnswered)) {

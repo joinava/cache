@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { expect } from "chai";
 import { describe, it, mock } from "node:test";
 
@@ -17,12 +18,13 @@ import { wrapBulkProducer } from "./wrapBulkProducer.js";
 
 /**
  * `bulkProducerByIdType`'s own contract, driven CACHE-FREE. That is the only
- * level several of these behaviours are observable at: the wrapper converts an
- * under-return into a rejected invocation and never surfaces the sparse array,
- * so "not padded", "extras dropped", and "a non-Error rejection is wrapped"
- * can only be pinned here. Routing failures (`UnroutableIdError`) are shared
- * with the single helper and tested in producerByIdType.test.ts; coverage
- * *enforcement* by the wrapper lives in coverageRuntime.test.ts.
+ * level several of these behaviours are observable at: the per-type `Error`
+ * slots that error isolation produces are exactly what a wrapper consumes and
+ * turns into per-request failures, so "one type's failure does not discard a
+ * sibling's results" and "a non-Error rejection is wrapped" can only be pinned
+ * here. Routing failures (`UnroutableIdError`) are shared with the single helper
+ * and tested in producerByIdType.test.ts; coverage *enforcement* by the wrapper
+ * lives in coverageRuntime.test.ts.
  *
  * These registries are deliberately local copies rather than shared fixtures:
  * they are free to diverge from any other suite's.
@@ -34,14 +36,14 @@ const registry = {
 
 const emptyRequest = { params: {}, directives: {} } as const;
 
-/** Content, or the Error's message, per slot -- including absent slots. */
-const slots = (results: readonly ({ content: string } | Error | undefined)[]) =>
+/**
+ * Content, or the Error's message, per slot. Every slot is filled: a
+ * sub-producer whose count disagrees with its slice rejects the invocation, so a
+ * resolved result array is dense.
+ */
+const slots = (results: readonly ({ content: string } | Error)[]) =>
   Array.from(results, (it) =>
-    it === undefined
-      ? "<absent>"
-      : it instanceof Error
-        ? `!${it.message}`
-        : it.content,
+    it instanceof Error ? `!${it.message}` : it.content,
   );
 
 describe("bulkProducerByIdType", () => {
@@ -216,38 +218,46 @@ describe("bulkProducerByIdType", () => {
     expect((slot as Error).cause).to.equal("just a string");
   });
 
-  it("an UNDER-RETURNING sub-producer leaves its remaining slots ABSENT rather than padding them", async () => {
-    // Padding with an Error would turn a producer contract violation into a
-    // per-request failure and hide the bug; leaving the hole is what lets the
-    // wrapper's under-return check fire (see diagnosticsChannels.test.ts).
+  it("an UNDER-RETURNING sub-producer fails the whole invocation, naming it and both counts", async () => {
+    // Padding the missing slots with an Error would turn a producer contract
+    // violation into a per-request failure and hide the bug. Failing here rather
+    // than leaving holes for the wrapper's own check is what lets the error name
+    // the sub-producer at fault: the wrapper sees only the merged batch.
+    // A HEALTHY sibling is wired up alongside to pin the blast radius: it still
+    // runs, and one slice's contract violation still fails the whole invocation,
+    // so its results are not delivered either.
+    const bizBulk = mock.fn(
+      async (reqs: readonly { readonly id: string }[]) =>
+        reqs.map((req) => ({
+          content: `biz-${req.id}`,
+          directives: freshFor100,
+        })),
+    );
     const producer = bulkProducerByIdType(registry, {
       site_day: async (reqs) =>
         reqs.slice(0, 1).map((req) => ({
           content: `site-${req.id}`,
           directives: freshFor100,
         })),
-      business_slice: async (reqs) =>
-        reqs.map((req) => ({
-          content: `biz-${req.id}`,
-          directives: freshFor100,
-        })),
+      business_slice: bizBulk,
     });
 
-    const results = await producer([
-      { ...emptyRequest, id: "site:1" },
-      { ...emptyRequest, id: "biz:1" },
-      { ...emptyRequest, id: "site:2" },
-    ]);
-    // Length is still the request count -- the hole is a hole, not a short array.
-    expect(results).to.have.lengthOf(3);
-    expect(slots(results)).to.deep.equal([
-      "site-site:1",
-      "biz-biz:1",
-      "<absent>",
-    ]);
+    await assert.rejects(
+      async () =>
+        producer([
+          { ...emptyRequest, id: "site:1" },
+          { ...emptyRequest, id: "biz:1" },
+          { ...emptyRequest, id: "site:2" },
+        ]),
+      /the "site_day" producer returned a result count \(1\) that does not match the number of requests in its slice \(2\)/,
+    );
+    expect(bizBulk.mock.callCount()).to.equal(1);
   });
 
-  it("an OVER-RETURNING sub-producer's extras are dropped, since they have no slot", async () => {
+  it("an OVER-RETURNING sub-producer fails the whole invocation too", async () => {
+    // Stricter than the wrapper, which does not police a bare producer's
+    // over-return: extras mean this sub-producer disagrees with the slice it was
+    // handed, so its positional pairing is no longer trustworthy.
     const producer = bulkProducerByIdType(registry, {
       site_day: async (reqs) => [
         ...reqs.map((req) => ({
@@ -258,8 +268,9 @@ describe("bulkProducerByIdType", () => {
       ],
     });
 
-    const results = await producer([{ ...emptyRequest, id: "site:1" }]);
-    expect(results).to.have.lengthOf(1);
-    expect(slots(results)).to.deep.equal(["site-site:1"]);
+    await assert.rejects(
+      async () => producer([{ ...emptyRequest, id: "site:1" }]),
+      /the "site_day" producer returned a result count \(2\) that does not match the number of requests in its slice \(1\)/,
+    );
   });
 });

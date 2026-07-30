@@ -310,12 +310,13 @@ describe("single producer function + by-id-type sugar", () => {
       }
     });
 
-    // The contrasting case -- an UNDER-RETURNING sub-producer, which the sugar
-    // must leave absent rather than padding with Errors, failing the whole
-    // invocation including its healthy sibling type's element -- is pinned in
-    // diagnosticsChannels.test.ts, where the full channel consequences
-    // (produce outcome, nothing stored, per-element dispositions) are asserted
-    // alongside it.
+    // The contrasting case -- a sub-producer whose result COUNT disagrees with
+    // its slice, which the sugar rejects rather than padding with Errors, failing
+    // the whole invocation including its healthy sibling type's element -- is
+    // pinned in bulkProducerByIdType.test.ts. The wrapper's own under-return
+    // check, reachable only via a bare producer now, is in
+    // diagnosticsChannels.test.ts with the full channel consequences (produce
+    // outcome, nothing stored, per-element dispositions).
   });
 
   describe("4. diagnostics: one produce message per invocation, spanning types (§5.3)", () => {

@@ -130,15 +130,16 @@ export type BulkProducersFor<
  *   `Error` elements, so per-request error isolation survives the merge, and one
  *   type's failure never discards a sibling type's results. It lives in the
  *   sugar rather than in the wrapper.
- * - A sub-producer that **under-returns** is NOT repaired or padded: those
- *   slots are left absent, so the wrapper's own under-return check (which
- *   rejects the whole invocation rather than risk misaligned pairing) fires
- *   exactly as it would for a bare producer. Silently substituting an `Error`
- *   would convert a contract violation into a per-request failure and hide the
- *   bug.
- * - A sub-producer that **over-returns** has no slot for the extras, so they
- *   are dropped -- matching the wrapper's own choice not to police
- *   over-return.
+ * - A sub-producer whose result count does not match the slice it was given --
+ *   in EITHER direction -- fails the whole invocation, naming that resource type
+ *   and both counts. Both directions mean the sub-producer disagrees with the
+ *   slice it was handed, so its positional pairing is no longer trustworthy, and
+ *   catching it here is what makes the error name the offending sub-producer;
+ *   the wrapper's equivalent check sees only the merged batch and can report a
+ *   total at best. (This is stricter than the wrapper, which does not police a
+ *   bare producer's over-return.) Padding the missing slots with `Error`s
+ *   instead would turn a contract violation into a per-request failure and hide
+ *   the bug.
  *
  * Requests routed through this helper are classified twice, for the reason
  * given on `producerByIdType`.
@@ -200,9 +201,11 @@ export function bulkProducerByIdType<
       ),
     }));
 
-    // Sparse by design: only the slots a sub-producer actually returned get
-    // filled, so an under-return leaves holes for the wrapper to catch.
-    // oxlint-disable-next-line unicorn/no-new-array -- intentional sparse preallocation; filled by index below
+    // Preallocated so each group can write its own results back at their
+    // original indices. Every request classifies into exactly one group and
+    // every group fills its whole slice (count-checked below), so this is dense
+    // by the time it is returned.
+    // oxlint-disable-next-line unicorn/no-new-array -- intentional preallocation; filled by index below
     const results: (LooseResult | Error)[] = new Array(reqs.length);
 
     await Promise.all(
@@ -241,11 +244,30 @@ export function bulkProducerByIdType<
             subResults = entries.map(() => asError);
           }
 
+          // Any count disagreement fails the whole invocation, rather than
+          // filling what came back and leaving the rest as holes for the
+          // wrapper's own under-return check to find: this names the offending
+          // resource type and both counts, where the wrapper -- which sees only
+          // the merged batch -- can report a total ("results for only 7 of 10
+          // requests") but never which sub-producer broke it. It also stops the
+          // merge resting on `undefined` as the "no result here" sentinel; that
+          // is sound (see the wrapper's check) but a count comparison needs no
+          // such premise. The failure path above is length-correct by
+          // construction, so this only fires for a sub-producer that returned.
+          if (subResults.length !== entries.length) {
+            throw new Error(
+              `bulkProducerByIdType: the "${resourceType}" producer returned a ` +
+                `result count (${String(subResults.length)}) that does not match ` +
+                `the number of requests in its slice (${String(entries.length)}); ` +
+                `each sub-producer must return exactly one result or Error per ` +
+                `request it was given`,
+            );
+          }
+
           entries.forEach((entry, j) => {
-            const result = subResults[j];
-            if (result !== undefined) {
-              results[entry.index] = result;
-            }
+            // SAFETY: the counts were just checked to match, so slot `j` of a
+            // sub-producer's results exists for every entry in its slice.
+            results[entry.index] = subResults[j]!;
           });
         },
       ),

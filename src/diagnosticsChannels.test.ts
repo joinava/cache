@@ -1529,7 +1529,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("wrapBulkProducer: a short result array fails the whole invocation -- including through bulkProducerByIdType, which does not pad: every element settles producer-error exactly once, nothing stores, produce reports error", async () => {
+    it("wrapBulkProducer: a short result array fails the whole invocation: every element settles producer-error exactly once, nothing stores, produce reports error", async () => {
       const { name, cache } = makeHarness("produce-bulk-short");
       const capture = captureChannels(name);
       // A buggy producer that returns one result for three requests. An
@@ -1539,13 +1539,11 @@ describe("diagnostics channels (§6.5)", () => {
       // served-from-producer (the call rejects; nothing is delivered),
       // elements after it must still settle, and the prefix must not store.
       //
-      // Routed through the by-id-type helper on purpose: the helper leaves an
-      // under-returning sub-producer's slots ABSENT rather than substituting
-      // Errors, so the wrapper's check below fires exactly as it does for a
-      // bare producer instead of the violation degrading into per-request
-      // failures. A second, HEALTHY sub-producer is wired up alongside to pin
-      // the blast radius: one slice's contract violation fails the whole
-      // invocation, so the other type's element is not delivered either.
+      // A BARE producer, deliberately: this is the wrapper's OWN under-return
+      // check, and a bare producer is the only way left to reach it.
+      // `bulkProducerByIdType` rejects a count mismatch in its own slice before
+      // the merged batch ever gets here (see its suite), so routing through the
+      // helper would test the helper's check instead of this one.
       const siteBulk = mock.fn(
         async (reqs: readonly { readonly id: string }[]) =>
           reqs.slice(0, 1).map((req) => ({
@@ -1553,21 +1551,7 @@ describe("diagnostics channels (§6.5)", () => {
             directives: freshFor100,
           })),
       );
-      const bizBulk = mock.fn(
-        async (reqs: readonly { readonly id: string }[]) =>
-          reqs.map((req) => ({
-            content: `ok-${req.id}`,
-            directives: freshFor100,
-          })),
-      );
-      const getBulk = wrapBulkProducer(
-        cache,
-        {},
-        bulkProducerByIdType(cache.resourceTypes, {
-          site_day: siteBulk,
-          business_slice: bizBulk,
-        }),
-      );
+      const getBulk = wrapBulkProducer(cache, {}, siteBulk);
       try {
         await assert.rejects(
           () => getBulk([{ id: "site:a" }, { id: "biz:b" }, { id: "site:c" }]),
@@ -1576,14 +1560,12 @@ describe("diagnostics channels (§6.5)", () => {
             // coverage failure" check: NoProducerForResourceTypeError would
             // carry its own name.
             name: "Error",
-            message: /returned results for only 2 of 3 requests/,
+            message: /returned results for only 1 of 3 requests/,
           },
         );
-        // The healthy slice still ran; it just doesn't get to deliver.
-        expect(bizBulk.mock.callCount()).to.equal(1);
 
         // One fetch per request element, every one producer-error -- including
-        // the healthy type's.
+        // the resource type whose single request was inside the returned prefix.
         expect(capture.fetch).to.have.lengthOf(3);
         sortByResourceId(capture.fetch).forEach((message, i) => {
           expectProducerPathFetch(message, {
