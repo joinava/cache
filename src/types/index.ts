@@ -31,10 +31,8 @@ export type {
   Vary,
 } from "./04_ProducerResult.js";
 export type {
-  MultiIdTypeRequestPairedProducer,
   RequestPairedProducer,
   RequestPairedProducerResult,
-  SingleIdTypeRequestPairedProducer,
 } from "./05_RequestPairedProducer.js";
 export type {
   Entry,

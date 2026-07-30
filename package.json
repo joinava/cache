@@ -12,6 +12,7 @@
   "files": [
     "dist/src",
     "docs",
+    "!docs/plans",
     "README.md"
   ],
   "engines": {

@@ -176,8 +176,11 @@ export type ComputingBranch<
     // `input` is `ReadonlyDeep` because the same input object can be handed to
     // more than one producer call (concurrent callers share it via the
     // registry), so a producer must not mutate what another might be reading.
+    //
+    // Takes no `AbortSignal`, for the reason given on `RequestPairedProducer`:
+    // this branch is invoked from the plain wrappers' collapsed-invocation
+    // task, which is shared between callers and forwards no signal.
     input: ReadonlyDeep<Input>,
-    options?: { signal?: AbortSignal },
   ) => Promise<
     ComputingProducerResult<
       Input,
@@ -202,7 +205,6 @@ type LooseBranch<Input> = {
   hashInput: (input: Input) => string | Promise<string>;
   produce: (
     input: ReadonlyDeep<Input>,
-    options?: { signal?: AbortSignal },
   ) => Promise<ComputingProducerResult<Input, CacheSpec, AnyValidators, AnyParams>>;
 };
 
@@ -386,15 +388,9 @@ export function wrapComputingProducer<
   const producers = Object.fromEntries(
     branchEntries.map(([name, branch]) => [
       name,
-      async (
-        req: { readonly id: string },
-        producerOptions?: { signal?: AbortSignal },
-      ) => {
+      async (req: { readonly id: string }) => {
         const input = registry.get(req.id) as ReadonlyDeep<Input>;
-        const result = producerOptions
-          ? await branch.produce(input, producerOptions)
-          : await branch.produce(input);
-        return hashSupplementals(result);
+        return hashSupplementals(await branch.produce(input));
       },
     ]),
   );
@@ -483,9 +479,9 @@ export function wrapBulkComputingProducer<
           produce: (
             // `input`s are `ReadonlyDeep` for the same reason as the single
             // variant: they can be shared with other producer calls via the
-            // registry, so a producer must not mutate them.
+            // registry, so a producer must not mutate them. No `AbortSignal`,
+            // also for the same reason (the collapsed task forwards none).
             inputs: readonly ReadonlyDeep<Input>[],
-            options?: { signal?: AbortSignal },
           ) => Promise<
             (
               | ComputingProducerResult<
@@ -524,7 +520,6 @@ export function wrapBulkComputingProducer<
   type LooseBulkBranch = Omit<LooseBranch<Input>, "produce"> & {
     produce: (
       inputs: readonly ReadonlyDeep<Input>[],
-      options?: { signal?: AbortSignal },
     ) => Promise<
       (
         | ComputingProducerResult<Input, CacheSpec, AnyValidators, AnyParams>
@@ -553,17 +548,11 @@ export function wrapBulkComputingProducer<
   const producers = Object.fromEntries(
     branchEntries.map(([name, branch]) => [
       name,
-      (
-        reqs: readonly { readonly id: string }[],
-        producerOptions?: { signal?: AbortSignal },
-      ) => {
+      (reqs: readonly { readonly id: string }[]) => {
         const inputs = reqs.map((req) =>
           registry.get(req.id),
         ) as readonly ReadonlyDeep<Input>[];
-        const producerPromise = producerOptions
-          ? branch.produce(inputs, producerOptions)
-          : branch.produce(inputs);
-        return producerPromise.then(async (results) =>
+        return branch.produce(inputs).then(async (results) =>
           Promise.all(
             results.map(async (result) =>
               result instanceof Error ? result : hashSupplementals(result),

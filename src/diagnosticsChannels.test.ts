@@ -387,7 +387,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("a failed cache read publishes NO read message; the error propagates from Cache.get", async () => {
+    it("a failed cache read publishes found: 'read-failed' carrying the error, and the error still propagates from Cache.get", async () => {
       const { name, store, cache } = makeHarness("read-failure");
       const readError = new Error("store exploded");
       store.get = async () => {
@@ -399,6 +399,85 @@ describe("diagnostics channels (§6.5)", () => {
           cache.get({ id: "site:a", params: {}, directives: {} }),
         );
         expect(thrown).to.equal(readError);
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "read-failed",
+            error: readError,
+          },
+        ]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("a failed getMany read publishes one 'read-failed' PER request, so per-id read counts match the successful path", async () => {
+      const { name, store, cache } = makeHarness("read-failure-many");
+      const readError = new Error("store exploded");
+      store.getMany = async () => {
+        throw readError;
+      };
+      const capture = captureChannels(name);
+      try {
+        const thrown = await expectRejection(() =>
+          cache.getMany([
+            { id: "site:a", params: {}, directives: {} },
+            { id: "biz:b", params: {}, directives: {} },
+            // A duplicate gets its own message, exactly as on the success path.
+            { id: "site:a", params: {}, directives: {} },
+          ]),
+        );
+        expect(thrown).to.equal(readError);
+        expect(capture.read).to.have.lengthOf(3);
+        // Each is attributed to its OWN resource type, not the batch's first.
+        expect(sortByResourceId(capture.read)).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "business_slice",
+            resourceId: "biz:b",
+            found: "read-failed",
+            error: readError,
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "read-failed",
+            error: readError,
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "read-failed",
+            error: readError,
+          },
+        ]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("an ABORTED read is not a failed read: it publishes nothing, matching the pre-aborted fast path", async () => {
+      const { name, store, cache } = makeHarness("read-abort-not-failure");
+      const controller = new AbortController();
+      // Reject the way a signal-aware store does once the signal fires.
+      store.get = async () => {
+        controller.abort();
+        throw new Error("aborted by signal");
+      };
+      const capture = captureChannels(name);
+      try {
+        await expectRejection(() =>
+          cache.get(
+            { id: "site:a", params: {}, directives: {} },
+            { signal: controller.signal },
+          ),
+        );
         expect(capture.read).to.deep.equal([]);
       } finally {
         capture.stop();
@@ -830,7 +909,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("a pre-aborted signal settles as 'aborted' (the only no-message path is the failed-read 'throw' one)", async () => {
+    it("a pre-aborted signal settles as 'aborted' with no read message (the read never happened, so there is nothing to report -- distinct from a read that happened and failed)", async () => {
       const { name, cache } = makeHarness("fetch-pre-aborted");
       const capture = captureChannels(name);
       const producer = mock.fn(async () => ({
@@ -1027,10 +1106,11 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("onCacheReadFailure default ('call-producer'): the failed read emits no read message; the fetch settles normally", async () => {
+    it("onCacheReadFailure default ('call-producer'): the read-failure is visible on the read channel even though the fetch settles as an ordinary producer serve", async () => {
       const { name, store, cache } = makeHarness("fetch-read-failure-default");
+      const readError = new Error("store exploded");
       store.get = async () => {
-        throw new Error("store exploded");
+        throw readError;
       };
       const capture = captureChannels(name);
       const producer = mock.fn(async () => ({
@@ -1041,7 +1121,19 @@ describe("diagnostics channels (§6.5)", () => {
       try {
         const res = await getSite({ id: "site:a" });
         expect(res.content).to.equal("from-producer");
-        expect(capture.read).to.deep.equal([]);
+        // This is the case the read-failed variant exists for: the wrapper
+        // absorbs the error and substitutes an empty lookup, so the fetch below
+        // is indistinguishable from a plain miss. Without this message a store
+        // failing every read would look like a pure cache-miss workload.
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "read-failed",
+            error: readError,
+          },
+        ]);
         expect(capture.fetch).to.have.lengthOf(1);
         expectProducerPathFetch(capture.fetch[0], {
           cache: name,
@@ -1057,7 +1149,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("onCacheReadFailure: 'throw' rethrows with NO read and NO fetch message (the request never reached a disposition)", async () => {
+    it("onCacheReadFailure: 'throw' rethrows with a 'read-failed' read message but NO fetch message (the request never reached a disposition)", async () => {
       const { name, store, cache } = makeHarness("fetch-read-failure-throw");
       const readError = new Error("store exploded");
       store.get = async () => {
@@ -1077,7 +1169,18 @@ describe("diagnostics channels (§6.5)", () => {
         const thrown = await expectRejection(() => getSite({ id: "site:a" }));
         expect(thrown).to.equal(readError);
         expect(producer.mock.callCount()).to.equal(0);
-        expect(capture.read).to.deep.equal([]);
+        // The read is reported (it happened, and it failed); the FETCH is not,
+        // because the request never reached a disposition -- that asymmetry is
+        // the §6.5.2 exception, and it survives the read-channel change.
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "read-failed",
+            error: readError,
+          },
+        ]);
         expect(capture.fetch).to.deep.equal([]);
         expect(capture.produce).to.deep.equal([]);
       } finally {
@@ -1125,7 +1228,18 @@ describe("diagnostics channels (§6.5)", () => {
           "bypass invocation settling after the call rejected",
         );
         await delay(20);
-        expect(capture.read).to.deep.equal([]);
+        // Only the non-bypass element reached the store, so only it reports a
+        // failed read: bypass requests skip the read entirely and never appear
+        // on this channel at all (not even as a failure).
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:read",
+            found: "read-failed",
+            error: readError,
+          },
+        ]);
         expect(capture.fetch).to.deep.equal([]);
         expectProduceMessage(capture.produce[0], {
           cache: name,

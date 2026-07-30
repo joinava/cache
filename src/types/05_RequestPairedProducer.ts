@@ -7,29 +7,40 @@ import type {
   ProducerResultResource,
   ProducerResultResourceObject,
 } from "./04_ProducerResult.js";
-import type { IsSingleType } from "./utils.js";
 
 /**
  * A producer paired with a consumer request: invoked with the full request,
  * the producer is expected to return a {@link RequestPairedProducerResult}
  * for that request's `id`.
  *
- * The shape of `RequestPairedProducer` depends on whether the cache's `Spec`
- * is a *single id type* or a *multi-id type* (a union of {@link CacheSpec}s):
+ * Generic over the request's specific id, so the return type's content is
+ * required to match the spec variant that id selects. Implementing this shape
+ * directly is awkward (TypeScript can't narrow the function's free type
+ * parameter based on runtime checks on `req.id`) -- which is why the wrappers
+ * take a record of per-resource-type producers (`ResourceTypeProducer` /
+ * `BulkResourceTypeProducer`) and dispatch by classified resource type
+ * instead. This form survives as the internal erased shape those records
+ * bridge to, and is what internal code (`wrapProducer`,
+ * `requestPairedProducerResultToResources`, etc.) operates against.
  *
- * - **Single-id-type mode** (one `CacheSpec` variant — the most common case):
- *   the producer is a plain non-generic function. The (id, content)
- *   correlation is trivially preserved because there's only one possible
- *   content type.
+ * Through 1.6.0 this name was a conditional type that resolved to a
+ * non-generic `SingleIdTypeRequestPairedProducer` when `Spec` had one variant
+ * and a `MultiIdTypeRequestPairedProducer` when it was a union. Now that
+ * dispatch is owned by the per-type producer records, that distinction had no
+ * consumer -- nothing in the implementation referenced any of the three forms
+ * -- so both halves and the conditional were deleted; this is the former
+ * multi-id form under the plain name.
  *
- * - **Multi-id-type mode** (a union of `CacheSpec`s): the producer is generic
- *   over the request's specific id, so its return type is required to match
- *   the spec variant that id selects. Implementing such a producer directly
- *   is awkward (TypeScript can't narrow the function's free type parameter
- *   based on runtime checks on `req.id`) -- which is why the wrappers take a
- *   record of single-type producers and dispatch by classified resource type
- *   instead; this multi-variant form survives as the internal erased shape
- *   those records bridge to.
+ * Takes no `AbortSignal`: through 1.6.0 this and the other producer types
+ * declared an `options?: { signal?: AbortSignal }` parameter, but every
+ * producer invocation in 2.0 goes through the wrappers' collapsed-invocation
+ * task, which is shared between logical callers and so has no single signal it
+ * could forward without letting one caller cancel another's work. (1.6.0's one
+ * non-collapsed producer call was the `isCacheable` pass-through, deleted in
+ * §6.3.) Callers' aborts are honored one level up, where each caller's *wait*
+ * is raced against its own signal. The parameter was therefore unreachable
+ * surface -- a producer written against it got cancellation code that could
+ * never run -- so it was removed.
  *
  * Implementations of this type MUST NOT be `instanceof Error`, as instanceof
  * Error is used elsewhere to detect if the result could not be returned.
@@ -38,43 +49,8 @@ export type RequestPairedProducer<
   Spec extends CacheSpec,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
-> =
-  IsSingleType<Spec> extends true
-    ? SingleIdTypeRequestPairedProducer<Spec, Validators, Params>
-    : MultiIdTypeRequestPairedProducer<Spec, Validators, Params>;
-
-/**
- * The single-id-type form of {@link RequestPairedProducer}: a non-generic
- * function whose return need only be valid for the spec's one variant.
- */
-export type SingleIdTypeRequestPairedProducer<
-  Spec extends CacheSpec,
-  Validators extends AnyValidators = AnyValidators,
-  Params extends AnyParams = AnyParams,
-> = (
-  req: ReadonlyDeep<ConsumerRequest<Params, Spec["id"]>>,
-  options?: { signal?: AbortSignal },
-) => Promise<RequestPairedProducerResult<Spec, Validators, Params>>;
-
-/**
- * The multi-id-type form of {@link RequestPairedProducer}: generic over the
- * request's specific id, so the return type's content is required to match
- * the spec variant that id selects.
- *
- * This is the form that internal code (`wrapProducer`,
- * `requestPairedProducerResultToResources`, etc.) operates against. In
- * single-id-type mode the loose user-facing form is coerced to this one
- * inside `wrapProducer`; that coercion is sound because all ids in single-
- * id-type mode share the same content type, so any valid loose result is
- * also a valid result for an arbitrary requested id.
- */
-export type MultiIdTypeRequestPairedProducer<
-  Spec extends CacheSpec,
-  Validators extends AnyValidators = AnyValidators,
-  Params extends AnyParams = AnyParams,
 > = <Id extends Spec["id"]>(
   req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
-  options?: { signal?: AbortSignal },
 ) => Promise<RequestPairedProducerResult<Spec, Validators, Params, Id>>;
 
 /**

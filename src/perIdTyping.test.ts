@@ -13,16 +13,6 @@ import {
   type SpecOf,
 } from "./index.js";
 import type { CacheSpec } from "./types/00_CacheSpec.js";
-import type {
-  MultiIdTypeRequestPairedProducer,
-  SingleIdTypeRequestPairedProducer,
-} from "./types/05_RequestPairedProducer.js";
-import type {
-  AnyParams,
-  AnyValidators,
-  RequestPairedProducer,
-} from "./types/index.js";
-import type { IsSingleType } from "./types/utils.js";
 import wrapProducer from "./utils/wrapProducer.js";
 
 /**
@@ -81,69 +71,16 @@ describe("Per-id content typing", () => {
     it("compiles", () => {});
   });
 
-  describe("Type-level: IsSingleType<Spec>", () => {
-    // Single CacheSpec variant -- the "single-id-type mode" condition.
-    expectType<Equal<IsSingleType<CacheSpec>, true>>();
-    expectType<Equal<IsSingleType<CacheSpec<string, Story>>, true>>();
-    expectType<
-      Equal<IsSingleType<CacheSpec<`story:${string}`, Story>>, true>
-    >();
-    // A single CacheSpec whose id is a union of literals is still a
-    // single variant (uniform content), so it's classified single-id-type.
-    expectType<Equal<IsSingleType<CacheSpec<"a" | "b", Story>>, true>>();
+  // (1.6.0's `RequestPairedProducer` was a conditional that resolved to a
+  // non-generic single-id form or a generic multi-id form depending on whether
+  // `Spec` was a union, selected by an `IsSingleType<Spec>` helper. All of that
+  // was deleted in 2.0 -- dispatch is owned by the per-resource-type producer
+  // records, so nothing in the implementation ever referenced the three forms,
+  // and the type-level assertions here were a test of the conditional by the
+  // conditional. What still matters behaviorally is the case below: a
+  // sole-type cache's producer stays writable as a vanilla lambda.)
 
-    // Union of CacheSpec variants -- the "multi-id-type mode" condition.
-    expectType<
-      Equal<
-        IsSingleType<CacheSpec<"a", Story> | CacheSpec<"b", Story[]>>,
-        false
-      >
-    >();
-    expectType<Equal<IsSingleType<StoriesCacheSpec>, false>>();
-
-    it("compiles", () => {});
-  });
-
-  describe("Type-level: RequestPairedProducer dispatches by mode", () => {
-    type SingleSpec = CacheSpec<`story:${string}`, Story>;
-    type MultiSpec = StoriesCacheSpec;
-
-    // Single-id-type mode: the public type resolves to the non-generic form.
-    expectType<
-      Equal<
-        RequestPairedProducer<SingleSpec, AnyValidators, AnyParams>,
-        SingleIdTypeRequestPairedProducer<SingleSpec, AnyValidators, AnyParams>
-      >
-    >();
-    // ...and is *not* the generic multi-id form.
-    expectType<
-      Equal<
-        Equal<
-          RequestPairedProducer<SingleSpec, AnyValidators, AnyParams>,
-          MultiIdTypeRequestPairedProducer<SingleSpec, AnyValidators, AnyParams>
-        >,
-        false
-      >
-    >();
-
-    // Multi-id-type mode: the public type resolves to the generic form.
-    expectType<
-      Equal<
-        RequestPairedProducer<MultiSpec, AnyValidators, AnyParams>,
-        MultiIdTypeRequestPairedProducer<MultiSpec, AnyValidators, AnyParams>
-      >
-    >();
-    // ...and is *not* the non-generic single-id form.
-    expectType<
-      Equal<
-        Equal<
-          RequestPairedProducer<MultiSpec, AnyValidators, AnyParams>,
-          SingleIdTypeRequestPairedProducer<MultiSpec, AnyValidators, AnyParams>
-        >,
-        false
-      >
-    >();
-
+  describe("Producer shape for a sole-type cache", () => {
     it("accepts a plain async lambda producer for a sole-type cache", () => {
       // In 2.0 the producer is always a per-type record, but a sole-type
       // cache's one producer is still a plain non-generic function: a vanilla

@@ -131,7 +131,6 @@ export type ResourceTypeProducer<
   Params extends AnyParams,
 > = (
   req: ReadonlyDeep<ConsumerRequest<Params, IdOfResourceType<RT[K]>>>,
-  options?: { signal?: AbortSignal },
 ) => Promise<
   RequestPairedProducerResult<
     SpecOf<RT>,
@@ -171,7 +170,6 @@ type LooseProducer<
   Params extends AnyParams,
 > = (
   req: ReadonlyDeep<ConsumerRequest<Params, SpecOf<RT>["id"]>>,
-  options?: { signal?: AbortSignal },
 ) => Promise<RequestPairedProducerResult<SpecOf<RT>, Validators, Params>>;
 
 /**
@@ -240,11 +238,15 @@ type LooseProducer<
  * signal is forwarded to `cache.get()`, so the store read can be aborted. If
  * the signal fires before the cache read completes, the function throws
  * without ever contacting the producer. Once the cache read resolves and the
- * producer must be called, the signal is **not** forwarded to the producer --
- * because that call may be sharing the same underlying producer call with
- * other callers who have not aborted. However, the caller's wait for the
- * producer result is **raced** against the signal, so the caller can bail out
- * immediately without waiting for the producer to finish.
+ * producer must be called, no signal reaches the producer -- because that call
+ * may be sharing one underlying producer invocation with other callers who have
+ * not aborted. Producers accordingly take **no** `options` parameter at all
+ * (see {@link ResourceTypeProducer}): through 1.6.0 the type declared one, but
+ * with the `isCacheable` pass-through gone there is no longer any
+ * non-collapsed producer call for a signal to be forwarded on, so the
+ * parameter was unreachable surface and has been removed. The caller's wait for
+ * the producer result is instead **raced** against the signal, so the caller
+ * can bail out immediately without waiting for the producer to finish.
  *
  * Critically, bailing out does NOT prevent the producer's result from being
  * stored: the collapsed invocation always fires a (non-awaited)
@@ -396,7 +398,8 @@ export default function wrapProducer<
   // what keeps bypass (`maxAge: 0`) invocations from ever being shared with
   // plain-miss callers.
   //
-  // This function never forwards the signal to the producer, because the
+  // No signal reaches the producer (`ResourceTypeProducer` takes no options
+  // parameter at all), because the
   // task may be shared with other callers who haven't aborted. It always
   // fires a (non-awaited) cache.store() after the producer resolves. This is
   // critical for the abort-signal design: since collapsed producer calls

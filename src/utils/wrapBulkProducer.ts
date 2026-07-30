@@ -69,7 +69,6 @@ export type BulkResourceTypeProducer<
   reqs: readonly ReadonlyDeep<
     ConsumerRequest<Params, IdOfResourceType<RT[K]>>
   >[],
-  options?: { signal?: AbortSignal },
 ) => Promise<
   (
     | RequestPairedProducerResult<
@@ -111,7 +110,6 @@ type LooseBulkProducer<
   ErrorType extends Error,
 > = (
   reqs: readonly ReadonlyDeep<ConsumerRequest<Params, SpecOf<RT>["id"]>>[],
-  options?: { signal?: AbortSignal },
 ) => Promise<
   (RequestPairedProducerResult<SpecOf<RT>, Validators, Params> | ErrorType)[]
 >;
@@ -157,12 +155,12 @@ type LooseBulkProducer<
  *   the cache read completes, the function throws without contacting any
  *   producer for the non-bypass requests.
  *
- * - Once a producer must be called (for misses and bypass requests), the
- *   signal is **not** forwarded to the producer (because those calls may be
- *   shared with other callers via request collapsing), but the caller's wait
- *   is raced against the signal so they can bail out early. The producers'
- *   results are always stored. See the `wrapProducer` JSDoc for the full
- *   rationale.
+ * - Once a producer must be called (for misses and bypass requests), no signal
+ *   reaches the producer (because those calls may be shared with other callers
+ *   via request collapsing) -- bulk producers take no `options` parameter at
+ *   all, for the reason given in the `wrapProducer` JSDoc. The caller's wait is
+ *   raced against the signal so they can bail out early, and the producers'
+ *   results are always stored.
  *
  * - **Background refresh** (stale-while-revalidate): these calls are
  *   fire-and-forget and never receive a signal, since the caller has already
@@ -257,13 +255,15 @@ export function wrapBulkProducer<
     return responses;
   };
 
-  // One collapsed invocation per (resource type, request batch). The task
-  // never forwards the signal to the producer (it may be shared with callers
-  // who haven't aborted), always fires a (non-awaited) cache.store() with the
-  // non-error results after the producer succeeds (so its work isn't wasted
-  // even when every caller that triggered it has aborted), and publishes the
-  // invocation's `produce` diagnostics message when the producer settles.
-  // See wrapProducer's implementation for the full collapsing rationale.
+  // One collapsed invocation per (resource type, request batch). No signal
+  // reaches the producer -- the invocation may be shared with callers who
+  // haven't aborted, so there is no one caller's signal to hand it, which is
+  // why `BulkResourceTypeProducer` takes no options parameter at all. The task
+  // always fires a (non-awaited) cache.store() with the non-error results after
+  // the producer succeeds (so its work isn't wasted even when every caller that
+  // triggered it has aborted), and publishes the invocation's `produce`
+  // diagnostics message when the producer settles. See wrapProducer's
+  // implementation for the full collapsing rationale.
   const collapsedCallProducerAndStore = collapsedInvocationTaskCreator(
     async (
       invocation: CollapsedInvocation,

@@ -5,7 +5,7 @@ import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
 import {
   publishCacheRead,
   publishCacheStoreEntry,
-  type CacheReadMessage,
+  type CacheReadFound,
 } from "./diagnostics.js";
 import {
   type Entry,
@@ -125,7 +125,7 @@ function foundForLookupResult(result: {
   usableWhileRevalidate?: unknown;
   usableIfError?: unknown;
   validatable?: unknown;
-}): CacheReadMessage["found"] {
+}): CacheReadFound {
   return result.usable
     ? "usable"
     : result.usableWhileRevalidate
@@ -377,8 +377,10 @@ export default class Cache<
    * `req.id` is a literal that only matches one variant, callers don't have to
    * narrow the returned content themselves.
    *
-   * Emits one `read` diagnostics message (see `CACHE_READ_CHANNEL_NAME`)
-   * per successful call; a read that fails (the store threw) emits nothing.
+   * Emits one `read` diagnostics message (see `CACHE_READ_CHANNEL_NAME`) per
+   * call: the lookup result on success, or `found: "read-failed"` with the
+   * error if the store threw (and then the error still propagates). An
+   * *aborted* read emits nothing, matching the `throwIfAborted` fast path.
    */
   public async get<Id extends SpecOf<RT>["id"]>(
     req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
@@ -431,11 +433,28 @@ export default class Cache<
     // point read is cheap next to the producer calls collapsing exists to
     // protect; the read channel measures per-id read rates, so the evidence
     // would be visible before the need is real.
-    const cacheEntries = await this.#dataStore.get(
-      id satisfies ReadonlyDeep<Id> as Id,
-      normalizedParams,
-      options,
-    );
+    const cacheEntries = await this.#dataStore
+      .get(id satisfies ReadonlyDeep<Id> as Id, normalizedParams, options)
+      .catch((error: unknown) => {
+        // A read that FAILED is reported on the channel (one message, same as
+        // a successful lookup) before the error propagates, so subscribers can
+        // use the read channel as a total denominator -- see
+        // CACHE_READ_CHANNEL_NAME. An *aborted* read is not a failed read: the
+        // caller cancelled, and aborts already emit nothing here (the
+        // `throwIfAborted` at the top of this method rejects before any
+        // message), so staying silent keeps that consistent instead of
+        // inflating read-failure rates with client cancellations.
+        if (options?.signal?.aborted !== true) {
+          publishCacheRead({
+            cache: this.name,
+            resourceType,
+            resourceId: id satisfies ReadonlyDeep<Id> as Id,
+            found: "read-failed",
+            error,
+          });
+        }
+        throw error;
+      });
 
     const res = this.#processCacheEntries(cacheEntries, directives, now, {
       requestIndex: 0,
@@ -462,9 +481,12 @@ export default class Cache<
    * is narrowed to the spec variants compatible with the corresponding input
    * request's id.
    *
-   * Emits one `read` diagnostics message PER request (none if the underlying
-   * store read fails). All request ids are classified up front, so a
-   * classification failure rejects the whole call before touching the store.
+   * Emits one `read` diagnostics message PER request -- the lookup result on
+   * success, or `found: "read-failed"` with the error for every request in the
+   * batch if the underlying store read throws (and then the error still
+   * propagates). An *aborted* read emits nothing. All request ids are
+   * classified up front, so a classification failure rejects the whole call
+   * before touching the store, emitting nothing.
    *
    * @param requests Array of consumer requests to process
    * @returns Promise that resolves to an array of CacheLookupResult objects in
@@ -551,17 +573,38 @@ export default class Cache<
     this.#logger("trace", "requested entries from the store via getMany");
 
     // Use the store's optimized getMany method
-    const cacheEntriesForRequests = await this.#dataStore.getMany(
-      mapNonEmpty(requests, (req) => ({
-        // SAFETY: `req.id` is `ReadonlyDeep<SpecOf<RT>["id"]>`, which is the
-        // id value itself at runtime (ids are strings); the ReadonlyDeep
-        // wrapper just can't *reduce* to the id type while `RT` is an
-        // unresolved generic.
-        id: req.id as SpecOf<RT>["id"],
-        params: this.normalizeParams(req.params),
-      })),
-      options,
-    );
+    const cacheEntriesForRequests = await this.#dataStore
+      .getMany(
+        mapNonEmpty(requests, (req) => ({
+          // SAFETY: `req.id` is `ReadonlyDeep<SpecOf<RT>["id"]>`, which is the
+          // id value itself at runtime (ids are strings); the ReadonlyDeep
+          // wrapper just can't *reduce* to the id type while `RT` is an
+          // unresolved generic.
+          id: req.id as SpecOf<RT>["id"],
+          params: this.normalizeParams(req.params),
+        })),
+        options,
+      )
+      .catch((error: unknown) => {
+        // One `read-failed` message PER REQUEST, not one per call: the channel
+        // is one-message-per-lookup, and a batch read is N lookups that all
+        // failed together. Emitting one message for the batch would make a
+        // subscriber's per-id read counts disagree with the successful path.
+        // Aborts stay silent for the reason given in `get`.
+        if (options?.signal?.aborted !== true) {
+          requests.forEach((req, i) => {
+            publishCacheRead({
+              cache: this.name,
+              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+              resourceType: resourceTypes[i]!,
+              resourceId: req.id,
+              found: "read-failed",
+              error,
+            });
+          });
+        }
+        throw error;
+      });
 
     this.#logger("trace", "received entries from the store via getMany", {
       resultCount: sumBy(cacheEntriesForRequests, (it) => it.length),

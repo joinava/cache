@@ -55,6 +55,7 @@ export {
   type CacheProduceMessage,
   CACHE_READ_CHANNEL_NAME,
   cacheReadChannel,
+  type CacheReadFound,
   type CacheReadMessage,
   CACHE_STORE_ENTRY_CHANNEL_NAME,
   cacheStoreEntryChannel,

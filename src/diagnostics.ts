@@ -71,28 +71,62 @@ export type TypedChannel<T, Name extends string> = Omit<
  * `Cache.getMany()` call -- reporting what the lookup found.
  *
  * Wrapper requests with bypass directives (`maxAge: 0`) never appear here:
- * they skip the cache read entirely. A read that itself **fails** (the store
- * threw) emits no message either -- the error propagates
- * (`Cache.get`/`getMany` reject).
+ * they skip the cache read entirely.
+ *
+ * A read that itself **fails** (the store threw) publishes `found:
+ * "read-failed"` carrying the `error`, one message per request in the failed
+ * call, and *then* the error propagates (`Cache.get`/`getMany` still reject).
+ * This keeps the channel's one-message-per-lookup invariant total, so a
+ * subscriber can use it as a complete denominator. It matters most under the
+ * wrappers' default `onCacheReadFailure: "call-producer"`, which absorbs the
+ * store error and substitutes an empty lookup result: without this message a
+ * store failing every read is indistinguishable on the channels from a pure
+ * cache-miss workload -- same producer traffic, same `fetch` dispositions, no
+ * signal naming the cause.
  */
 export const CACHE_READ_CHANNEL_NAME = "@zingage/cache:read";
 
 /**
- * The message type published to the read diagnostics channel.
+ * What a *completed* lookup found, evaluated against the request's directives:
+ * - "usable":                  satisfiable from cache alone
+ * - "usable-while-revalidate": only usable if paired with a background refresh
+ * - "usable-if-error":         only usable as a producer-failure fallback
+ * - "none":                    nothing this request could use
+ *
+ * (Reserved for future conditional revalidation: entries that are merely
+ * `validatable` report "none" today.)
+ *
+ * Deliberately excludes `"read-failed"`, which is not a lookup *result* -- see
+ * {@link CacheReadMessage}. Keeping the two apart lets the mapping from a
+ * lookup result to a `found` value stay total.
  */
-export type CacheReadMessage = Attribution & {
-  resourceId: string;
-  /**
-   * What the lookup found, evaluated against the request's directives:
-   * - "usable":                  satisfiable from cache alone
-   * - "usable-while-revalidate": only usable if paired with a background refresh
-   * - "usable-if-error":         only usable as a producer-failure fallback
-   * - "none":                    nothing this request could use
-   * (Reserved for future conditional revalidation: entries that are merely
-   * `validatable` report "none" today.)
-   */
-  found: "usable" | "usable-while-revalidate" | "usable-if-error" | "none";
-};
+export type CacheReadFound =
+  | "usable"
+  | "usable-while-revalidate"
+  | "usable-if-error"
+  | "none";
+
+/**
+ * The message type published to the read diagnostics channel.
+ *
+ * A discriminated union rather than a flat object with an optional `error`:
+ * `error` is present exactly when the read failed, so a subscriber that
+ * narrows on `found === "read-failed"` gets the error without a non-null
+ * assertion, and one that handles the result cases can't reach for an `error`
+ * that isn't there.
+ */
+export type CacheReadMessage = Attribution & { resourceId: string } & (
+    | { found: CacheReadFound }
+    | {
+        /**
+         * The store threw; no lookup result exists. The error still propagates
+         * to the `Cache.get`/`getMany` caller after this message is published.
+         */
+        found: "read-failed";
+        /** Whatever the store threw. Unknown by design -- stores may reject with anything. */
+        error: unknown;
+      }
+  );
 
 /**
  * The diagnostics channel for read events. Subscribe with
