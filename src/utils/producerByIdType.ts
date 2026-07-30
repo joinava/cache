@@ -200,9 +200,11 @@ export function producerByIdType<
  *   that request's original index. Positional is forced, not chosen: a batch
  *   can legitimately contain the same id twice with different `params`, so the
  *   id is not a routing key.
- * - A sub-producer's **rejection** is caught and written into that type's slots
- *   as `Error` elements, so per-request error isolation survives the merge --
- *   it lives in the sugar rather than in the wrapper.
+ * - A sub-producer's **failure** -- a rejection, or a synchronous throw from a
+ *   non-async sub-producer -- is caught and written into that type's slots as
+ *   `Error` elements, so per-request error isolation survives the merge, and one
+ *   type's failure never discards a sibling type's results. It lives in the
+ *   sugar rather than in the wrapper.
  * - A sub-producer that **under-returns** is NOT repaired or padded: those
  *   slots are left absent, so the wrapper's own under-return check (which
  *   rejects the whole invocation rather than risk misaligned pairing) fires
@@ -286,9 +288,19 @@ export function bulkProducerByIdType<
           // never makes an empty group.
           const { subProducer } = entries[0]!;
 
-          const subResults = await subProducer(
-            entries.map((it) => it.req),
-          ).catch((error: unknown) => {
+          // try/catch rather than a `.catch()` on the returned promise: a
+          // sub-producer that fails SYNCHRONOUSLY -- a non-async function with
+          // an argument-validation `throw`, or one whose first synchronous step
+          // throws (the hashed-input wrappers' internal producers read their
+          // input registry synchronously) -- never reaches a handler attached
+          // to its return value. That would take the whole MIXED batch down
+          // with it, discarding the other resource types' already-computed
+          // results and their store, for exactly the failure this helper
+          // promises to isolate to one type's slots.
+          let subResults: readonly (LooseResult | Error)[];
+          try {
+            subResults = await subProducer(entries.map((it) => it.req));
+          } catch (error: unknown) {
             // Per-request error isolation survives the merge: this type's
             // slots settle as Error elements instead of failing the whole
             // invocation. A non-Error rejection is wrapped rather than stored
@@ -301,8 +313,8 @@ export function bulkProducerByIdType<
                     `bulkProducerByIdType: the "${resourceType}" producer rejected with a non-Error value`,
                     { cause: error },
                   );
-            return entries.map(() => asError);
-          });
+            subResults = entries.map(() => asError);
+          }
 
           entries.forEach((entry, j) => {
             const result = subResults[j];

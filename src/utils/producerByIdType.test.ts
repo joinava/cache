@@ -84,6 +84,41 @@ describe("producerByIdType / bulkProducerByIdType", () => {
       await cache.close();
     }
   });
+  it("bulkProducerByIdType: a sub-producer that fails SYNCHRONOUSLY is isolated to its own type's slots, like a rejection", async () => {
+    // The isolation contract has to cover a synchronous throw, not just a
+    // rejection: a non-async sub-producer that validates its batch (or whose
+    // first synchronous step throws -- the hashed-input wrappers' internal
+    // producers read their input registry synchronously) never reaches a handler
+    // attached to its return value. Failing the whole invocation instead would
+    // discard `business_slice`'s already-computed result and its store, for a
+    // failure only `site_day` had.
+    const boom = new Error("sync boom");
+    const producer = bulkProducerByIdType(registry, {
+      site_day: (reqs) => {
+        expect(reqs.length).to.equal(2);
+        throw boom;
+      },
+      business_slice: async (reqs) =>
+        reqs.map((req) => ({
+          content: `biz-${req.id}`,
+          directives: freshFor100,
+        })),
+    });
+
+    const emptyRequest = { params: {}, directives: {} } as const;
+    const results = await producer([
+      { ...emptyRequest, id: "site:1" },
+      { ...emptyRequest, id: "biz:1" },
+      { ...emptyRequest, id: "site:2" },
+    ]);
+
+    expect(results[0]).to.equal(boom);
+    expect(results[2]).to.equal(boom);
+    const survivor = results[1];
+    assert.ok(survivor !== undefined && !(survivor instanceof Error));
+    expect(survivor.content).to.equal("biz-biz:1");
+  });
+
   describe("by-id-type producers are built from a registry, not a cache", () => {
     const emptyRequest = { params: {}, directives: {} } as const;
 

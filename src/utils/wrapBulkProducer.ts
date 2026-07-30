@@ -289,9 +289,16 @@ export function wrapBulkProducer<
     // A by-id-type producer routes ids itself and has no cache to name in its
     // errors; this is where the cache's name is put back on (see
     // rethrowUnroutableWithCacheName). Every other rejection passes through.
-    const responses = await looseProducer(reqs).catch((error: unknown) =>
-      rethrowUnroutableWithCacheName(cache.name, error),
-    );
+    //
+    // try/catch rather than a `.catch()` on the returned promise, for the reason
+    // given in `wrapProducer`: a producer that fails SYNCHRONOUSLY never reaches
+    // a handler attached to its return value.
+    let responses: (LooseResult | ErrorType)[];
+    try {
+      responses = await looseProducer(reqs);
+    } catch (error: unknown) {
+      rethrowUnroutableWithCacheName(cache.name, error);
+    }
     logTrace("got responses from bulk producer", { responses });
     return responses;
   };
