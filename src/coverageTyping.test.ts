@@ -427,13 +427,13 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     it("singleTypeCacheOptions: keeps content and id types exact while giving up only the resource-type name", async () => {
       const defaultName = new Cache(
         singleTypeCacheOptions<number[]>()({
-          store: new MemoryStore<CacheSpec<string, number[]>>(),
+          store: new MemoryStore(),
           name: "typing-single-default-name",
         }),
       );
       const explicitName = new Cache(
         singleTypeCacheOptions<number[]>()({
-          store: new MemoryStore<CacheSpec<string, number[]>>(),
+          store: new MemoryStore(),
           name: "typing-single-explicit-name",
           resourceTypeName: "visits",
         }),
@@ -466,20 +466,15 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     it("singleTypeCacheOptions: `validateId` narrows the id space through to the cache's request type", async () => {
       const guarded = new Cache(
         singleTypeCacheOptions<{ fields: string[] }>()({
-          // A narrowed cache must type its store for the narrowed id space.
-          // That is the narrowing being ENFORCED rather than friction: a store
-          // over the wider id space is rejected here instead of silently
-          // widening the cache.
-          store: new MemoryStore<
-            CacheSpec<`zendesk-ticket-schema:${string}`, { fields: string[] }>
-          >(),
+          // The store needs NO type argument to earn the narrowing: `Id` comes
+          // from the guard alone, and the store is only checked for coverage.
+          store: new MemoryStore(),
           name: "typing-single-guarded",
           validateId: idStartsWith("zendesk-ticket-schema:"),
         }),
       );
       try {
-        // `Id` came from the guard, not from the store (which is
-        // and it reaches the cache's own request type.
+        // `Id` came from the guard, and it reaches the cache's request type.
         expectType<
           Equal<
             SpecOf<typeof guarded.resourceTypes>["id"],
@@ -503,27 +498,76 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       }
     });
 
-    it("singleTypeCacheOptions: a guard with an untyped store widens the id space rather than lying about it", async () => {
-      // `Id` is inferred from the store as well as from the guard, so an
-      // untyped store contributes a `string` candidate and the id space widens.
-      // The guard still runs at runtime (the runtime half is pinned in
-      // resourceTypeClassification.test.ts), so this is the safe direction:
-      // types wider than runtime, never narrower.
-      const widened = new Cache(
+    it("singleTypeCacheOptions: a store supporting a WIDER spec backs a narrowed sole-type cache", async () => {
+      // The sugar gets the same store-coverage rule as a hand-written registry:
+      // the store must support at least the cache's sole resource type, and may
+      // support more. Nothing about the wider store leaks into the cache's own
+      // types -- the id space is still the guard's, and the content type is
+      // still the one asked for, not the store's union.
+      const shared = new MemoryStore<
+        | CacheSpec<`zendesk-ticket-schema:${string}`, { fields: string[] }>
+        | CacheSpec<`unrelated:${string}`, number[]>
+      >();
+      const narrowed = new Cache(
         singleTypeCacheOptions<{ fields: string[] }>()({
-          store: new MemoryStore(),
-          name: "typing-single-guarded-untyped-store",
+          store: shared,
+          name: "typing-single-wider-store",
           validateId: idStartsWith("zendesk-ticket-schema:"),
         }),
       );
       try {
-        expectType<Equal<SpecOf<typeof widened.resourceTypes>["id"], string>>();
+        expectType<
+          Equal<
+            SpecOf<typeof narrowed.resourceTypes>["id"],
+            `zendesk-ticket-schema:${string}`
+          >
+        >();
+        expectType<
+          Equal<
+            SpecOf<typeof narrowed.resourceTypes>["content"],
+            { fields: string[] }
+          >
+        >();
+
         if (false as boolean) {
           const bare = "x" as string;
-          void widened.get({ id: bare, params: {}, directives: {} });
+          // prettier-ignore
+          // @ts-expect-error the guard's id space still bounds the cache
+          void narrowed.get({ id: bare, params: {}, directives: {} });
+          // prettier-ignore
+          // @ts-expect-error an id the STORE supports but this cache does not
+          void narrowed.get({ id: "unrelated:1", params: {}, directives: {} });
+          void narrowed.get({
+            id: "zendesk-ticket-schema:b1:abc",
+            params: {},
+            directives: {},
+          });
         }
       } finally {
-        await widened.close();
+        await narrowed.close();
+      }
+    });
+
+    it("singleTypeCacheOptions: rejects a store that does not cover the sole type, and a narrow Id with no guard behind it", () => {
+      if (false as boolean) {
+        // A narrower id space may only be NAMED when a runtime guard enforces
+        // it. Without `validateId` the explicit type argument is refused, so the
+        // asserted-but-unchecked narrowing the old sugar allowed stays closed.
+        // prettier-ignore
+        // @ts-expect-error `validateId` is required once `Id` is narrower than string
+        void singleTypeCacheOptions<number[]>()<`visits:${string}`>({ store: new MemoryStore(), name: "typing-single-named-no-guard" });
+
+        // Coverage is enforced where a hand-written registry enforces it: at
+        // the constructor. Wrong content type for the ids this cache uses...
+        // prettier-ignore
+        // @ts-expect-error store holds strings; this cache holds number[]
+        void new Cache(singleTypeCacheOptions<number[]>()({ store: new MemoryStore<CacheSpec<string, string>>(), name: "typing-single-bad-content" }));
+
+        // ...and a store whose id space is NARROWER than the cache's, which
+        // would let the cache try to store ids the store says cannot exist.
+        // prettier-ignore
+        // @ts-expect-error unguarded cache spans every string; store spans only `visits:`
+        void new Cache(singleTypeCacheOptions<number[]>()({ store: new MemoryStore<CacheSpec<`visits:${string}`, number[]>>(), name: "typing-single-narrow-store" }));
       }
     });
 

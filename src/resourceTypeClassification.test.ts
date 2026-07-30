@@ -23,7 +23,6 @@ import {
   resourceType,
   singleTypeCacheOptions,
   UnclassifiableIdError,
-  type CacheSpec,
   type ResourceTypes,
 } from "./index.js";
 import wrapProducer from "./utils/wrapProducer.js";
@@ -758,13 +757,12 @@ describe("resource-type classification (§6.1, §6.2)", () => {
 
 describe("singleTypeCacheOptions", () => {
   const freshFor10 = { freshUntilAge: 10 };
-  const storeFor = <Content>() => new MemoryStore<CacheSpec<string, Content>>();
 
   it("names the sole resource type after the cache, and reports that name on the diagnostics channels", async () => {
     const name = uniqueCacheName("sole-default-name");
     const capture = captureChannels(name);
     const cache = new Cache(
-      singleTypeCacheOptions<string>()({ store: storeFor<string>(), name }),
+      singleTypeCacheOptions<string>()({ store: new MemoryStore(), name }),
     );
     try {
       const fetch = wrapProducer(cache, {}, async (req) => ({
@@ -793,7 +791,7 @@ describe("singleTypeCacheOptions", () => {
     const capture = captureChannels(name);
     const cache = new Cache(
       singleTypeCacheOptions<string>()({
-        store: storeFor<string>(),
+        store: new MemoryStore(),
         name,
         resourceTypeName: "visits",
       }),
@@ -819,7 +817,7 @@ describe("singleTypeCacheOptions", () => {
   it("classifies every id, since its sole type's guard accepts all of them", async () => {
     const cache = new Cache(
       singleTypeCacheOptions<string>()({
-        store: storeFor<string>(),
+        store: new MemoryStore(),
         name: uniqueCacheName("sole-accepts-all"),
         resourceTypeName: "entries",
       }),
@@ -839,7 +837,7 @@ describe("singleTypeCacheOptions", () => {
   it("passes other CacheOptions through (spreadable, and `onGetAfterClose` still governs)", async () => {
     const cache = new Cache({
       ...singleTypeCacheOptions<string>()({
-        store: storeFor<string>(),
+        store: new MemoryStore(),
         name: uniqueCacheName("sole-spread"),
       }),
       onGetAfterClose: "act-empty",

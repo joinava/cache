@@ -925,63 +925,51 @@ type SingleTypeRegistry<Id extends string, Content> = {
 };
 
 /**
- * The non-registry half of {@link CacheOptions}, plus a store spelled against
- * the sole spec directly.
+ * What {@link singleTypeCacheOptions} accepts. The three RT-dependent keys are
+ * omitted from {@link CacheOptions} and re-declared here, so everything else is
+ * derived and cannot drift as `CacheOptions` grows.
  *
- * `NoInfer` on the store's `Id` is load-bearing. Without it the store is a
- * second inference site for `Id`, competing with `validateId` -- and an untyped
- * `new MemoryStore()` wins, collapsing `Id` back to `string` and silently
- * discarding the guard's narrowing, which would reintroduce exactly the
- * asserted-but-unenforced narrowing that deleting the old sole-resource-type
- * sugar closed. The guard is the only place a narrower id space may come
- * from, so it is the only place `Id` is inferred from. (Probed: without
- * `NoInfer`, the cache's request id type came back `string` even with a guard
- * supplied.)
+ * `Id` is inferred from `validateId` and from nothing else. The store
+ * deliberately does not mention `Id`: its own spec is captured in
+ * `StoreSupportedTypes` and merely *checked* for coverage, exactly as for a
+ * hand-written registry (see {@link CacheOptions}' `store`). That buys two
+ * things at once -- a general-purpose store can back a sole-type cache, and the
+ * store stops competing with the guard as an inference site for `Id`. While it
+ * did compete, an untyped `new MemoryStore()` won and silently collapsed `Id`
+ * back to `string`, discarding the guard's narrowing.
  *
- * The cost is that a *narrowed* cache must type its store for the narrowed id
- * space -- `new MemoryStore<CacheSpec<Id, Content>>()` rather than
- * `new MemoryStore()`. That is the narrowing being enforced rather than
- * friction: a store over the wider id space is rejected here instead of
- * silently widening the cache. Unnarrowed callers are unaffected.
+ * The intersected carrier is what keeps a narrower `Id` honest. `validateId`
+ * has to be optional in the base object to serve as an inference site at all;
+ * the carrier makes it REQUIRED as soon as `Id` is narrower than `string`. An
+ * explicit type argument is fixed before the carrier resolves, so naming a
+ * narrow `Id` without a guard is rejected -- and an *inferred* narrow `Id`
+ * could only have come from a guard in the first place. So a narrower id space
+ * always has a runtime check behind it. (The tuple brackets make this a
+ * whole-set comparison rather than a distributive, member-by-member one.)
  *
- * The omitted keys are the only RT-dependent ones, so deriving the rest by
- * `Omit` keeps this from drifting as {@link CacheOptions} grows.
+ * Note that coverage is NOT checked here: it cannot be. The check has to
+ * compare `CacheSpec<Id, Content>` against the store's spec, and a conditional
+ * spelled over `Id` is resolved while checking the `store` property -- before
+ * `validateId` has contributed its inference, since a type predicate's
+ * narrowing lands in a later pass. It therefore resolves against `Id`'s default
+ * of `string` and rejects every store typed more narrowly than that. (Probed:
+ * a store typed for exactly the guard's id space failed its own coverage
+ * check.) Coverage is left to `new Cache`, where `Id` is already fixed.
  */
-type SingleTypeCacheOptionsCommon<
+type SingleTypeCacheOptionsInput<
+  Id extends string,
   Validators extends AnyValidators,
   Params extends AnyParams,
+  StoreSupportedTypes extends CacheSpec,
 > = Omit<
   CacheOptions<ResourceTypes, Validators, Params>,
   "store" | "name" | "resourceTypes"
->;
-
-/**
- * The `Id`-dependent half.
- *
- * `Id` is inferred from BOTH `validateId` and `store`, deliberately. An earlier
- * attempt wrapped the store's `Id` in `NoInfer` so the guard would be its only
- * source; probing showed that does not do what it reads like -- it leaves `Id`
- * with no inference candidate at all, so it falls back to its `string`
- * constraint and the guard's narrowing is discarded outright.
- *
- * With both sites live, the outcome is sound either way:
- *
- * - Guard + a store typed for the narrow id space (`new MemoryStore<CacheSpec<
- *   \`ticket:${string}\`, C>>()`): both candidates agree, and the narrowed id
- *   space reaches the cache's request types.
- * - Guard + an untyped `new MemoryStore()`: the store contributes a `string`
- *   candidate, so `Id` widens to `string`. The guard still runs at runtime, so
- *   nonconforming ids still throw -- you simply do not get the *type-level*
- *   narrowing. Wider-than-necessary types are safe; it is narrower-than-runtime
- *   that would be unsound, and that cannot happen here.
- */
-type SingleTypeCacheOptionsIdPart<
-  Id extends string,
-  Content,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-> = {
-  store: Store<CacheSpec<Id, Content>, Validators, InvariantOf<Params>>;
+> & {
+  /**
+   * REQUIRED. Only has to support *at least* this cache's sole resource type;
+   * see {@link CacheOptions}' `store`.
+   */
+  store: Store<StoreSupportedTypes, Validators, InvariantOf<Params>>;
   /**
    * REQUIRED. Names this cache instance (and, by default, its sole resource
    * type) in every diagnostics message.
@@ -989,37 +977,46 @@ type SingleTypeCacheOptionsIdPart<
   name: string;
   /** Defaults to the cache's own `name`. */
   resourceTypeName?: string;
-};
+  /**
+   * A REAL runtime guard for the sole resource type's id space; the only thing
+   * that can narrow `Id` below `string`, and required once it is narrower.
+   */
+  validateId?: (id: string) => id is Id;
+} & ([string] extends [Id]
+    ? unknown
+    : { validateId: (id: string) => id is Id });
 
 /**
- * The two ways to call {@link singleTypeCacheOptions}, kept as separate call
- * signatures rather than one signature with an optional `validateId` and a
- * defaulted `Id`. That would leave `Id` nameable by an explicit type argument
- * with no guard behind it -- reopening exactly the unsoundness that removing
- * the old sole-resource-type sugar closed. Here a narrower `Id` has only one
- * source: the guard that enforces it.
+ * The one way to call {@link singleTypeCacheOptions}.
+ *
+ * The returned `store` is re-declared without {@link CacheOptions}' coverage
+ * guard on purpose. Leaving the guard on would have this function's own
+ * (asserted) return type claim the guard's phantom property, so `new Cache`
+ * would see the requirement already satisfied and wave an under-covering store
+ * through. Handing back the plain store type instead leaves the real one for
+ * the constructor to check.
  */
-export type SingleTypeCacheOptionsBuilder<Content> = {
-  /** No guard, so the id space is `string`. */
-  <
-    Validators extends AnyValidators = AnyValidators,
-    Params extends AnyParams = AnyParams,
-  >(
-    options: SingleTypeCacheOptionsCommon<Validators, Params> &
-      SingleTypeCacheOptionsIdPart<string, Content, Validators, Params>,
-  ): CacheOptions<SingleTypeRegistry<string, Content>, Validators, Params>;
-  /** With a real guard, which is what earns the narrower `Id`. */
-  <
-    Id extends string,
-    Validators extends AnyValidators = AnyValidators,
-    Params extends AnyParams = AnyParams,
-  >(
-    options: SingleTypeCacheOptionsCommon<Validators, Params> &
-      (SingleTypeCacheOptionsIdPart<Id, Content, Validators, Params> & {
-        validateId: (id: string) => id is Id;
-      }),
-  ): CacheOptions<SingleTypeRegistry<Id, Content>, Validators, Params>;
-};
+export type SingleTypeCacheOptionsBuilder<Content> = <
+  Id extends string = string,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+  StoreSupportedTypes extends CacheSpec = CacheSpec<Id, Content>,
+>(
+  options: SingleTypeCacheOptionsInput<
+    Id,
+    Validators,
+    Params,
+    StoreSupportedTypes
+  >,
+) => Omit<
+  CacheOptions<
+    SingleTypeRegistry<Id, Content>,
+    Validators,
+    Params,
+    StoreSupportedTypes
+  >,
+  "store"
+> & { store: Store<StoreSupportedTypes, Validators, InvariantOf<Params>> };
 
 /**
  * Builds {@link CacheOptions} for a cache with exactly ONE resource type, so the
@@ -1041,30 +1038,34 @@ export type SingleTypeCacheOptionsBuilder<Content> = {
  * inferred from anything, so it must be given explicitly, and TS has no partial
  * type-argument inference.
  *
+ * As with a hand-written registry, the store only has to support *at least*
+ * this cache's resource type, so a general-purpose store can back a sole-type
+ * cache. Coverage is checked by `new Cache`; see {@link CacheOptions}' `store`.
+ *
  * ## Narrowing the id space
  *
  * By default the sole type accepts every id, so the id space is `string`. Pass
  * `validateId` to narrow it. It is a REAL runtime guard, not an assertion (see
- * below for why the asserted form was removed), so a
- * nonconforming id throws `UnclassifiableIdError` before the store is touched:
+ * below for why the asserted form was removed), so a nonconforming id throws
+ * `UnclassifiableIdError` before the store is touched:
  *
  * ```ts
  * const cache = new Cache(
  *   singleTypeCacheOptions<Schema>()({
- *     // A narrowed cache must type its store for the narrowed id space; see
- *     // SingleTypeCacheOptionsInput for why, and why that is enforcement
- *     // rather than friction.
- *     store: new MemoryStore<CacheSpec<`ticket:${string}`, Schema>>(),
+ *     store: new MemoryStore(),
  *     name: "tickets",
  *     validateId: idStartsWith("ticket:"),
  *   }),
  * );
+ * // cache.get({ id: "ticket:1", ... })  // ok
+ * // cache.get({ id: "nope", ... })      // compile error
  * ```
  *
- * `validateId` is only reachable through the second call signature, which
- * *requires* it -- so a narrower `Id` always has a runtime check behind it.
- * Writing the one-entry registry out by hand remains equivalent and is the
- * better choice when you also want the literal resource-type name:
+ * The guard is *required* as soon as `Id` is narrower than `string` (see
+ * {@link SingleTypeCacheOptionsBuilder}), so a narrower id space always has a
+ * runtime check behind it. Writing the one-entry registry out by hand remains
+ * equivalent and is the better choice when you also want the literal
+ * resource-type name:
  *
  * ```ts
  * new Cache({

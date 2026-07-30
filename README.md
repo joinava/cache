@@ -50,14 +50,14 @@ To narrow the id space below `string` — template-literal or branded ids flowin
 ```ts
 const cache = new Cache(
   singleTypeCacheOptions<TicketSchema>()({
-    store: new MemoryStore<CacheSpec<`zendesk-ticket-schema:${string}`, TicketSchema>>(),
+    store,
     name: "zendesk_ticket_schemas",
     validateId: idStartsWith("zendesk-ticket-schema:"),
   }),
 );
 ```
 
-`validateId` is only reachable through a call signature that *requires* it, so a narrowed id type always has a runtime check behind it. Note the store is typed for the narrowed id space above: `Id` is inferred from the guard *and* the store, so an untyped `new MemoryStore()` contributes a `string` candidate and widens the id space back to `string`. The guard still runs either way, so that's the safe direction — types wider than runtime, never narrower.
+`validateId` is *required* as soon as the id space is narrower than `string`, so a narrowed id type always has a runtime check behind it — naming a narrow `Id` by explicit type argument without supplying the guard is a compile error. The store needs no type argument to earn the narrowing: `Id` comes from the guard alone, and the store is only checked for coverage (see below).
 
 Writing the one-entry registry out by hand stays equivalent, and is the better choice when you also want the literal resource-type name:
 
@@ -86,7 +86,20 @@ const store = new MemoryStore<SpecOf<typeof everyResourceTypeWeHave>>();
 const cache = new Cache({ store, name: "stories", resourceTypes: storiesResourceTypes });
 ```
 
-A store that does *not* cover the registry is still rejected, so this convenience can't silently accept a store that would fail at runtime on an id it doesn't handle.
+A store that does *not* cover the registry is still rejected, so this convenience can't silently accept a store that would fail at runtime on an id it doesn't handle. The same rule applies to `singleTypeCacheOptions`, so one general-purpose store can back several single-type caches:
+
+```ts
+const store = new MemoryStore<SpecOf<typeof everyResourceTypeWeHave>>();
+const tickets = new Cache(
+  singleTypeCacheOptions<TicketSchema>()({
+    store,
+    name: "zendesk_ticket_schemas",
+    validateId: idStartsWith("zendesk-ticket-schema:"),
+  }),
+);
+```
+
+Nothing about the wider store leaks into the narrow cache: `tickets` still accepts only `zendesk-ticket-schema:` ids and still returns `TicketSchema`, not the store's content union.
 
 ### Per-id content typing (heterogeneous caches)
 

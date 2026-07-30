@@ -1222,31 +1222,52 @@ is still exactly `CacheSpec<Id, Content>`, so the id space and content type stay
 precise; only the name is imprecise, which is the thing the helper exists to let
 you stop thinking about.
 
-#### `validateId`, and the `NoInfer` mistake
+#### `validateId`, and where the guard requirement lives
 
-`validateId` narrows the id space below `string`. It is reachable only through a
-second call signature that *requires* it, so a narrower `Id` always has a runtime
-check behind it -- an explicit type argument cannot name one without a guard,
-which is the invariant deleting the old sugar established.
+`validateId` narrows the id space below `string`, and `Id` is inferred from it
+and from nothing else. The store deliberately does not mention `Id`: it is typed
+`Store<StoreSupportedTypes, …>` and only checked for coverage (see 4 below), so
+`Id` has exactly one source -- the guard that enforces it.
 
-`Id` is inferred from **both** `validateId` and `store`, deliberately. An earlier
-iteration wrapped the store's `Id` in `NoInfer` so the guard would be its only
-source. Probing showed that does not do what it reads like: it leaves `Id` with
-no inference candidate at all, so it falls back to its `string` constraint and
-the guard's narrowing is discarded outright. (An intermediate diagnosis -- that
-`NoInfer` "makes the guard win at the cost of every caller spelling out the store
-spec" -- was simply wrong, and the friction objection built on it does not
-apply.)
+The requirement that a narrower `Id` come with a guard is carried by an
+intersected conditional rather than a second call signature:
 
-With both sites live, both outcomes are sound:
+```ts
+{ …; validateId?: (id: string) => id is Id }
+  & ([string] extends [Id] ? unknown : { validateId: (id: string) => id is Id })
+```
 
-- Guard + a store typed for the narrow id space: the candidates agree and the
-  narrowed id space reaches the cache's request types.
-- Guard + an untyped `new MemoryStore()`: the store contributes a `string`
-  candidate, so `Id` widens to `string`. The guard still runs at runtime, so
-  nonconforming ids still throw; you just do not get the *type-level* narrowing.
-  Wider-than-necessary types are safe -- narrower-than-runtime would be unsound,
-  and cannot happen here.
+`validateId` has to be optional in the base object to be an inference site at
+all; the carrier makes it required as soon as `Id` is narrower than `string`. An
+explicit type argument is fixed before the carrier resolves, so naming a narrow
+`Id` without a guard is rejected, and an *inferred* narrow `Id` could only have
+come from a guard. One signature replaces two, and the error a caller sees is
+"`validateId` is missing" rather than "no overload matches this call".
+
+Two corrections to earlier iterations, both from probing rather than reasoning:
+
+- An attempt to wrap the store's `Id` in `NoInfer` so the guard would win does
+  not do what it reads like -- it leaves `Id` with no inference candidate at all,
+  so it falls back to its `string` constraint and the narrowing is discarded
+  outright. (An intermediate diagnosis, that `NoInfer` "makes the guard win at
+  the cost of every caller spelling out the store spec", was simply wrong.)
+- While the store still carried `CacheSpec<Id, Content>`, an untyped
+  `new MemoryStore()` contributed a competing `string` candidate that beat the
+  guard's, so a guarded cache with an untyped store silently lost its type-level
+  narrowing. Taking `Id` out of the store's type removes the competition; the
+  narrowing now holds regardless of how the store is typed.
+
+Coverage is *not* checked inside the helper, and cannot be. The check compares
+`CacheSpec<Id, Content>` against the store's spec, and a conditional spelled over
+`Id` is resolved while checking the `store` property -- before `validateId` has
+contributed its inference, since a type predicate's narrowing lands in a later
+pass. It therefore resolves against `Id`'s default of `string` and rejects every
+store typed more narrowly (probed: a store typed for exactly the guard's id space
+failed its own coverage check). So the helper hands back the store's plain type
+and `new Cache` does the checking, with `Id` already fixed. For that to work the
+returned `store` field is re-declared *without* `CacheOptions`' coverage guard:
+leaving the guard on would have the helper's own asserted return type claim the
+guard's phantom property, and an under-covering store would sail through.
 
 **4. The store may support a WIDER spec than the cache's registry.** `Cache` and
 `CacheOptions` gained a final, defaulted `StoreSupportedTypes extends CacheSpec =
@@ -1293,6 +1314,11 @@ Cost of the chosen approach: three documented casts at the store boundary inside
 involved came from this cache and is therefore in `SpecOf<RT>`, so the two agree
 pointwise -- the same fact TS cannot see.
 
+`singleTypeCacheOptions` gets the same latitude, so one general-purpose store can
+back several single-type caches; it threads its own `StoreSupportedTypes` through
+and lets the constructor do the checking, for the inference-ordering reason
+described under `validateId` above.
+
 Ordering note: `StoreSupportedTypes` is **last and defaulted**. An intermediate
 iteration inserted it second, which silently shifted `Validators` into its slot
 at every 3-argument `CacheOptions<RT, Validators, Params>` use -- and in an
@@ -1314,6 +1340,12 @@ diagnostic.
   keeps `content` exact while `classify()` widens to `string`; `validateId`
   narrows the id space through to `Cache.get`'s request type; a wider store is
   accepted with no type arguments, and an under-covering store is rejected.
+- Compile fixtures for the helper specifically: a store supporting a strictly
+  wider spec backs a *narrowed* sole-type cache, and neither the store's id union
+  nor its content union leaks into that cache's types; naming a narrow `Id` by
+  explicit type argument without `validateId` is rejected; and at the constructor,
+  both a wrong-content store and a store whose id space is narrower than an
+  unguarded cache's are rejected.
 - Every test in `singleProducerFn.test.ts` now runs against a store whose spec is
   strictly wider than its cache's registry, so the covering path is exercised
   throughout rather than in one fixture.
