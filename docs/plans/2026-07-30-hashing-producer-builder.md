@@ -74,6 +74,11 @@ silently claimed coverage of a variant nothing produced.
 reusable before any cache exists — and the variant map's declared `output` is
 what lets a branch be validated where it is written.
 
+(The same treatment was then applied to `producerByIdType`/`bulkProducerByIdType`,
+which now take the resource-type registry rather than a cache — see §11 of
+[the by-id-type plan](./2026-07-30-single-producer-fn-and-by-id-type-sugar.md),
+including why the tempting `Pick<RT, Covered>` signature is silently vacuous.)
+
 ## Where each check lives
 
 | Check | Where |
@@ -130,6 +135,8 @@ cache, keeps it with no ceremony.
   positionally), and "matchesInput is ignored on a single-coverage wrapper" has
   no subject (the two-function form has no guard, and a one-`.when` builder's
   guard is consulted like any other).
+- 30 `input as StoryInput`-style casts across the tests, and the explicit type
+  arguments at ~16 call sites.
 
 One runtime throw was ADDED, for the same reason the minted-id check exists —
 the type-level rejection is bypassable by a cast: a duplicate `.when` for one
@@ -137,8 +144,6 @@ variant throws at build time. Silently keeping one would not merely shadow the
 other, since dispatch takes the first matching branch while the
 per-resource-type producer table keeps the last: the second branch's content
 would be stored under the first branch's minted id.
-- 30 `input as StoryInput`-style casts across the tests, and the explicit type
-  arguments at ~16 call sites.
 
 ## Alternatives probed and rejected
 
@@ -161,7 +166,7 @@ would be stored under the first branch's minted id.
 
 ## Verification
 
-`tsc -b`, `oxlint`, and the full suite: 351 tests, 350 passing, 1 pre-existing
+`tsc -b`, `oxlint`, and the full suite: 355 tests, 354 passing, 1 pre-existing
 docker-dependent skip. New compile fixtures cover per-branch input narrowing,
 wrong output for a variant, a duplicate `.when`, a guard for an undeclared
 input, minting outside the variant's resource type, a variant name outside the

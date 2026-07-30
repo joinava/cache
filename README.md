@@ -132,7 +132,7 @@ This is particularly useful when a producer that fetches a collection wants to a
 
 - [`PostgresStore.ts`](./src/stores/PostgresStore/PostgresStore.ts): a store for retaining cached data in Postgres.
 
-The package provides **four** functions for wrapping producers with a cache. They split along two axes — single vs. bulk, and "lookup" vs. "compute". The two lookup wrappers take **exactly one producer function**; the two compute wrappers take a record of branches keyed by resource type (their branches route by *input*, not by id):
+The package provides **four** functions for wrapping producers with a cache. They split along two axes — single vs. bulk, and "lookup" vs. "compute". All four take **exactly one producer**, and in every case per-resource-type dispatch is opt-in sugar that builds that one producer from several: `producerByIdType`/`bulkProducerByIdType` route by the request's id, while the compute wrappers' `hashingProducerByInputType`/`bulkHashingProducerByInputType` route by *input*. None of those four sugar helpers needs a cache:
 
 - [`wrapProducer.ts`](./src/utils/wrapProducer.ts) — **`wrapProducer`**: the package's most important export, arguably. It takes a producer (a function that returns data to cache) and a `Cache` instance, and returns a function that will use a cached value when a suitable one is available, but otherwise call through to the producer and store its return value for future requests.
 
@@ -143,8 +143,10 @@ The package provides **four** functions for wrapping producers with a cache. The
     directives: { freshUntilAge: 60 },
   }));
 
-  // Per-resource-type dispatch (and/or partial coverage) is opt-in sugar:
-  const getStories = wrapProducer(cache, {}, producerByIdType(cache, {
+  // Per-resource-type dispatch (and/or partial coverage) is opt-in sugar.
+  // Note it takes the REGISTRY, not the cache -- routing by id type needs
+  // nothing else, so this is a value you can build and test on its own:
+  const getStories = wrapProducer(cache, {}, producerByIdType(storiesResourceTypes, {
     story: async (req) => ({ content: await fetchStory(req.id), directives: { freshUntilAge: 60 } }),
     collection: async (req) => {
       const collection = await fetchCollection(req.id);
@@ -161,6 +163,12 @@ The package provides **four** functions for wrapping producers with a cache. The
   A **bare function covers the whole registry**, and the compiler makes it prove that: its parameter must accept every registry id. **Partial coverage requires `producerByIdType`** (or `bulkProducerByIdType`), which turns a per-resource-type record into one function carrying its covered set in an optional symbol-keyed property (`coveredTypes`). That set is the wrapper's **coverage**, and it bounds the returned function's request type: requests for uncovered types are compile errors (and, if reached via casts, throw `NoProducerForResourceTypeError` *before any cache read*). A bare producer can't under-cover, so that error is unreachable for it. `producerByIdType` throws at construction on an empty record.
 
   Reaching for `producerByIdType` also buys per-branch type checking: each key narrows its sub-producer's `req.id` **and** its result to that resource type's content, so TypeScript checks the (id, content) correlation per branch. A single function's result type is the union over its covered ids, so it is free to return one variant's content for every id.
+
+  Both helpers take the **resource-type registry** (`cache.resourceTypes`, or the literal you declared it from) rather than a cache: classifying an id to pick a sub-producer is all they do, and that needs the registry alone. So a by-id-type producer is a value in its own right — buildable, drivable and unit-testable before any cache exists, and reusable across caches over the same registry. It is also the inference site for the registry type, which is why it is a parameter rather than a type argument.
+
+  When such a producer is driven **directly** and an id doesn't classify to exactly one covered type, it throws `UnroutableIdError` — cache-free, carrying `id`, `coveredResourceTypes`, and a `detail` discriminated on `reason` (`"uncovered"` / `"unclassifiable"` / `"ambiguous"`). Driven through a wrapper, the wrapper catches it and re-throws the equivalent cache-named error (`NoProducerForResourceTypeError`, `UnclassifiableIdError`, `AmbiguousResourceTypeError`), so a wrapped producer's observable errors are unchanged. Reaching it through a wrapper at all means the registry the producer was built from disagrees with the cache's own — the wrapper classifies first, against the cache's registry — so passing `cache.resourceTypes` (rather than another object of the same shape) is what keeps the two in step.
+
+  Writing a multi-resource-type producer **by hand** instead? `classifyIdAgainst(registryEntries(resourceTypes), id)` is the same total classification the cache and these helpers use, exported for exactly that, and it returns an outcome rather than throwing so you can render your own errors.
 
   A type with no producer in any wrapper is legal and normal: its entries are written as other producers' supplemental resources (or direct `store()` calls) and read via `Cache.get` — the serve-if-present contract. Partial coverage also makes capability-scoped and split wrappers honest: a second `wrapProducer` call can cover a different subset of the same cache.
 

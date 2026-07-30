@@ -373,7 +373,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
           const getSite = wrapProducer(
             cache,
             {},
-            producerByIdType(cache, { site_day: producer }),
+            producerByIdType(cache.resourceTypes, { site_day: producer }),
           );
           const thrown = await expectRejection(() =>
             getSite({ id: "unknown:1" as string as `site:${string}` }),
@@ -508,7 +508,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
           const getSite = wrapProducer(
             cache,
             {},
-            producerByIdType(cache, { site_day: producer }),
+            producerByIdType(cache.resourceTypes, { site_day: producer }),
           );
           // The producer result still reaches the caller; whether the wrapped
           // call itself surfaces the (asynchronous) store failure is not

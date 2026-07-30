@@ -3,7 +3,11 @@ import type { ReadonlyDeep } from "type-fest";
 import type { PublicInterface } from "type-party";
 
 import type Cache from "../Cache.js";
-import type { CacheLookupResult } from "../Cache.js";
+import {
+  AmbiguousResourceTypeError,
+  type CacheLookupResult,
+  UnclassifiableIdError,
+} from "../Cache.js";
 import {
   cacheProduceChannel,
   publishCacheFetch,
@@ -11,11 +15,15 @@ import {
   type CacheFetchDisposition,
 } from "../diagnostics.js";
 import type { SpecForId } from "../types/00_CacheSpec.js";
-import type {
-  IdOfResourceType,
-  ResourceTypeName,
-  ResourceTypes,
-  SpecOf,
+import {
+  classifyIdAgainst,
+  type IdClassification,
+  type IdOfResourceType,
+  type RegistryEntries,
+  registryEntries,
+  type ResourceTypeName,
+  type ResourceTypes,
+  type SpecOf,
 } from "../types/00_ResourceTypes.js";
 import type {
   AnyParams,
@@ -83,6 +91,167 @@ export class NoProducerForResourceTypeError extends Error {
     this.resourceType = args.resourceType;
     this.coveredResourceTypes = args.coveredResourceTypes;
     this.id = args.id;
+  }
+}
+
+/**
+ * Why an id could not be routed to one of a by-id-type producer's covered
+ * sub-producers. A discriminated union so a renderer cannot read a field the
+ * reason does not populate.
+ */
+export type UnroutableIdReason =
+  | {
+      readonly reason: "unclassifiable";
+      /** See {@link IdClassification}'s `cause`. */
+      readonly cause: unknown;
+    }
+  | {
+      readonly reason: "ambiguous";
+      readonly matchedResourceTypes: readonly string[];
+    }
+  | { readonly reason: "uncovered"; readonly resourceType: string };
+
+/**
+ * Thrown by {@link producerByIdType}/`bulkProducerByIdType` when an id cannot
+ * be routed to one of their sub-producers.
+ *
+ * Cache-free by construction: these helpers are built from a resource-type
+ * registry, so they have no cache to name. When one is driven through a wrapper
+ * the wrapper catches it and re-throws the equivalent cache-named error
+ * (see {@link rethrowUnroutableWithCacheName}), so a wrapped producer's
+ * observable errors are unchanged; this error surfaces only when the helper's
+ * result is invoked directly.
+ *
+ * Reaching it through a wrapper at all means the registry the helper was built
+ * from disagrees with the cache's own -- the wrapper classifies first, against
+ * the cache's registry, and rejects uncovered types before dispatching. Passing
+ * `cache.resourceTypes` (rather than some other object of the same shape) is
+ * what keeps the two in step.
+ */
+export class UnroutableIdError extends Error {
+  override readonly name = "UnroutableIdError";
+  readonly id: string;
+  readonly coveredResourceTypes: readonly string[];
+  readonly detail: UnroutableIdReason;
+
+  constructor(args: {
+    id: string;
+    coveredResourceTypes: readonly string[];
+    detail: UnroutableIdReason;
+  }) {
+    const covered = args.coveredResourceTypes.join(", ");
+    super(
+      args.detail.reason === "uncovered"
+        ? `id ${JSON.stringify(args.id)} classifies to resource type "${args.detail.resourceType}", which is outside this producer's coverage (${covered})`
+        : args.detail.reason === "ambiguous"
+          ? `id ${JSON.stringify(args.id)} matches more than one resource type (${args.detail.matchedResourceTypes.join(", ")}) in the registry this producer was built from`
+          : `id ${JSON.stringify(args.id)} matches no resource type in the registry this producer was built from`,
+      args.detail.reason === "unclassifiable" && args.detail.cause !== undefined
+        ? { cause: args.detail.cause }
+        : undefined,
+    );
+    this.id = args.id;
+    this.coveredResourceTypes = args.coveredResourceTypes;
+    this.detail = args.detail;
+  }
+}
+
+/**
+ * Classifies `id` against the registry a by-id-type helper was built from and
+ * resolves the sub-producer to dispatch to, throwing {@link UnroutableIdError}
+ * when the id doesn't classify to exactly one *covered* resource type.
+ *
+ * Returns the sub-producer rather than just its name so the membership test and
+ * the lookup are one own-property read: "is this type covered" and "which
+ * function covers it" cannot then disagree, and neither call site needs a
+ * non-null assertion. Shared by the single and bulk helpers so their routing --
+ * and so which failures are contract violations rather than dispositions --
+ * cannot drift.
+ */
+export function resolveCoveredSubProducer<SubProducer>(
+  entries: RegistryEntries<ResourceTypes>,
+  subProducers: Readonly<Record<string, SubProducer>>,
+  coveredResourceTypes: readonly string[],
+  id: string,
+): { readonly resourceType: string; readonly subProducer: SubProducer } {
+  const unroutable = (detail: UnroutableIdReason) =>
+    new UnroutableIdError({ id, coveredResourceTypes, detail });
+
+  const classification: IdClassification<ResourceTypes> = classifyIdAgainst(
+    entries,
+    id,
+  );
+  switch (classification.matched) {
+    case "one": {
+      const { name } = classification;
+      // Own-property read: the record came from a spread of the caller's, so
+      // inherited keys must never resolve a producer.
+      const subProducer = Object.hasOwn(subProducers, name)
+        ? subProducers[name]
+        : undefined;
+      if (subProducer === undefined) {
+        throw unroutable({ reason: "uncovered", resourceType: name });
+      }
+      return { resourceType: name, subProducer };
+    }
+    case "none": {
+      throw unroutable({
+        reason: "unclassifiable",
+        cause: classification.cause,
+      });
+    }
+    case "many": {
+      throw unroutable({
+        reason: "ambiguous",
+        matchedResourceTypes: classification.names,
+      });
+    }
+    default: {
+      return assertUnreachable(classification);
+    }
+  }
+}
+
+/**
+ * Re-throws a by-id-type helper's cache-free {@link UnroutableIdError} as the
+ * cache-named error the wrapper's own pre-dispatch checks would have thrown for
+ * the same id, so routing through a wrapper reports one error vocabulary
+ * regardless of which layer noticed. Anything else is re-thrown untouched.
+ */
+export function rethrowUnroutableWithCacheName(
+  cacheName: string,
+  error: unknown,
+): never {
+  if (!(error instanceof UnroutableIdError)) {
+    throw error;
+  }
+  const { detail } = error;
+  switch (detail.reason) {
+    case "uncovered": {
+      throw new NoProducerForResourceTypeError({
+        cacheName,
+        resourceType: detail.resourceType,
+        coveredResourceTypes: error.coveredResourceTypes,
+        id: error.id,
+      });
+    }
+    case "unclassifiable": {
+      throw new UnclassifiableIdError({
+        cacheName,
+        id: error.id,
+        cause: detail.cause,
+      });
+    }
+    case "ambiguous": {
+      throw new AmbiguousResourceTypeError({
+        cacheName,
+        id: error.id,
+        matchedResourceTypes: detail.matchedResourceTypes,
+      });
+    }
+    default: {
+      return assertUnreachable(detail);
+    }
   }
 }
 
@@ -522,7 +691,12 @@ export default function wrapProducer<
 
   const callProducerAndLog = async (req: LooseRequest) => {
     logTrace("contacting producer", req);
-    const resp = await looseProducer(req);
+    // A by-id-type producer routes ids itself and has no cache to name in its
+    // errors; this is where the cache's name is put back on (see
+    // rethrowUnroutableWithCacheName). Every other rejection passes through.
+    const resp = await looseProducer(req).catch((error: unknown) =>
+      rethrowUnroutableWithCacheName(cache.name, error),
+    );
     logTrace("got response from producer", resp);
     return resp;
   };
@@ -891,8 +1065,13 @@ export default function wrapProducer<
  * here to pick the sub-producer, once in the wrapper for dispatch/telemetry).
  * That is the price of the sugar being opt-in; guards are meant to be cheap.
  *
- * @param cache - The cache the producer will be wrapped against. Used to infer
- *   `RT` and to classify each request's id.
+ * @param resourceTypes - The registry the producer's ids will be classified
+ *   against: `cache.resourceTypes` for the cache it will be wrapped against.
+ *   The registry, not the cache, because routing by id type needs nothing else
+ *   -- so a by-id-type producer is a value in its own right, buildable and
+ *   testable before any cache exists. It is also the inference site for `RT`
+ *   (see {@link Cache.resourceTypes} for why a bare-`RT` member is needed for
+ *   that at all).
  * @param producers - One {@link ResourceTypeProducer} per covered resource
  *   type; `Covered` is inferred from the keys.
  */
@@ -902,11 +1081,11 @@ export function producerByIdType<
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 >(
-  cache: PublicInterface<Cache<RT, Validators, Params>>,
+  resourceTypes: RT,
   producers: ProducersFor<RT, Covered, Validators, Params>,
 ): CoveringProducer<RT, Covered, Validators, Params> {
   // SAFETY: see LooseProducer. A value is only read out of this record after
-  // `cache.classify` succeeds and the key is confirmed to be the record's own,
+  // classification succeeds and the key is confirmed to be the record's own,
   // so the request's id is in exactly the id sub-space that sub-producer
   // declared. Snapshotted for the reason given on `coveredTypeSet`.
   const looseProducers: Readonly<
@@ -924,24 +1103,22 @@ export function producerByIdType<
     );
   }
 
+  // Computed once, here, rather than per classified id.
+  const entries = registryEntries(resourceTypes);
+
   type LooseRequest = LooseRequestFor<RT, Params>;
 
   const dispatchingProducer = async (req: LooseRequest) => {
-    const resourceType = cache.classify(req.id);
-    const subProducer = Object.hasOwn(looseProducers, resourceType)
-      ? looseProducers[resourceType]
-      : undefined;
-    // Unreachable through `wrapProducer`, which rejects uncovered types before
-    // this function is ever called; reachable if the returned producer is
+    // Throws UnroutableIdError when the id doesn't classify to exactly one
+    // covered type. Unreachable through `wrapProducer` unless the registry here
+    // disagrees with the cache's; reachable whenever the returned producer is
     // driven directly. Fail loud either way rather than serving nothing.
-    if (subProducer === undefined) {
-      throw new NoProducerForResourceTypeError({
-        cacheName: cache.name,
-        resourceType,
-        coveredResourceTypes,
-        id: req.id,
-      });
-    }
+    const { subProducer } = resolveCoveredSubProducer(
+      entries,
+      looseProducers,
+      coveredResourceTypes,
+      req.id,
+    );
     return subProducer(req);
   };
 

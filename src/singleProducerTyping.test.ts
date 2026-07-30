@@ -214,7 +214,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
         const fetchStoryOrCollection = wrapProducer(
           cache,
           {},
-          producerByIdType(cache, {
+          producerByIdType(cache.resourceTypes, {
             story: async (req) => {
               // Contextually narrowed per key, exactly as under the 2.0 record.
               expectType<Equal<typeof req.id, StoryId>>();
@@ -259,7 +259,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
         const getBulk = wrapBulkProducer(
           cache,
           {},
-          bulkProducerByIdType(cache, {
+          bulkProducerByIdType(cache.resourceTypes, {
             story: async (reqs) => {
               expectType<Equal<(typeof reqs)[number]["id"], StoryId>>();
               return reqs.map((req) => ({
@@ -347,8 +347,8 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
         // Compiles (`Covered` infers as `never`, so the mapped record is `{}`)
         // and is compile-dead at every call site -- so construction time is the
         // only place this mistake can be caught.
-        expect(() => producerByIdType(cache, {})).to.throw();
-        expect(() => bulkProducerByIdType(cache, {})).to.throw();
+        expect(() => producerByIdType(cache.resourceTypes, {})).to.throw();
+        expect(() => bulkProducerByIdType(cache.resourceTypes, {})).to.throw();
       } finally {
         await cache.close();
       }

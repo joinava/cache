@@ -9,11 +9,12 @@ import {
   publishCacheProduce,
   type CacheFetchDisposition,
 } from "../diagnostics.js";
-import type {
-  IdOfResourceType,
-  ResourceTypeName,
-  ResourceTypes,
-  SpecOf,
+import {
+  type IdOfResourceType,
+  registryEntries,
+  type ResourceTypeName,
+  type ResourceTypes,
+  type SpecOf,
 } from "../types/00_ResourceTypes.js";
 import type {
   AnyParams,
@@ -46,8 +47,9 @@ import {
   coveredTypeSet,
   emptyProducersRecordMessage,
   isRequestingCacheBypass,
-  NoProducerForResourceTypeError,
   PRODUCER_ERROR_FALLBACK_WARNING,
+  resolveCoveredSubProducer,
+  rethrowUnroutableWithCacheName,
   throwUnreachableAbort,
   type CoveredTypesCarrier,
   type LooseEntryFor,
@@ -200,8 +202,8 @@ type WrappedBulkProducerFn<
  *
  * A single `reqs` array passed to the wrapped function may freely mix covered
  * types; ids of uncovered types are compile errors per element (and, via casts,
- * throw {@link NoProducerForResourceTypeError} before any cache read -- only
- * when coverage was actually narrowed; see that error's docs).
+ * throw `NoProducerForResourceTypeError` before any cache read -- only when
+ * coverage was actually narrowed; see that error's docs in wrapProducer.ts).
  *
  * Note that this can call the underlying producer up to twice per wrapped
  * call: once for requests that had no immediately-usable cached values
@@ -288,7 +290,12 @@ export function wrapBulkProducer<
     reqs: readonly LooseRequest[],
   ): Promise<(LooseResult | ErrorType)[]> => {
     logTrace("contacting bulk producer", { reqs });
-    const responses = await looseProducer(reqs);
+    // A by-id-type producer routes ids itself and has no cache to name in its
+    // errors; this is where the cache's name is put back on (see
+    // rethrowUnroutableWithCacheName). Every other rejection passes through.
+    const responses = await looseProducer(reqs).catch((error: unknown) =>
+      rethrowUnroutableWithCacheName(cache.name, error),
+    );
     logTrace("got responses from bulk producer", { responses });
     return responses;
   };
@@ -810,9 +817,9 @@ export function wrapBulkProducer<
  *
  * Behaviour on each invocation:
  *
- * - The incoming batch is split by `cache.classify(req.id)`, remembering every
- *   request's ORIGINAL index, and each sub-producer is invoked once,
- *   concurrently, with its own slice.
+ * - The incoming batch is split by classifying each `req.id` against the
+ *   registry, remembering every request's ORIGINAL index, and each sub-producer
+ *   is invoked once, concurrently, with its own slice.
  * - Results are reassembled **positionally**: slice position `j` maps back to
  *   that request's original index. Positional is forced, not chosen: a batch
  *   can legitimately contain the same id twice with different `params`, so the
@@ -835,8 +842,9 @@ export function wrapBulkProducer<
  *
  * Throws at construction on an empty record.
  *
- * @param cache - The cache the producer will be wrapped against. Used to infer
- *   `RT` and to classify each request's id.
+ * @param resourceTypes - The registry the producer's ids will be classified
+ *   against: `cache.resourceTypes` for the cache it will be wrapped against.
+ *   See {@link producerByIdType} for why the registry and not the cache.
  * @param producers - One {@link BulkResourceTypeProducer} per covered resource
  *   type; `Covered` is inferred from the keys.
  */
@@ -847,11 +855,11 @@ export function bulkProducerByIdType<
   Params extends AnyParams = AnyParams,
   ErrorType extends Error = Error,
 >(
-  cache: PublicInterface<Cache<RT, Validators, Params>>,
+  resourceTypes: RT,
   producers: BulkProducersFor<RT, Covered, Validators, Params, ErrorType>,
 ): CoveringBulkProducer<RT, Covered, Validators, Params, ErrorType> {
   // SAFETY: see LooseProducer in wrapProducer.ts. A value is only read out of
-  // this record after `cache.classify` succeeds and the key is confirmed to be
+  // this record after classification succeeds and the key is confirmed to be
   // the record's own, so each sub-producer's slice holds exactly the ids it
   // declared. Snapshotted for the reason given on `coveredTypeSet`.
   const looseProducers = { ...producers } as unknown as Readonly<
@@ -865,14 +873,28 @@ export function bulkProducerByIdType<
     );
   }
 
+  // Computed once, here, rather than per classified id. Named for the registry
+  // it comes from: `entries` in this function's scope means a request group's.
+  const classifierEntries = registryEntries(resourceTypes);
+
   type LooseRequest = LooseRequestFor<RT, Params>;
   type LooseResult = LooseResultFor<RT, Validators, Params>;
 
   const dispatchingProducer = async (reqs: readonly LooseRequest[]) => {
+    // Throws UnroutableIdError on the first id that doesn't classify to exactly
+    // one covered type -- before any sub-producer runs, so a batch with an
+    // unroutable element contacts no origin at all. Unreachable through the
+    // wrapper unless the registry here disagrees with the cache's; reachable
+    // whenever the returned producer is driven directly.
     const classified = reqs.map((req, index) => ({
       index,
       req,
-      resourceType: cache.classify(req.id),
+      ...resolveCoveredSubProducer(
+        classifierEntries,
+        looseProducers,
+        coveredResourceTypes,
+        req.id,
+      ),
     }));
 
     // Sparse by design: only the slots a sub-producer actually returned get
@@ -883,24 +905,10 @@ export function bulkProducerByIdType<
     await Promise.all(
       [...Map.groupBy(classified, (it) => it.resourceType).entries()].map(
         async ([resourceType, entries]) => {
-          const subProducer = Object.hasOwn(looseProducers, resourceType)
-            ? looseProducers[resourceType]
-            : undefined;
-          // Unreachable through the wrappers, which reject uncovered types
-          // before this function is ever called; reachable if the returned
-          // producer is driven directly. Fail the whole invocation loudly
-          // rather than leaving those slots empty.
-          if (subProducer === undefined) {
-            throw new NoProducerForResourceTypeError({
-              cacheName: cache.name,
-              resourceType,
-              coveredResourceTypes,
-              // Non-null assertion is safe: Map.groupBy never makes an empty
-              // group.
-              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-              id: entries[0]!.req.id,
-            });
-          }
+          // Every member of a group resolved to the same resource type, hence
+          // to the same sub-producer. Non-null assertion is safe: Map.groupBy
+          // never makes an empty group.
+          const { subProducer } = entries[0]!;
 
           const subResults = await subProducer(
             entries.map((it) => it.req),

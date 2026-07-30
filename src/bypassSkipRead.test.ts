@@ -52,7 +52,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
     const getSite = wrapProducer(
       cache,
       {},
-      producerByIdType(cache, { site_day: producer }),
+      producerByIdType(cache.resourceTypes, { site_day: producer }),
     );
     try {
       const res = await getSite({
@@ -130,7 +130,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
     const getSite = wrapProducer(
       cache,
       {},
-      producerByIdType(cache, { site_day: producer }),
+      producerByIdType(cache.resourceTypes, { site_day: producer }),
     );
     try {
       const res = await getSite({ id: "site:a", directives: { maxAge: 0 } });
@@ -176,7 +176,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
     const getSite = wrapProducer(
       cache,
       {},
-      producerByIdType(cache, { site_day: producer }),
+      producerByIdType(cache.resourceTypes, { site_day: producer }),
     );
     try {
       const res = await getSite({
@@ -219,7 +219,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
     const getSite = wrapProducer(
       cache,
       {},
-      producerByIdType(cache, { site_day: producer }),
+      producerByIdType(cache.resourceTypes, { site_day: producer }),
     );
     try {
       const bypassCall = getSite({
@@ -307,7 +307,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
     const getBulk = wrapBulkProducer(
       cache,
       { collapseOverlappingRequestsTime: 0 },
-      bulkProducerByIdType(cache, { site_day: bulkProducer }),
+      bulkProducerByIdType(cache.resourceTypes, { site_day: bulkProducer }),
     );
     const requests = [
       { id: "site:plain-a" },
@@ -406,7 +406,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
     const getSite = wrapProducer(
       cache,
       {},
-      producerByIdType(cache, { site_day: producer }),
+      producerByIdType(cache.resourceTypes, { site_day: producer }),
     );
     try {
       const first = getSite({ id: "site:a", directives: { maxAge: 0 } });
