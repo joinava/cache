@@ -112,7 +112,7 @@ describe("single producer function + by-id-type sugar", () => {
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer(cache, {}, bulkProducer);
+      const getBulk = wrapBulkProducer({ cache }, bulkProducer);
       try {
         const results = await getBulk([
           { id: "story:1" },
@@ -157,8 +157,7 @@ describe("single producer function + by-id-type sugar", () => {
         })),
       );
       const getBulk = wrapBulkProducer(
-        cache,
-        {},
+        { cache },
         bulkProducerByIdType(cache.resourceTypes, {
           story: storyBulk,
           collection: collectionBulk,
@@ -212,8 +211,7 @@ describe("single producer function + by-id-type sugar", () => {
         })),
       );
       const getBulk = wrapBulkProducer(
-        cache,
-        {},
+        { cache },
         bulkProducerByIdType(cache.resourceTypes, {
           story: storyBulk,
           collection: collectionBulk,
@@ -255,8 +253,7 @@ describe("single producer function + by-id-type sugar", () => {
         })),
       );
       const getBulk = wrapBulkProducer(
-        cache,
-        {},
+        { cache },
         bulkProducerByIdType(cache.resourceTypes, {
           story: storyBulk,
           collection: collectionBulk,
@@ -329,7 +326,7 @@ describe("single producer function + by-id-type sugar", () => {
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer(cache, {}, bulkProducer);
+      const getBulk = wrapBulkProducer({ cache }, bulkProducer);
       try {
         await getBulk([
           { id: "story:1" },
@@ -404,10 +401,9 @@ describe("single producer function + by-id-type sugar", () => {
       // `{ visits: fn }` -> `fn` is the migration §7 applies to the majority of
       // the monorepo's cache constructions; the two forms must be
       // indistinguishable to callers.
-      const getBare = wrapProducer(bare.cache, {}, bareProducer);
+      const getBare = wrapProducer({ cache: bare.cache }, bareProducer);
       const getRecord = wrapProducer(
-        record.cache,
-        {},
+        { cache: record.cache },
         producerByIdType(record.cache.resourceTypes, {
           visits: recordProducer,
         }),
@@ -470,7 +466,7 @@ describe("single producer function + by-id-type sugar", () => {
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer(cache, {}, bulkProducer);
+      const getBulk = wrapBulkProducer({ cache }, bulkProducer);
       try {
         await cache.store([
           {

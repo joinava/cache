@@ -50,7 +50,25 @@ import {
   raceWithSignal,
 } from "./utils.js";
 
-export type WrapProducerOptions = {
+/**
+ * Everything the producer wrappers need besides the producer itself, as one
+ * bag. The cache is a FIELD rather than a separate positional argument because
+ * a wrapper is always "this cache, wrapped this way": the two were never
+ * independently meaningful, and splitting them left every call site passing
+ * `undefined` in the middle just to reach the producer.
+ */
+export type WrapProducerOptions<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+> = {
+  /**
+   * REQUIRED. An instance of the cache class. This is where values returned by
+   * the producer will actually be stored, and it is the inference site for
+   * `RT`/`Validators`/`Params` (see {@link Cache.resourceTypes} for why a
+   * bare-`RT` member is needed for that at all).
+   */
+  cache: PublicInterface<Cache<RT, Validators, Params>>;
   /**
    * Controls whether the function returned by `wrapProducer`/`wrapBulkProducer`
    * will fall back to calling the produer if its attempt to read from the cache
@@ -437,10 +455,9 @@ export function throwUnreachableAbort(signal: AbortSignal | undefined): never {
  * giving up request collapsing for callers that pass a signal, which would
  * defeat its purpose.
  *
- * @param cache - An instance of the cache class. This is where values returned
- *   by the producer (see below) will actually be stored.
- *
- * @param options - See `WrapProducerOptions` for details.
+ * @param options - The cache to wrap, plus the wrapping behaviour; see
+ *   {@link WrapProducerOptions}. `options.cache` is where values returned by
+ *   the producer (see below) will actually be stored.
  *
  * @param producer - The function actually responsible for returning the
  *   results that will be sent to the user and/or stored in the cache. It acts
@@ -457,15 +474,15 @@ export default function wrapProducer<
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 >(
-  cache: PublicInterface<Cache<RT, Validators, Params>>,
-  options: WrapProducerOptions | undefined,
+  options: WrapProducerOptions<RT, Validators, Params>,
   producer: CoveringProducer<RT, Covered, Validators, Params>,
 ): WrappedProducerFn<RT, Covered, Validators, Params> {
   const {
+    cache,
     collapseOverlappingRequestsTime = 3,
     onCacheReadFailure = "call-producer",
     logger = defaultLoggersByComponent["wrap-producer"],
-  } = options ?? {};
+  } = options;
 
   // SAFETY: see LooseProducer.
   const looseProducer = producer as unknown as LooseProducer<

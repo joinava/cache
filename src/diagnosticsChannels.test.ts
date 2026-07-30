@@ -131,8 +131,7 @@ describe("diagnostics channels (§6.5)", () => {
           directives: freshFor100,
         }));
         const getSite = wrapProducer(
-          cache,
-          {},
+          { cache },
           producerByIdType(cache.resourceTypes, { site_day: producer }),
         );
         await getSite({ id: "site:typed" });
@@ -505,8 +504,7 @@ describe("diagnostics channels (§6.5)", () => {
         directives: freshFor100,
       }));
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -547,8 +545,7 @@ describe("diagnostics channels (§6.5)", () => {
         return { content: `content-${req.id}`, directives: freshFor100 };
       });
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -600,8 +597,7 @@ describe("diagnostics channels (§6.5)", () => {
         throw producerError;
       });
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -657,8 +653,7 @@ describe("diagnostics channels (§6.5)", () => {
         return { content: "fresh-v2", directives: freshFor100 };
       });
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -739,8 +734,7 @@ describe("diagnostics channels (§6.5)", () => {
         throw new Error("origin down");
       });
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -790,8 +784,7 @@ describe("diagnostics channels (§6.5)", () => {
         throw new Error("origin down");
       });
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -835,8 +828,7 @@ describe("diagnostics channels (§6.5)", () => {
         return { content: "slow-but-stored", directives: freshFor100 };
       });
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       const controller = new AbortController();
@@ -907,8 +899,7 @@ describe("diagnostics channels (§6.5)", () => {
         directives: freshFor100,
       }));
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       const controller = new AbortController();
@@ -952,8 +943,7 @@ describe("diagnostics channels (§6.5)", () => {
         directives: freshFor100,
       }));
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       const controller = new AbortController();
@@ -1002,8 +992,7 @@ describe("diagnostics channels (§6.5)", () => {
         return { content: "shared", directives: freshFor100 };
       });
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -1104,8 +1093,7 @@ describe("diagnostics channels (§6.5)", () => {
         return { content: "new", directives: freshFor100 };
       });
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -1165,8 +1153,7 @@ describe("diagnostics channels (§6.5)", () => {
         directives: freshFor100,
       }));
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -1212,8 +1199,7 @@ describe("diagnostics channels (§6.5)", () => {
         directives: freshFor100,
       }));
       const getSite = wrapProducer(
-        cache,
-        { onCacheReadFailure: "throw" },
+        { cache, onCacheReadFailure: "throw" },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -1255,8 +1241,7 @@ describe("diagnostics channels (§6.5)", () => {
           })),
       );
       const getBulk = wrapBulkProducer(
-        cache,
-        { onCacheReadFailure: "throw" },
+        { cache, onCacheReadFailure: "throw" },
         bulkProducerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -1319,7 +1304,7 @@ describe("diagnostics channels (§6.5)", () => {
       }));
       // A sole-type registry: the producer covers the whole registry, so it
       // goes in bare -- no helper, no declared covered set.
-      const getVisits = wrapProducer(cache, {}, producer);
+      const getVisits = wrapProducer({ cache }, producer);
       try {
         await getVisits({ id: "no-structure-at-all" });
         await waitUntil(
@@ -1348,8 +1333,7 @@ describe("diagnostics channels (§6.5)", () => {
         return { content: "slow", directives: freshFor100 };
       });
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -1383,8 +1367,7 @@ describe("diagnostics channels (§6.5)", () => {
           })),
       );
       const getBulk = wrapBulkProducer(
-        cache,
-        {},
+        { cache },
         bulkProducerByIdType(cache.resourceTypes, {
           site_day: siteBulk,
           business_slice: bizBulk,
@@ -1480,8 +1463,7 @@ describe("diagnostics channels (§6.5)", () => {
           ),
       );
       const getBulk = wrapBulkProducer(
-        cache,
-        {},
+        { cache },
         bulkProducerByIdType(cache.resourceTypes, { site_day: siteBulk }),
       );
       try {
@@ -1551,7 +1533,7 @@ describe("diagnostics channels (§6.5)", () => {
             directives: freshFor100,
           })),
       );
-      const getBulk = wrapBulkProducer(cache, {}, siteBulk);
+      const getBulk = wrapBulkProducer({ cache }, siteBulk);
       try {
         await assert.rejects(
           () => getBulk([{ id: "site:a" }, { id: "biz:b" }, { id: "site:c" }]),
@@ -1602,7 +1584,7 @@ describe("diagnostics channels (§6.5)", () => {
       // `ErrorType`). A rejection from one of `bulkProducerByIdType`'s
       // sub-producers is a different case -- the helper catches it and isolates
       // it into that type's result slots as Error elements.
-      const getBulk = wrapBulkProducer(cache, {}, siteBulk);
+      const getBulk = wrapBulkProducer({ cache }, siteBulk);
       try {
         const thrown = await expectRejection(() =>
           getBulk([{ id: "site:a" }, { id: "site:b" }]),
@@ -1871,8 +1853,7 @@ describe("diagnostics channels (§6.5)", () => {
         ],
       }));
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
@@ -1965,8 +1946,7 @@ describe("diagnostics channels (§6.5)", () => {
         directives: freshFor100,
       }));
       const getVisits = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, {
           site_day: siteProducer,
           business_slice: bizProducer,

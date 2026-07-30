@@ -56,7 +56,7 @@ describe("producerByIdType", () => {
       expect(() => producerByIdType(registry, {})).to.throw();
       // ...and the form that used to throw here is the primitive now: a bare
       // function covers the whole registry, and its wrapper is callable.
-      const bare = wrapProducer(cache, {}, async () => ({
+      const bare = wrapProducer({ cache }, async () => ({
         content: "x",
         directives: freshFor100,
       }));
@@ -100,7 +100,7 @@ describe("producerByIdType", () => {
         resourceTypes: registry,
       });
       try {
-        const get = wrapProducer(cache, {}, producer);
+        const get = wrapProducer({ cache }, producer);
         expect((await get({ id: "site:2" })).content).to.equal("site-site:2");
         expect(siteProducer.mock.callCount()).to.equal(2);
         expect((await get({ id: "site:2" })).content).to.equal("site-site:2");
@@ -168,8 +168,7 @@ describe("producerByIdType", () => {
       });
       try {
         const get = wrapProducer(
-          cache,
-          {},
+          { cache },
           producerByIdType(divergent, {
             site_day: async (req) => ({
               content: `site-${req.id}`,

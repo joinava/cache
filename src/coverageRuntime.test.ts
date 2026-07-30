@@ -99,8 +99,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         directives: freshFor100,
       }));
       const getCovered = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, {
           site_day: siteProducer,
           business_slice: bizProducer,
@@ -162,8 +161,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
           })),
       );
       const getBulk = wrapBulkProducer(
-        cache,
-        {},
+        { cache },
         bulkProducerByIdType(cache.resourceTypes, { site_day: siteBulk }),
       );
       try {
@@ -223,13 +221,11 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       // Two wrappers, each covering a different non-empty subset of the one
       // cache's registry (the well-sky site-persons shape).
       const getSite = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { site_day: siteProducer }),
       );
       const getBiz = wrapProducer(
-        cache,
-        {},
+        { cache },
         producerByIdType(cache.resourceTypes, { business_slice: bizProducer }),
       );
       try {
