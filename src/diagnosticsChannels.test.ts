@@ -29,7 +29,7 @@ import {
   producerByIdType,
   resourceType,
   wrapBulkProducer,
-  wrapComputingProducer,
+  wrapHashedInputProducer,
   type CacheFetchMessage,
   type CacheProduceMessage,
   type CacheReadMessage,
@@ -1662,12 +1662,12 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("computing wrappers publish the same channel stream, attributed with minted ids: miss emits read/produce/store-entry/fetch; hit emits read/fetch only", async () => {
+    it("hashed-input wrappers publish the same channel stream, attributed with minted ids: miss emits read/produce/store-entry/fetch; hit emits read/fetch only", async () => {
       const { name, cache } = makeHarness("produce-computing-channels");
       const capture = captureChannels(name);
-      // One resource type, so no hashing producer is needed: the two functions
+      // One resource type, so no hashed-input producer is needed: the two functions
       // are the whole contract.
-      const compute = wrapComputingProducer({
+      const compute = wrapHashedInputProducer({
         cache,
         hashInput: (input: { key: string }): `site:${string}` =>
           `site:${input.key}`,

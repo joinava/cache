@@ -15,16 +15,18 @@ import {
 } from "../index.js";
 import type { AnyParams, AnyValidators, Entry } from "../types/index.js";
 import {
-  bulkHashingProducerByInputType,
-  hashingProducerByInputType,
-  wrapBulkComputingProducer,
-  wrapComputingProducer,
-  type ComputingVariant,
-} from "./wrapComputingProducer.js";
+  bulkHashedInputProducerByInputType,
+  hashedInputProducerByInputType,
+  type HashedInputVariant,
+} from "./hashedInputProducerByInputType.js";
+import {
+  wrapBulkHashedInputProducer,
+  wrapHashedInputProducer,
+} from "./wrapHashedInputProducer.js";
 
-// Computing wrappers take ONE options bag: `{ cache, hashInput, produce }` for a
-// single resource type, or `{ cache, hashingProducer }` for several. A hashing
-// producer is built by `hashingProducerByInputType` with no cache at all.
+// Hashed-input wrappers take ONE options bag: `{ cache, hashInput, produce }` for a
+// single resource type, or `{ cache, hashedInputProducer }` for several. A hashing
+// producer is built by `hashedInputProducerByInputType` with no cache at all.
 const testRegistry = {
   computed: resourceType<string>()({
     matches: (id): id is string => typeof id === "string",
@@ -53,7 +55,7 @@ const contentOf = (
   return entry.content;
 };
 
-describe("wrapComputingProducer", () => {
+describe("wrapHashedInputProducer", () => {
   let cache: Cache<typeof testRegistry>;
 
   beforeEach(() => {
@@ -69,7 +71,7 @@ describe("wrapComputingProducer", () => {
     const producer = mock.fn(async (input: Input) =>
       result(input.text.toUpperCase()),
     );
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
       hashInput,
       produce: producer,
@@ -88,7 +90,7 @@ describe("wrapComputingProducer", () => {
     const producer = mock.fn(async (input: Input) =>
       result(input.text.toUpperCase()),
     );
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
       hashInput,
       produce: producer,
@@ -101,7 +103,7 @@ describe("wrapComputingProducer", () => {
 
   it("supports an async hashInput", async () => {
     const producer = mock.fn(async (input: Input) => result(input.text));
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
       hashInput: async (input: Input) => {
         await delay(1);
@@ -120,7 +122,7 @@ describe("wrapComputingProducer", () => {
       await delay(20);
       return result(input.text);
     });
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
       collapseOverlappingRequestsTime: 0,
       hashInput,
@@ -149,7 +151,7 @@ describe("wrapComputingProducer", () => {
             ]
           : [],
     }));
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
       hashInput,
       produce: producer,
@@ -167,7 +169,7 @@ describe("wrapComputingProducer", () => {
     const producer = mock.fn(async (input: Input) =>
       result(input.text.toUpperCase()),
     );
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
       hashInput,
       produce: producer,
@@ -192,7 +194,7 @@ describe("wrapComputingProducer", () => {
   });
 });
 
-describe("wrapBulkComputingProducer", () => {
+describe("wrapBulkHashedInputProducer", () => {
   let cache: Cache<typeof testRegistry>;
 
   beforeEach(() => {
@@ -208,7 +210,7 @@ describe("wrapBulkComputingProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text.toUpperCase())),
     );
-    const compute = wrapBulkComputingProducer({
+    const compute = wrapBulkHashedInputProducer({
       cache,
       hashInput,
       produce: producer,
@@ -235,7 +237,7 @@ describe("wrapBulkComputingProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text)),
     );
-    const compute = wrapBulkComputingProducer({
+    const compute = wrapBulkHashedInputProducer({
       cache,
       hashInput,
       produce: producer,
@@ -250,7 +252,7 @@ describe("wrapBulkComputingProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text.toUpperCase())),
     );
-    const compute = wrapBulkComputingProducer({
+    const compute = wrapBulkHashedInputProducer({
       cache,
       hashInput,
       produce: producer,
@@ -266,7 +268,7 @@ describe("wrapBulkComputingProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text.toUpperCase())),
     );
-    const compute = wrapBulkComputingProducer({
+    const compute = wrapBulkHashedInputProducer({
       cache,
       hashInput,
       produce: producer,
@@ -314,8 +316,8 @@ const isStory = (input: VInput): input is StoryInput => input.kind === "story";
 const isCollection = (input: VInput): input is CollInput =>
   input.kind === "collection";
 type StoryVariants = {
-  story: ComputingVariant<StoryInput, Story>;
-  collection: ComputingVariant<CollInput, Story[]>;
+  story: HashedInputVariant<StoryInput, Story>;
+  collection: HashedInputVariant<CollInput, Story[]>;
 };
 
 /** `contentOf` for the two-variant registry, whose content types differ. */
@@ -330,7 +332,7 @@ const storyContentOf = (
   return entry.content;
 };
 
-describe("computing wrappers with heterogeneous branches", () => {
+describe("hashed-input wrappers with heterogeneous branches", () => {
   let cache: Cache<typeof storiesRegistry>;
 
   beforeEach(() => {
@@ -344,9 +346,9 @@ describe("computing wrappers with heterogeneous branches", () => {
   afterEach(async () => cache.close());
 
   it("dispatches by matchesInput and returns the right (typed) content per branch", async () => {
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
-      hashingProducer: hashingProducerByInputType<StoryVariants>()
+      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -400,9 +402,9 @@ describe("computing wrappers with heterogeneous branches", () => {
       }),
     );
 
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
-      hashingProducer: hashingProducerByInputType<StoryVariants>()
+      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -438,9 +440,9 @@ describe("computing wrappers with heterogeneous branches", () => {
       content: (input as CollInput).ids.map(makeStory),
       directives: { freshUntilAge: 100 },
     }));
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
-      hashingProducer: hashingProducerByInputType<StoryVariants>()
+      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -503,9 +505,9 @@ describe("computing wrappers with heterogeneous branches", () => {
     try {
       // Id-keyed supplementals need the registry's id space, which a cache-free
       // builder only has if it is declared -- hence the SpecOf argument.
-      const compute = wrapComputingProducer({
+      const compute = wrapHashedInputProducer({
         cache: snapshotCache,
-        hashingProducer: hashingProducerByInputType<
+        hashedInputProducer: hashedInputProducerByInputType<
           StoryVariants,
           AnyValidators,
           AnyParams,
@@ -567,9 +569,9 @@ describe("computing wrappers with heterogeneous branches", () => {
   });
 
   it("a supplemental input matching no covered branch rejects the invocation loudly", async () => {
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
-      hashingProducer: hashingProducerByInputType<StoryVariants>()
+      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -629,9 +631,9 @@ describe("computing wrappers with heterogeneous branches", () => {
           directives: { freshUntilAge: 100 },
         })),
     );
-    const computeAll = wrapBulkComputingProducer({
+    const computeAll = wrapBulkHashedInputProducer({
       cache,
-      hashingProducer: bulkHashingProducerByInputType<StoryVariants>()
+      hashedInputProducer: bulkHashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -686,9 +688,9 @@ describe("computing wrappers with heterogeneous branches", () => {
 
   it("bulk: one branch's per-input error is returned in place, leaving the batch's other items served", async () => {
     const boom = new Error("story 2 could not be extracted");
-    const computeAll = wrapBulkComputingProducer({
+    const computeAll = wrapBulkHashedInputProducer({
       cache,
-      hashingProducer: bulkHashingProducerByInputType<StoryVariants>()
+      hashedInputProducer: bulkHashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -733,9 +735,9 @@ describe("computing wrappers with heterogeneous branches", () => {
           directives: { freshUntilAge: 100 },
         })),
     );
-    const computeAll = wrapBulkComputingProducer({
+    const computeAll = wrapBulkHashedInputProducer({
       cache,
-      hashingProducer: bulkHashingProducerByInputType<StoryVariants>()
+      hashedInputProducer: bulkHashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -785,7 +787,7 @@ describe("computing wrappers with heterogeneous branches", () => {
       directives: { freshUntilAge: number };
     }>,
   ) =>
-    hashingProducerByInputType<StoryVariants>()
+    hashedInputProducerByInputType<StoryVariants>()
       .when(isIdentifiedStory, {
         name: "story",
         hashInput: (input) => `extract:story:${input.id}` as const,
@@ -798,9 +800,9 @@ describe("computing wrappers with heterogeneous branches", () => {
       content: makeStory(input.id),
       directives: { freshUntilAge: 100 },
     }));
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
-      hashingProducer: soleStoryBranch(produce),
+      hashedInputProducer: soleStoryBranch(produce),
     });
 
     expect((await compute({ kind: "story", id: "1" })).content).to.deep.eq(
@@ -825,9 +827,9 @@ describe("computing wrappers with heterogeneous branches", () => {
           directives: { freshUntilAge: 100 },
         })),
     );
-    const computeAll = wrapBulkComputingProducer({
+    const computeAll = wrapBulkHashedInputProducer({
       cache,
-      hashingProducer: bulkHashingProducerByInputType<StoryVariants>()
+      hashedInputProducer: bulkHashedInputProducerByInputType<StoryVariants>()
         .when(isIdentifiedStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -849,9 +851,9 @@ describe("computing wrappers with heterogeneous branches", () => {
   });
 
   it("a supplemental the sole `.when` branch's guard rejects also rejects the invocation", async () => {
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
-      hashingProducer: soleStoryBranch(async (input) => ({
+      hashedInputProducer: soleStoryBranch(async (input) => ({
         content: makeStory(input.id),
         directives: { freshUntilAge: 100 },
         supplementalResources: [
@@ -881,9 +883,9 @@ describe("computing wrappers with heterogeneous branches", () => {
         directives: { freshUntilAge: 100 },
       }),
     );
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
-      hashingProducer: hashingProducerByInputType<StoryVariants>()
+      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
         // Reads a field only story inputs have, the way a guard that parses or
         // dereferences its input does; on a collection input that throws.
         .when(
@@ -914,9 +916,9 @@ describe("computing wrappers with heterogeneous branches", () => {
 
   it("when NO branch matches, a guard's throw surfaces as the routing error's cause", async () => {
     const guardError = new Error("could not read the input");
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
-      hashingProducer: hashingProducerByInputType<StoryVariants>()
+      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
         .when(
           (input): input is StoryInput => {
             void input;
@@ -946,9 +948,9 @@ describe("computing wrappers with heterogeneous branches", () => {
   it("several throwing guards aggregate into the routing error's cause", async () => {
     const storyGuardError = new Error("story guard could not read the input");
     const collectionGuardError = new Error("collection guard likewise");
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
-      hashingProducer: hashingProducerByInputType<StoryVariants>()
+      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
         .when(
           (input): input is StoryInput => {
             void input;
@@ -992,9 +994,9 @@ describe("computing wrappers with heterogeneous branches", () => {
   });
 
   it("a supplemental whose routed branch mints a misclassified id rejects loudly, naming that branch", async () => {
-    const compute = wrapComputingProducer({
+    const compute = wrapHashedInputProducer({
       cache,
-      hashingProducer: hashingProducerByInputType<StoryVariants>()
+      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,

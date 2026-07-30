@@ -1,4 +1,4 @@
-# Computing wrappers: a cache-free hashing producer
+# Hashed-input wrappers: a cache-free hashed-input producer
 
 Supersedes the `branches`-record shape in
 [§6.4 of the registry plan](./2026-07-28-resource-type-registry-and-diagnostics.md).
@@ -6,7 +6,7 @@ Same contracts (coverage, minted ids, supplementals); different carrier.
 
 ## The problem with the record
 
-The shipped shape was `wrapComputingProducer(cache, options, branches)`, where
+The shipped shape was `wrapHashedInputProducer(cache, options, branches)`, where
 `branches` was a record keyed by covered resource-type name. It worked, but the
 wrapper had a single `Input` type parameter shared across every branch, and that
 had three consequences:
@@ -14,7 +14,7 @@ had three consequences:
 1. **Branches could not narrow their own input.** Inside a branch's `produce`,
    `input` was the whole union, so every multi-branch producer cast:
    `makeStory((input as StoryInput).id)`. There were 30 such casts in
-   `wrapComputingProducer.test.ts`.
+   `wrapHashedInputProducer.test.ts`.
 2. **Guards had to lie.** Because `matchesInput` narrowed to the shared `Input`,
    a "story" guard was typed `(i: unknown) => i is VInput` — claiming to prove
    the whole union. A guard proving only `StoryInput` was *rejected*.
@@ -30,16 +30,16 @@ One options bag, two forms:
 
 ```ts
 // one resource type: the two functions are the whole contract
-const compute = wrapComputingProducer({ cache, hashInput, produce });
+const compute = wrapHashedInputProducer({ cache, hashInput, produce });
 
-// several: a hashing producer, built with NO cache
-const compute = wrapComputingProducer({ cache, hashingProducer });
+// several: a hashed-input producer, built with NO cache
+const compute = wrapHashedInputProducer({ cache, hashedInputProducer });
 ```
 
 ```ts
-const hashingProducer = hashingProducerByInputType<{
-  story: ComputingVariant<StoryInput, Story>;
-  collection: ComputingVariant<CollInput, Story[]>;
+const hashedInputProducer = hashedInputProducerByInputType<{
+  story: HashedInputVariant<StoryInput, Story>;
+  collection: HashedInputVariant<CollInput, Story[]>;
 }>()
   .when((i): i is StoryInput => i.kind === "story", {
     name: "story",
@@ -117,7 +117,7 @@ none of which a cache-free builder has. They are therefore declared on the
 builder, defaulted, and required to agree when the producer meets a cache:
 
 ```ts
-hashingProducerByInputType<Variants, Validators, Params, IdKeyedSpec>()
+hashedInputProducerByInputType<Variants, Validators, Params, IdKeyedSpec>()
 ```
 
 `IdKeyedSpec` defaults to `never`, i.e. id-keyed supplementals are unavailable
@@ -184,3 +184,75 @@ still claim the input, with the guard error(s) surfacing as the routing error's
 multi-branch BULK path is covered end to end too -- batch partitioning by
 `matchesInput`, result alignment to the caller's order, per-item errors, and
 cross-branch input-keyed supplementals.
+
+## Post-implementation: renamed to "hashed input producer", and split out
+
+**Date:** 2026-07-30, after the by-id-type registry change.
+
+"Computing producer" never said what was actually distinctive about these
+wrappers. What distinguishes them is not that they compute -- plain producers
+compute too -- but that the **cache key is a hash of the input** rather than an
+id the caller already holds. So the vocabulary is now "hashed input producer"
+throughout, and the two names that had drifted apart ("computing" for the
+wrappers, "hashing" for the builder) collapse into one:
+
+| was | now |
+| --- | --- |
+| `wrapComputingProducer` / `wrapBulkComputingProducer` | `wrapHashedInputProducer` / `wrapBulkHashedInputProducer` |
+| `WrappedComputingProducer` / `WrappedBulkComputingProducer` | `WrappedHashedInputProducer` / `WrappedBulkHashedInputProducer` |
+| `ComputingProducerResult` | `HashedInputProducerResult` |
+| `ComputingVariant` | `HashedInputVariant` |
+| `hashingProducerByInputType` / `bulkHashingProducerByInputType` | `hashedInputProducerByInputType` / `bulkHashedInputProducerByInputType` |
+| `HashingProducer`, `HashingProducerBuilder`, `BulkHashingProducerBuilder`, `HashingProducerMeta`, `HashingProducerProblems` | `HashedInputProducer`, `HashedInputProducerBuilder`, `BulkHashedInputProducerBuilder`, `HashedInputProducerMeta`, `HashedInputProducerProblems` |
+| the `hashingProducer` option property | `hashedInputProducer` |
+
+"Hashing" survives only where it names the *act* (bulk input hashing,
+supplemental hashing, "derive the primary key by hashing"). Historical sections
+of the earlier plans still name deleted symbols (`ComputingBranch`,
+`ComputingProducerByInputTypeBuilder`, `ComputingProducerOptions`,
+1.6.0's `computingProducerByInputType`) and were deliberately left: renaming
+them would claim those symbols existed under names they never had. This file's
+own name is likewise left as the date-stamped record of when it was written.
+
+One prose casualty worth noting: a passage contrasted "computing wrappers" with
+their use as "hashed-input producers" for key privacy. Under one vocabulary that
+sentence became circular, so it was rewritten to draw the distinction it was
+actually making -- hashing for **key privacy** vs. for expensive computation.
+
+### File layout
+
+Both sugar helpers moved back out of the wrappers, as they were before 2.0:
+
+```txt
+src/utils/producerByIdType.ts                  producerByIdType + bulkProducerByIdType
+src/utils/producerByIdType.test.ts
+src/utils/hashedInputProducerByInputType.ts    both builders
+src/utils/hashedInputProducerByInputType.test.ts
+src/utils/producer-errors.ts                   the errors both wrappers raise
+```
+
+The import graph is what makes this work, and it is acyclic by construction
+rather than by luck:
+
+- `producer-errors.ts` (`NoProducerForResourceTypeError`, `UnroutableIdError`,
+  `UnroutableIdReason`, `rethrowUnroutableWithCacheName`) depends on neither
+  wrapper, so `wrapProducer`, `wrapBulkProducer` and `producerByIdType` can each
+  raise or map those errors without importing one another for it. `assertResourceTypeCovered`
+  stays in `wrapProducer.ts`: it is coverage policy that happens to throw, not
+  an error definition.
+- `producerByIdType.ts` imports the {@link coveredTypes} carrier and the
+  id-erased shapes from `wrapProducer.ts`, and is **type-only** against
+  `wrapBulkProducer.ts`.
+- `hashedInputProducerByInputType.ts` imports exactly one *type* from the
+  wrapper (`HashedInputProducerResult`), so the only runtime edge runs the other
+  way: the wrapper reads `builtBranches`. That symbol had to become exported for
+  the wrapper to read it across a module boundary; it is deliberately NOT
+  re-exported from `src/index.ts`, which is what keeps a built producer opaque to
+  its holder.
+
+Tests follow the same rule as the code: what is *about* a helper moved to its own
+file (an empty record/chain is unconstructible; routing needs only the registry;
+a duplicate `.when` throws), while coverage *enforcement* by the wrappers stayed
+in `coverageRuntime.test.ts`. 355 tests before and after, 354 passing, 1
+pre-existing docker skip -- the identical count is the check that the move
+neither dropped nor duplicated a case.
