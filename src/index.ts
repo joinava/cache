@@ -8,8 +8,10 @@ import {
 export {
   AmbiguousResourceTypeError,
   default as Cache,
+  singleTypeCacheOptions,
   UnclassifiableIdError,
   type CacheLookupResult,
+  type CacheOptions,
 } from "./Cache.js";
 export { default as MemoryStore } from "./stores/MemoryStore/MemoryStore.js";
 export { default as PostgresStore } from "./stores/PostgresStore/PostgresStore.js";

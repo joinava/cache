@@ -75,7 +75,11 @@ const ifErrorWindowDirectives = {
 const makeHarness = (label: string) => {
   const name = uniqueCacheName(label);
   const store = memoryStoreFor(registry);
-  const cache = new Cache(store, { name, resourceTypes: registry });
+  const cache = new Cache({
+    store: store,
+    name,
+    resourceTypes: registry,
+  });
   return { name, store, cache };
 };
 
@@ -351,7 +355,8 @@ describe("diagnostics channels (§6.5)", () => {
       // channel reports, and a no-op store returns an empty results array.
       const name = uniqueCacheName("read-after-close");
       const store = memoryStoreFor(registry);
-      const cache = new Cache(store, {
+      const cache = new Cache({
+        store: store,
         name,
         resourceTypes: registry,
         onGetAfterClose: "act-empty",
@@ -693,9 +698,7 @@ describe("diagnostics channels (§6.5)", () => {
           outcome: "success",
           minDurationMs: 20,
         });
-        const fetchIndex = capture.all.findIndex(
-          (m) => m.channel === "fetch",
-        );
+        const fetchIndex = capture.all.findIndex((m) => m.channel === "fetch");
         const produceIndex = capture.all.findIndex(
           (m) => m.channel === "produce",
         );
@@ -1310,7 +1313,8 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("sole-type caches attribute every message to the sole resource type, even with the trivial guard", async () => {
       const name = uniqueCacheName("fetch-sole-type");
-      const cache = new Cache(memoryStoreFor(soleVisitsRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(soleVisitsRegistry),
         name,
         resourceTypes: soleVisitsRegistry,
       });
@@ -1519,7 +1523,9 @@ describe("diagnostics channels (§6.5)", () => {
         expect(capture.produce).to.have.lengthOf(1);
         expect(capture.produce[0]?.trigger).to.equal("miss");
         expect(capture.produce[0]?.outcome).to.equal("success");
-        expect(sortByResourceId(capture.produce[0]?.requests ?? [])).to.deep.equal([
+        expect(
+          sortByResourceId(capture.produce[0]?.requests ?? []),
+        ).to.deep.equal([
           { resourceType: "site_day", resourceId: "site:bad" },
           { resourceType: "site_day", resourceId: "site:ok" },
         ]);
@@ -1546,12 +1552,10 @@ describe("diagnostics channels (§6.5)", () => {
       // failures.
       const siteBulk = mock.fn(
         async (reqs: readonly { readonly id: string }[]) =>
-          reqs
-            .slice(0, 1)
-            .map((req) => ({
-              content: `ok-${req.id}`,
-              directives: freshFor100,
-            })),
+          reqs.slice(0, 1).map((req) => ({
+            content: `ok-${req.id}`,
+            directives: freshFor100,
+          })),
       );
       const getBulk = wrapBulkProducer(
         cache,
@@ -1646,15 +1650,19 @@ describe("diagnostics channels (§6.5)", () => {
         { key: string },
         typeof registry,
         "site_day"
-      >(cache, {}, {
-        site_day: {
-          hashInput: (input): `site:${string}` => `site:${input.key}`,
-          produce: async (input) => ({
-            content: `computed-${input.key}`,
-            directives: freshFor100,
-          }),
+      >(
+        cache,
+        {},
+        {
+          site_day: {
+            hashInput: (input): `site:${string}` => `site:${input.key}`,
+            produce: async (input) => ({
+              content: `computed-${input.key}`,
+              directives: freshFor100,
+            }),
+          },
         },
-      });
+      );
       try {
         await compute({ key: "k1" });
         await waitUntil(
@@ -1922,7 +1930,11 @@ describe("diagnostics channels (§6.5)", () => {
     it("walks the documented message stream: miss cascade, rider, slice hit, SWR revalidation, outage", async () => {
       const name = uniqueCacheName("golden-e2e");
       const store = memoryStoreFor(registry);
-      const cache = new Cache(store, { name, resourceTypes: registry });
+      const cache = new Cache({
+        store: store,
+        name,
+        resourceTypes: registry,
+      });
       const capture = captureChannels(name);
 
       const siteId = "site:X" as const;
@@ -1946,7 +1958,11 @@ describe("diagnostics channels (§6.5)", () => {
           validators: { contentHash: "h1" },
           directives: {
             freshUntilAge: 0.1,
-            maxStale: { withoutRevalidation: 0, whileRevalidate: 100, ifError: 100 },
+            maxStale: {
+              withoutRevalidation: 0,
+              whileRevalidate: 100,
+              ifError: 100,
+            },
           },
           supplementalResources: bizIds.map((id) => ({
             id,
@@ -2000,8 +2016,18 @@ describe("diagnostics channels (§6.5)", () => {
         // Both the initiator and the rider report their own lookups (§7 as
         // adjudicated); only the producer invocation is shared.
         expect(capture.read).to.deep.equal([
-          { cache: name, resourceType: "site_day", resourceId: siteId, found: "none" },
-          { cache: name, resourceType: "site_day", resourceId: siteId, found: "none" },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: siteId,
+            found: "none",
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: siteId,
+            found: "none",
+          },
         ]);
         expect(capture.produce).to.have.lengthOf(1);
         expectProduceMessage(capture.produce[0], {
@@ -2093,7 +2119,9 @@ describe("diagnostics channels (§6.5)", () => {
         });
         expect(t1Messages[1]?.channel).to.equal("fetch");
         expectCachePathFetch(
-          t1Messages[1]?.channel === "fetch" ? t1Messages[1].message : undefined,
+          t1Messages[1]?.channel === "fetch"
+            ? t1Messages[1].message
+            : undefined,
           {
             cache: name,
             resourceType: "business_slice",
@@ -2157,9 +2185,21 @@ describe("diagnostics channels (§6.5)", () => {
             relationship: m.relationshipToExistingStoredData,
           })),
         ).to.deep.equal([
-          { resourceId: "biz:B1", resourceType: "business_slice", relationship: "unchanged" },
-          { resourceId: "biz:B2", resourceType: "business_slice", relationship: "unchanged" },
-          { resourceId: siteId, resourceType: "site_day", relationship: "unchanged" },
+          {
+            resourceId: "biz:B1",
+            resourceType: "business_slice",
+            relationship: "unchanged",
+          },
+          {
+            resourceId: "biz:B2",
+            resourceType: "business_slice",
+            relationship: "unchanged",
+          },
+          {
+            resourceId: siteId,
+            resourceType: "site_day",
+            relationship: "unchanged",
+          },
         ]);
         expect(siteProducer.mock.callCount()).to.equal(2);
 
@@ -2172,7 +2212,11 @@ describe("diagnostics channels (§6.5)", () => {
           // Consumer directives put this request outside the SWR window but
           // inside the if-error window.
           directives: {
-            maxStale: { withoutRevalidation: 0, whileRevalidate: 0, ifError: 100 },
+            maxStale: {
+              withoutRevalidation: 0,
+              whileRevalidate: 0,
+              ifError: 100,
+            },
           },
         });
         expect(ifErrorRes.content).to.equal("site-visits-v1");
@@ -2208,7 +2252,11 @@ describe("diagnostics channels (§6.5)", () => {
           getVisits({
             id: siteId,
             directives: {
-              maxStale: { withoutRevalidation: 0, whileRevalidate: 0, ifError: 0 },
+              maxStale: {
+                withoutRevalidation: 0,
+                whileRevalidate: 0,
+                ifError: 0,
+              },
             },
           }),
         );

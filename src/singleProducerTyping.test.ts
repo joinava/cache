@@ -1,7 +1,10 @@
 import { expect } from "chai";
 import { describe, it } from "node:test";
 
-import { memoryStoreFor, uniqueCacheName } from "../test/v2AcceptanceHelpers.js";
+import {
+  memoryStoreFor,
+  uniqueCacheName,
+} from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
   bulkProducerByIdType,
@@ -61,7 +64,8 @@ const registry = {
 const freshFor1 = { freshUntilAge: 1 };
 
 const makeCache = (label: string) =>
-  new Cache(memoryStoreFor(registry), {
+  new Cache({
+    store: memoryStoreFor(registry),
     name: uniqueCacheName(label),
     resourceTypes: registry,
   });

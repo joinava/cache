@@ -48,7 +48,8 @@ const freshFor100 = { freshUntilAge: 100 };
 describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
   describe("construction throws on a keyless producers/branches record", () => {
     it("producerByIdType: an empty record throws at construction time, while a bare producer function is a legal whole-registry producer", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("construct-wrap"),
         resourceTypes: registry,
       });
@@ -70,7 +71,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     });
 
     it("bulkProducerByIdType: an empty record throws at construction time, while a bare bulk producer function is a legal whole-registry producer", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("construct-bulk"),
         resourceTypes: registry,
       });
@@ -89,7 +91,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     });
 
     it("wrapComputingProducer / wrapBulkComputingProducer: empty record and bare function both throw at construction time", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("construct-computing"),
         resourceTypes: registry,
       });
@@ -112,7 +115,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       const store = memoryStoreFor(threeTypeRegistry);
       const getSpy = mock.method(store, "get");
       const getManySpy = mock.method(store, "getMany");
-      const cache = new Cache(store, {
+      const cache = new Cache({
+        store: store,
         name,
         resourceTypes: threeTypeRegistry,
       });
@@ -179,7 +183,11 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       const store = memoryStoreFor(registry);
       const getSpy = mock.method(store, "get");
       const getManySpy = mock.method(store, "getMany");
-      const cache = new Cache(store, { name, resourceTypes: registry });
+      const cache = new Cache({
+        store: store,
+        name,
+        resourceTypes: registry,
+      });
       const siteBulk = mock.fn(
         async (reqs: readonly { readonly id: string }[]) =>
           reqs.map((req) => ({
@@ -220,7 +228,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
   describe("partial coverage: two wrappers over one cache", () => {
     it("each wrapper serves only its own types; entries written by one (supplementals) are served by the other without producer contact", async () => {
       const name = uniqueCacheName("partial-wrappers");
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name,
         resourceTypes: registry,
       });
@@ -296,7 +305,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     type SoleInput = { key: string };
 
     it("single-branch: no matchesInput required; caches by the branch's hashInput", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("computing-single"),
         resourceTypes: registry,
       });
@@ -311,12 +321,16 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         SoleInput,
         typeof registry,
         "site_day"
-      >(cache, {}, {
-        site_day: {
-          hashInput: (input): `site:${string}` => `site:${input.key}`,
-          produce,
+      >(
+        cache,
+        {},
+        {
+          site_day: {
+            hashInput: (input): `site:${string}` => `site:${input.key}`,
+            produce,
+          },
         },
-      });
+      );
       try {
         const first = await compute({ key: "a" });
         expect(first.content).to.equal("computed-a");
@@ -347,7 +361,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         (input as { kind: unknown }).kind === "biz");
 
     it("multi-branch: dispatches by matchesInput; each branch mints and serves its own type's ids", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("computing-multi"),
         resourceTypes: registry,
       });
@@ -363,20 +378,24 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         BranchedInput,
         typeof registry,
         "site_day" | "business_slice"
-      >(cache, {}, {
-        site_day: {
-          matchesInput: (input: unknown): input is BranchedInput =>
-            isBranchedInput(input) && input.kind === "site",
-          hashInput: (input): `site:${string}` => `site:${input.key}`,
-          produce: siteProduce,
+      >(
+        cache,
+        {},
+        {
+          site_day: {
+            matchesInput: (input: unknown): input is BranchedInput =>
+              isBranchedInput(input) && input.kind === "site",
+            hashInput: (input): `site:${string}` => `site:${input.key}`,
+            produce: siteProduce,
+          },
+          business_slice: {
+            matchesInput: (input: unknown): input is BranchedInput =>
+              isBranchedInput(input) && input.kind === "biz",
+            hashInput: (input): `biz:${string}` => `biz:${input.key}`,
+            produce: bizProduce,
+          },
         },
-        business_slice: {
-          matchesInput: (input: unknown): input is BranchedInput =>
-            isBranchedInput(input) && input.kind === "biz",
-          hashInput: (input): `biz:${string}` => `biz:${input.key}`,
-          produce: bizProduce,
-        },
-      });
+      );
       try {
         const siteRes = await compute({ kind: "site", key: "1" });
         expect(siteRes.content).to.equal("site-computed-1");
@@ -401,7 +420,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       // (§11.5); the implementation enforces it at construction time instead
       // (see the acceptance report) -- this pins that a multi-branch wrapper
       // with a matcher-less branch can never be constructed silently.
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("computing-missing-matcher"),
         resourceTypes: registry,
       });
@@ -411,25 +431,29 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
             BranchedInput,
             typeof registry,
             "site_day" | "business_slice"
-          >(cache, {}, {
-            site_day: {
-              // no matchesInput
-              hashInput: (input): `site:${string}` => `site:${input.key}`,
-              produce: async (input) => ({
-                content: `site-computed-${input.key}`,
-                directives: freshFor100,
-              }),
+          >(
+            cache,
+            {},
+            {
+              site_day: {
+                // no matchesInput
+                hashInput: (input): `site:${string}` => `site:${input.key}`,
+                produce: async (input) => ({
+                  content: `site-computed-${input.key}`,
+                  directives: freshFor100,
+                }),
+              },
+              business_slice: {
+                matchesInput: (input: unknown): input is BranchedInput =>
+                  isBranchedInput(input) && input.kind === "biz",
+                hashInput: (input): `biz:${string}` => `biz:${input.key}`,
+                produce: async (input) => ({
+                  content: `biz-computed-${input.key}`,
+                  directives: freshFor100,
+                }),
+              },
             },
-            business_slice: {
-              matchesInput: (input: unknown): input is BranchedInput =>
-                isBranchedInput(input) && input.kind === "biz",
-              hashInput: (input): `biz:${string}` => `biz:${input.key}`,
-              produce: async (input) => ({
-                content: `biz-computed-${input.key}`,
-                directives: freshFor100,
-              }),
-            },
-          }),
+          ),
         ).to.throw();
       } finally {
         await cache.close();
@@ -437,32 +461,37 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     });
 
     it("an input that no covered branch's matchesInput accepts rejects", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("computing-unmatched"),
         resourceTypes: registry,
       });
-      const compute = wrapComputingProducer(cache, {}, {
-        site_day: {
-          matchesInput: (input: unknown): input is BranchedInput =>
-            isBranchedInput(input) && input.kind === "site",
-          hashInput: (input: BranchedInput): `site:${string}` =>
-            `site:${input.key}`,
-          produce: async (input: BranchedInput) => ({
-            content: `site-computed-${input.key}`,
-            directives: freshFor100,
-          }),
+      const compute = wrapComputingProducer(
+        cache,
+        {},
+        {
+          site_day: {
+            matchesInput: (input: unknown): input is BranchedInput =>
+              isBranchedInput(input) && input.kind === "site",
+            hashInput: (input: BranchedInput): `site:${string}` =>
+              `site:${input.key}`,
+            produce: async (input: BranchedInput) => ({
+              content: `site-computed-${input.key}`,
+              directives: freshFor100,
+            }),
+          },
+          business_slice: {
+            matchesInput: (input: unknown): input is BranchedInput =>
+              isBranchedInput(input) && input.kind === "biz",
+            hashInput: (input: BranchedInput): `biz:${string}` =>
+              `biz:${input.key}`,
+            produce: async (input: BranchedInput) => ({
+              content: `biz-computed-${input.key}`,
+              directives: freshFor100,
+            }),
+          },
         },
-        business_slice: {
-          matchesInput: (input: unknown): input is BranchedInput =>
-            isBranchedInput(input) && input.kind === "biz",
-          hashInput: (input: BranchedInput): `biz:${string}` =>
-            `biz:${input.key}`,
-          produce: async (input: BranchedInput) => ({
-            content: `biz-computed-${input.key}`,
-            directives: freshFor100,
-          }),
-        },
-      });
+      );
       try {
         const thrown = await expectRejection(() =>
           compute({ kind: "neither", key: "x" } as unknown as BranchedInput),
@@ -475,22 +504,27 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("a branch whose hashInput mints an unclassifiable id throws UnclassifiableIdError naming the branch", async () => {
       const name = uniqueCacheName("computing-bad-hash");
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name,
         resourceTypes: registry,
       });
-      const compute = wrapComputingProducer(cache, {}, {
-        site_day: {
-          // Mints ids that match NO registry guard: violates the §6.4
-          // in-band-discriminator requirement on hashInput.
-          hashInput: (input: SoleInput) =>
-            `unregistered:${input.key}` as string as `site:${string}`,
-          produce: async (input: SoleInput) => ({
-            content: `computed-${input.key}`,
-            directives: freshFor100,
-          }),
+      const compute = wrapComputingProducer(
+        cache,
+        {},
+        {
+          site_day: {
+            // Mints ids that match NO registry guard: violates the §6.4
+            // in-band-discriminator requirement on hashInput.
+            hashInput: (input: SoleInput) =>
+              `unregistered:${input.key}` as string as `site:${string}`,
+            produce: async (input: SoleInput) => ({
+              content: `computed-${input.key}`,
+              directives: freshFor100,
+            }),
+          },
         },
-      });
+      );
       try {
         const thrown = await expectRejection(() => compute({ key: "a" }));
         if (!(thrown instanceof UnclassifiableIdError)) {
@@ -508,23 +542,28 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     });
 
     it("a branch whose hashInput mints ANOTHER type's id (its own guard rejects it) throws", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("computing-cross-type-hash"),
         resourceTypes: registry,
       });
-      const compute = wrapComputingProducer(cache, {}, {
-        site_day: {
-          // Classifiable -- but to business_slice, not this branch's type, so
-          // the "hashInput must mint ids its own type's guard accepts" check
-          // has to reject it.
-          hashInput: (input: SoleInput) =>
-            `biz:${input.key}` as string as `site:${string}`,
-          produce: async (input: SoleInput) => ({
-            content: `computed-${input.key}`,
-            directives: freshFor100,
-          }),
+      const compute = wrapComputingProducer(
+        cache,
+        {},
+        {
+          site_day: {
+            // Classifiable -- but to business_slice, not this branch's type, so
+            // the "hashInput must mint ids its own type's guard accepts" check
+            // has to reject it.
+            hashInput: (input: SoleInput) =>
+              `biz:${input.key}` as string as `site:${string}`,
+            produce: async (input: SoleInput) => ({
+              content: `computed-${input.key}`,
+              directives: freshFor100,
+            }),
+          },
         },
-      });
+      );
       try {
         const thrown = await expectRejection(() => compute({ key: "a" }));
         expect(thrown).to.be.instanceOf(Error);
@@ -534,7 +573,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     });
 
     it("matchesInput on a single-coverage wrapper is ignored at runtime (it is forbidden at the type level)", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("computing-ignored-matcher"),
         resourceTypes: registry,
       });

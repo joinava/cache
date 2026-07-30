@@ -18,10 +18,13 @@ import Cache from "./Cache.js";
 import {
   AmbiguousResourceTypeError,
   idStartsWith,
+  MemoryStore,
   producerByIdType,
   resourceType,
+  singleTypeCacheOptions,
   soleResourceType,
   UnclassifiableIdError,
+  type CacheSpec,
   type ResourceTypes,
 } from "./index.js";
 import wrapProducer from "./utils/wrapProducer.js";
@@ -45,7 +48,9 @@ const twoTypeRegistry = {
 // would silently return "site_day" here instead of failing loud.
 const overlappingRegistry = {
   site_day: resourceType<string>()({ matches: idStartsWith("site:") }),
-  site_special: resourceType<string>()({ matches: idStartsWith("site:special:") }),
+  site_special: resourceType<string>()({
+    matches: idStartsWith("site:special:"),
+  }),
 } satisfies ResourceTypes;
 
 const soleVisitsRegistry = {
@@ -100,7 +105,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
   describe("classify()", () => {
     it("returns the unique matching resource-type name and exposes the instance name", async () => {
       const name = uniqueCacheName("classify-basic");
-      const cache = new Cache(memoryStoreFor(twoTypeRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(twoTypeRegistry),
         name,
         resourceTypes: twoTypeRegistry,
       });
@@ -115,7 +121,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
 
     it("throws UnclassifiableIdError (with cacheName and id) when no guard matches", async () => {
       const name = uniqueCacheName("classify-none");
-      const cache = new Cache(memoryStoreFor(twoTypeRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(twoTypeRegistry),
         name,
         resourceTypes: twoTypeRegistry,
       });
@@ -131,7 +138,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
 
     it("throws AmbiguousResourceTypeError when >1 guard matches, even though a first-match-wins scan would have succeeded", async () => {
       const name = uniqueCacheName("classify-ambiguous");
-      const cache = new Cache(memoryStoreFor(overlappingRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(overlappingRegistry),
         name,
         resourceTypes: overlappingRegistry,
       });
@@ -175,7 +183,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
 
     it("a malformed id with jsonParse-style guards throws UnclassifiableIdError carrying the guard errors as cause", async () => {
       const name = uniqueCacheName("classify-guard-throw");
-      const cache = new Cache(memoryStoreFor(jsonRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(jsonRegistry),
         name,
         resourceTypes: jsonRegistry,
       });
@@ -223,7 +232,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
         }),
         site_day: resourceType<string>()({ matches: idStartsWith("site:") }),
       } satisfies ResourceTypes;
-      const cache = new Cache(memoryStoreFor(mixedRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(mixedRegistry),
         name,
         resourceTypes: mixedRegistry,
       });
@@ -249,7 +259,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
       const store = memoryStoreFor(twoTypeRegistry);
       const getSpy = mock.method(store, "get");
       const getManySpy = mock.method(store, "getMany");
-      const cache = new Cache(store, {
+      const cache = new Cache({
+        store: store,
         name,
         resourceTypes: twoTypeRegistry,
       });
@@ -277,7 +288,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
 
     it("get: rejects with AmbiguousResourceTypeError (with the matched type names)", async () => {
       const name = uniqueCacheName("get-ambiguous");
-      const cache = new Cache(memoryStoreFor(overlappingRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(overlappingRegistry),
         name,
         resourceTypes: overlappingRegistry,
       });
@@ -300,7 +312,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
       const store = memoryStoreFor(twoTypeRegistry);
       const getSpy = mock.method(store, "get");
       const getManySpy = mock.method(store, "getMany");
-      const cache = new Cache(store, {
+      const cache = new Cache({
+        store: store,
         name,
         resourceTypes: twoTypeRegistry,
       });
@@ -330,7 +343,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
       const name = uniqueCacheName("delete-unclassifiable");
       const store = memoryStoreFor(twoTypeRegistry);
       const deleteSpy = mock.method(store, "delete");
-      const cache = new Cache(store, {
+      const cache = new Cache({
+        store: store,
         name,
         resourceTypes: twoTypeRegistry,
       });
@@ -359,7 +373,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
       const name = uniqueCacheName("wrapper-unclassifiable");
       const store = memoryStoreFor(twoTypeRegistry);
       const getSpy = mock.method(store, "get");
-      const cache = new Cache(store, {
+      const cache = new Cache({
+        store: store,
         name,
         resourceTypes: twoTypeRegistry,
       });
@@ -393,7 +408,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
   describe("classification runs before the closed check (§6.2 ordering)", () => {
     it("a closed cache still rejects unclassifiable ids with UnclassifiableIdError, not the closed error", async () => {
       const name = uniqueCacheName("closed-ordering");
-      const cache = new Cache(memoryStoreFor(twoTypeRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(twoTypeRegistry),
         name,
         resourceTypes: twoTypeRegistry,
         onGetAfterClose: "act-empty",
@@ -424,7 +440,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
       const name = uniqueCacheName("store-unclassifiable");
       const store = memoryStoreFor(twoTypeRegistry);
       const storeSpy = mock.method(store, "store");
-      const cache = new Cache(store, {
+      const cache = new Cache({
+        store: store,
         name,
         resourceTypes: twoTypeRegistry,
       });
@@ -464,7 +481,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
       const name = uniqueCacheName("store-ambiguous");
       const store = memoryStoreFor(overlappingRegistry);
       const storeSpy = mock.method(store, "store");
-      const cache = new Cache(store, {
+      const cache = new Cache({
+        store: store,
         name,
         resourceTypes: overlappingRegistry,
       });
@@ -493,7 +511,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
       const name = uniqueCacheName("store-supplemental");
       const store = memoryStoreFor(twoTypeRegistry);
       const storeSpy = mock.method(store, "store");
-      const cache = new Cache(store, {
+      const cache = new Cache({
+        store: store,
         name,
         resourceTypes: twoTypeRegistry,
       });
@@ -558,7 +577,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
   describe("classification fuzzing over adversarial ids", () => {
     it("prefix-partitioned registry: exactly-one-match holds for every id, including Object.prototype-colliding ones", async () => {
       const name = uniqueCacheName("fuzz-prefixes");
-      const cache = new Cache(memoryStoreFor(twoTypeRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(twoTypeRegistry),
         name,
         resourceTypes: twoTypeRegistry,
       });
@@ -594,7 +614,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
         ["toString"]: resourceType<string>()({ matches: idStartsWith("t:") }),
       } satisfies ResourceTypes;
       const name = uniqueCacheName("fuzz-proto-names");
-      const cache = new Cache(memoryStoreFor(protoNamedRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(protoNamedRegistry),
         name,
         resourceTypes: protoNamedRegistry,
       });
@@ -629,7 +650,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
         }),
       } satisfies ResourceTypes;
       const name = uniqueCacheName("fuzz-proto-ambiguous");
-      const cache = new Cache(memoryStoreFor(overlappingProtoRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(overlappingProtoRegistry),
         name,
         resourceTypes: overlappingProtoRegistry,
       });
@@ -649,14 +671,23 @@ describe("resource-type classification (§6.1, §6.2)", () => {
 
     it("stores and serves entries whose ids are Object.prototype member names", async () => {
       const name = uniqueCacheName("fuzz-proto-ids-roundtrip");
-      const cache = new Cache(memoryStoreFor(soleAnythingRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(soleAnythingRegistry),
         name,
         resourceTypes: soleAnythingRegistry,
       });
       try {
         await cache.store([
-          { id: "__proto__", content: "proto-content", directives: freshFor100 },
-          { id: "toString", content: "tostring-content", directives: freshFor100 },
+          {
+            id: "__proto__",
+            content: "proto-content",
+            directives: freshFor100,
+          },
+          {
+            id: "toString",
+            content: "tostring-content",
+            directives: freshFor100,
+          },
         ]);
         const [protoRes, toStringRes] = await cache.getMany([
           { id: "__proto__", params: {}, directives: {} },
@@ -673,7 +704,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
   describe("soleResourceType registries: classification never fails (§6.1)", () => {
     it("classifies every string -- however adversarial -- to the sole type", async () => {
       const name = uniqueCacheName("sole-classify");
-      const cache = new Cache(memoryStoreFor(soleVisitsRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(soleVisitsRegistry),
         name,
         resourceTypes: soleVisitsRegistry,
       });
@@ -690,7 +722,8 @@ describe("resource-type classification (§6.1, §6.2)", () => {
 
     it("get/store/delete accept every id on a sole-type cache (no runtime enforcement, matching 1.6.0)", async () => {
       const name = uniqueCacheName("sole-ops");
-      const cache = new Cache(memoryStoreFor(soleVisitsRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(soleVisitsRegistry),
         name,
         resourceTypes: soleVisitsRegistry,
       });
@@ -717,5 +750,151 @@ describe("resource-type classification (§6.1, §6.2)", () => {
         await cache.close();
       }
     });
+  });
+});
+
+describe("singleTypeCacheOptions", () => {
+  const freshFor10 = { freshUntilAge: 10 };
+  const storeFor = <Content>() => new MemoryStore<CacheSpec<string, Content>>();
+
+  it("names the sole resource type after the cache, and reports that name on the diagnostics channels", async () => {
+    const name = uniqueCacheName("sole-default-name");
+    const capture = captureChannels(name);
+    const cache = new Cache(
+      singleTypeCacheOptions<string>()({ store: storeFor<string>(), name }),
+    );
+    try {
+      const fetch = wrapProducer(cache, {}, async (req) => ({
+        content: `v-${req.id}`,
+        directives: freshFor10,
+      }));
+
+      expect((await fetch({ id: "anything at all" })).content).to.equal(
+        "v-anything at all",
+      );
+
+      // The point of the default: the caller never named the type, and the name
+      // that reaches telemetry is the cache's own rather than a shared literal
+      // that would collapse every sole-type cache into one bucket.
+      expect(cache.classify("anything at all")).to.equal(name);
+      expect(capture.fetch.map((m) => m.resourceType)).to.deep.equal([name]);
+      expect(capture.read.map((m) => m.resourceType)).to.deep.equal([name]);
+    } finally {
+      capture.stop();
+      await cache.close();
+    }
+  });
+
+  it("uses `resourceTypeName` when given, without affecting the cache's own name", async () => {
+    const name = uniqueCacheName("sole-named");
+    const capture = captureChannels(name);
+    const cache = new Cache(
+      singleTypeCacheOptions<string>()({
+        store: storeFor<string>(),
+        name,
+        resourceTypeName: "visits",
+      }),
+    );
+    try {
+      const fetch = wrapProducer(cache, {}, async (req) => ({
+        content: `v-${req.id}`,
+        directives: freshFor10,
+      }));
+      await fetch({ id: "whatever" });
+
+      expect(cache.name).to.equal(name);
+      expect(cache.classify("whatever")).to.equal("visits");
+      expect(capture.fetch.map((m) => m.resourceType)).to.deep.equal([
+        "visits",
+      ]);
+    } finally {
+      capture.stop();
+      await cache.close();
+    }
+  });
+
+  it("classifies every id, since its sole type's guard accepts all of them", async () => {
+    const cache = new Cache(
+      singleTypeCacheOptions<string>()({
+        store: storeFor<string>(),
+        name: uniqueCacheName("sole-accepts-all"),
+        resourceTypeName: "entries",
+      }),
+    );
+    try {
+      fc.assert(
+        fc.property(fc.string(), (id) => {
+          expect(cache.classify(id)).to.equal("entries");
+        }),
+        { numRuns: 50 },
+      );
+    } finally {
+      await cache.close();
+    }
+  });
+
+  it("passes other CacheOptions through (spreadable, and `onGetAfterClose` still governs)", async () => {
+    const cache = new Cache({
+      ...singleTypeCacheOptions<string>()({
+        store: storeFor<string>(),
+        name: uniqueCacheName("sole-spread"),
+      }),
+      onGetAfterClose: "act-empty",
+    });
+    await cache.close();
+
+    // "act-empty" (rather than the default "throw") survived the spread.
+    expect(
+      await cache.get({ id: "anything", params: {}, directives: {} }),
+    ).to.deep.equal({ validatable: [] });
+  });
+});
+
+describe("a one-entry registry with a real guard rejects nonconforming ids", () => {
+  // The counterpart to singleTypeCacheOptions: narrowing a sole type's id space
+  // is done with a REAL guard now, since `soleResourceType<Content, Id>`'s
+  // asserted narrowing was unsound -- its guard accepted every string, so a
+  // malformed id classified happily and was stored under a spec whose type said
+  // it could not exist. Here the guard actually runs.
+  const guardedRegistry = {
+    tickets: resourceType<string>()({ matches: idStartsWith("ticket:") }),
+  } satisfies ResourceTypes;
+
+  it("throws UnclassifiableIdError before the store is touched, while the sugar's accept-everything form does not", async () => {
+    const store = memoryStoreFor(guardedRegistry);
+    const getSpy = mock.method(store, "get");
+    const name = uniqueCacheName("sole-guarded");
+    const capture = captureChannels(name);
+    const cache = new Cache({ store, name, resourceTypes: guardedRegistry });
+    try {
+      const fetch = wrapProducer(cache, {}, async (req) => ({
+        content: `v-${req.id}`,
+        directives: freshFor100,
+      }));
+
+      // The conforming id works end to end...
+      expect((await fetch({ id: "ticket:1" })).content).to.equal("v-ticket:1");
+      const readsAfterGoodId = getSpy.mock.callCount();
+      expect(readsAfterGoodId).to.be.greaterThan(0);
+      const messagesAfterGoodId = capture.all.length;
+
+      // ...and a nonconforming one is REJECTED. A cast is how such an id gets
+      // this far at all; the compiler rejects it at the call site.
+      assertUnclassifiable(
+        await expectRejection(
+          fetch({ id: "not-a-ticket" as `ticket:${string}` }),
+        ),
+        { cacheName: name, id: "not-a-ticket" },
+      );
+
+      // Rejected BEFORE the store was touched, and nothing was published:
+      // an unclassifiable id can't be attributed to a resource type, so there
+      // is no message to emit.
+      expect(getSpy.mock.callCount()).to.equal(readsAfterGoodId);
+      expect(capture.all.length).to.equal(messagesAfterGoodId);
+    } finally {
+      capture.stop();
+      await cache.close();
+    }
   });
 });

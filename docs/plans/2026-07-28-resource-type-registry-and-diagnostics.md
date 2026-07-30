@@ -174,6 +174,9 @@ export function resourceType<Content>(): <Id extends string>(def: {
  * idStartsWith("…") })`), which is fully legal and throws
  * `UnclassifiableIdError` on nonconforming ids.
  */
+// SUPERSEDED by 6.8: the `Id` parameter was unsound (an asserted narrowing
+// behind an accept-everything guard) and was removed. Shipped signature:
+//   export function soleResourceType<Content>(): ResourceTypeSpec<string, Content>;
 export function soleResourceType<
   Content,
   Id extends string = string,
@@ -264,6 +267,8 @@ export default class Cache<
   Validators extends AnyValidators = AnyValidators,
   in out Params extends AnyParams = AnyParams,
 > {
+  // SUPERSEDED by 6.8: one options bag, with the store inside it. Shipped
+  // signature: `constructor(options: CacheOptions<RT, Validators, Params>)`.
   constructor(
     dataStore: Store<SpecOf<RT>, Validators, InvariantOf<Params>>,
     options: {
@@ -1156,14 +1161,115 @@ PR #13 review round (2026-07-30, user decisions):
 
 ---
 
+### 6.8 Cache API simplification (2026-07-30 review round)
+
+Three changes from a review of §6.1/§6.2, all breaking, all in the same PR as
+the single-producer-function change.
+
+**1. `Cache` takes one options bag; `store` moved into it.** Was
+`new Cache(store, { name, resourceTypes, … })`, now
+`new Cache({ store, name, resourceTypes, … })`, with the shape exported as
+`CacheOptions<RT, Validators, Params>`. The separate positional store dated from
+when `options` could be omitted; §6.2 made `name` and `resourceTypes` required,
+so there is no longer a call shape in which passing the store alone says
+anything. The `InvariantOf<Params>` wrapper and the comment explaining why it is
+needed move to the `store` field unchanged.
+
+**2. `soleResourceType` loses its `Id` type parameter.** It is now
+`soleResourceType<Content>(): ResourceTypeSpec<string, Content>`.
+
+The removed form let the id space be narrowed at the type level while the guard
+stayed `typeof id === "string"`. The combination is what made it unsound: the
+guard admits every id, so a malformed one classifies happily and is stored under
+a spec whose type says such an id cannot exist. §6.1's own docstring named the
+only enforcement as call-site compile checks — and a cast or an untyped boundary
+(parsed JSON, a queue payload) walks past those, which is precisely how ids
+arrive in practice.
+
+A narrower id space is still available and now honest about it: write the
+one-entry registry with a real guard,
+`resourceType<Content>()({ matches: idStartsWith("ticket:") })`, which throws
+`UnclassifiableIdError` on a nonconforming id. Both narrowed cases in this
+repo's own fixtures converted to one-line guards (a prefix check, and a
+JSON-parsing guard for the branded `JsonOf<…>` id), so the ergonomic cost is
+real but small.
+
+This also invalidated a rationale comment in `requestPairedProducerUtils.ts`,
+which credited the *per-type producer records* with being "the user-facing
+(id, content) correlation backstop" and used that to justify two
+`as unknown as` casts. Corrected there. There is no runtime backstop and never
+was: the registry's `matches` is an *id* predicate, and `resourceType<Content>()`
+is type-only for content, so nothing exists to validate content against without
+adding content validators to the registry.
+
+**3. New `singleTypeCacheOptions<Content>()({ store, name, … })`.** Builds
+`CacheOptions` for a one-resource-type cache so the caller does not have to
+invent a name for the type or nest a one-entry registry literal. The type is
+named after the cache unless `resourceTypeName` overrides it; that name reaches
+diagnostics only (it is never part of a store key — verified), so naming it
+after the cache cannot invalidate entries, and it keeps `resourceType`
+meaningful across caches rather than collapsing every sole-type cache into one
+shared literal. Spreadable, so any other `CacheOptions` field can be set
+alongside.
+
+Curried for the same reason `resourceType` is: `Content` has no inference
+source, and TS has no partial type-argument inference.
+
+The registry it returns is keyed by an index signature, so `classify()` returns
+`string` on such a cache rather than the literal name. `SpecOf` of that registry
+is still exactly `CacheSpec<string, Content>`, so the id space and content type
+stay precise; only the name is imprecise, which is the thing the helper exists
+to let you stop thinking about.
+
+#### The `validateId` option that was tried and dropped
+
+The review sketched an optional `validateId` on this helper, to narrow the id
+space with a real guard. It was implemented and removed, and the reason is worth
+recording because the failure is not obvious:
+
+- An optional `validateId` with a defaulted `Id` is unsound in the same way the
+  removed `soleResourceType<Content, Id>` was — an explicit type argument names a
+  narrower `Id` with no guard behind it. Fixing that needs two call signatures,
+  with `validateId` **required** in the narrowing one.
+- Sound or not, the guard is then a second inference site for `Id` alongside
+  `store`, and an untyped `new MemoryStore()` wins: probed, the cache's request
+  id type came back `string` even with a guard supplied. So the narrowing was
+  silently discarded — the exact defect being removed, reintroduced.
+- Forcing the guard to win with `NoInfer<Id>` in the store position works, and
+  then correctly rejects a store typed for the wider id space. But it requires
+  every caller to spell the store's spec out
+  (`new MemoryStore<CacheSpec<Id, Content>>()`), which makes the common case
+  worse in order to serve the rare one.
+
+The rare case already has a two-line answer (the one-entry registry with a real
+guard, per change 2), and that answer is the one this design wants people
+reaching for. So the helper covers naming only, and its id space is always
+`string`. Cheap to add later if a caller actually wants it.
+
+#### Test coverage
+
+- `singleTypeCacheOptions` names the type after the cache and that name is what
+  reaches the `read`/`fetch` channels; `resourceTypeName` overrides it without
+  touching `cache.name`; other `CacheOptions` survive a spread
+  (`onGetAfterClose: "act-empty"` still governs after close); the sole type
+  classifies every id (property-based).
+- A one-entry registry with a real guard rejects a nonconforming id with
+  `UnclassifiableIdError` **before the store is touched** (store spy) and
+  publishes nothing — the enforcement the removed form lacked.
+- Compile fixtures: `store`/`name`/`resourceTypes` each required; the helper
+  keeps `content` exact while `classify()` widens to `string`; a guarded
+  one-entry registry's narrowed id reaches `Cache.get`'s request type, and a
+  bare string is rejected there.
+
 ## 7. Execution pattern and simulation
 
 Axis-care site-day visits, under the new contract:
 
 ```ts
-const cache = new Cache(store, {
+const cache = new Cache({
+  store: store,
   name: "axis_care_site_visits",
-  resourceTypes: siteVisitsResourceTypes,   // §6.1: site_day | business_slice
+  resourceTypes: siteVisitsResourceTypes,   // §6.1: site_day | business_slice,
 });
 
 const getVisits = wrapProducer(cache, {}, {
@@ -1251,8 +1357,12 @@ computing wrappers delegate to `wrapProducer` internally, so their `cacheName`s
 (`ranker_*`, zendesk) flow through today's metric like any other wrapper's.
 
 1. Catalog bump to `^2.0.0`.
-2. Every `new Cache<Spec…>(store, {})` (~25 sites) → registry + name. Single-type
-   caches use `soleResourceType<Content>()` — passing the second type arg where
+2. Every `new Cache<Spec…>({
+  store: store,
+  ,
+})` (~25 sites) → registry + name. Single-type
+   caches use `singleTypeCacheOptions<Content>()` (see 6.8; `soleResourceType`
+   no longer takes a second type arg) — supplying a real guard where
    the site already has a template-literal or branded id (e.g. zendesk's
    `` `zendesk-ticket-schema:${string}` `` computing ids), so producers keep
    their current narrow `req.id` types. `Spec` type aliases become
@@ -1358,7 +1468,7 @@ computing wrappers delegate to `wrapProducer` internally, so their `cacheName`s
   any); non-registry keys rejected; supplemental writes may target uncovered
   types; a bare function or empty record infers `Covered = never`, making the
   returned wrapper uncallable; mismatched (branch id, content) pairs rejected;
-  `soleResourceType<C, Id>` with a template-literal or branded `Id` rejects
+  a one-entry registry with a real guard for a template-literal or branded `Id` rejects
   bare-`string` requests/`hashInput` returns while the no-`Id` form still
   accepts any string (probe-verified: predicate covariance lets narrowed
   guards satisfy the `ResourceTypes` index signature).
@@ -1410,7 +1520,7 @@ takes a position on.
   window needed.
 - Resource-type names use snake_case in the monorepo (matching existing
   `cacheName` values) — the package treats them as opaque strings.
-- `soleResourceType` covers the long tail of single-type caches with no
+- `soleResourceType` (via `singleTypeCacheOptions`; see 6.8) covers the long tail of single-type caches with no
   meaningful id structure; nothing forces prefixes onto them because a
   single-entry registry is trivially unambiguous. Sole types that do declare a
   narrowed `Id` get compile-time enforcement only — acceptable because the

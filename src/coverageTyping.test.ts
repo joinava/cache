@@ -2,7 +2,10 @@ import { expect } from "chai";
 import { describe, it } from "node:test";
 import type { JsonOf } from "type-party";
 
-import { memoryStoreFor, uniqueCacheName } from "../test/v2AcceptanceHelpers.js";
+import {
+  memoryStoreFor,
+  uniqueCacheName,
+} from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
   bulkProducerByIdType,
@@ -11,6 +14,7 @@ import {
   MemoryStore,
   producerByIdType,
   resourceType,
+  singleTypeCacheOptions,
   soleResourceType,
   wrapBulkProducer,
   wrapComputingProducer,
@@ -83,10 +87,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       Equal<IdOfResourceType<(typeof registry)["site_day"]>, SiteId>
     >();
     expectType<
-      Equal<
-        ContentOfResourceType<(typeof registry)["extra_blob"]>,
-        BlobContent
-      >
+      Equal<ContentOfResourceType<(typeof registry)["extra_blob"]>, BlobContent>
     >();
     expectType<
       Equal<ContentOfResourceType<ResourceTypeSpec<string, Visits>>, Visits>
@@ -109,43 +110,54 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         // @ts-expect-error the options bag (name + resourceTypes) is required
         void new Cache(new MemoryStore());
         // @ts-expect-error `name` is required
-        void new Cache(memoryStoreFor(registry), { resourceTypes: registry });
+        void new Cache({
+          store: memoryStoreFor(registry),
+          resourceTypes: registry,
+        });
         // @ts-expect-error `resourceTypes` is required
-        void new Cache(new MemoryStore(), { name: "x" });
+        void new Cache({
+          store: new MemoryStore(),
+          name: "x",
+        });
       }
     });
   });
 
   describe("wrapProducer: Covered inferred from producerByIdType's partial record (§6.3)", () => {
     it("bounds the wrapped function's ids to the covered types and narrows per-key", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("typing-partial"),
         resourceTypes: registry,
       });
       try {
-        const fetchSite = wrapProducer(cache, {}, producerByIdType(cache, {
-          site_day: async (req) => {
-            // Contextually typed per key -- narrowed, and NOT any.
-            expectType<Equal<typeof req.id, SiteId>>();
-            return {
-              content: { visits: [1] },
-              directives: freshFor1,
-              // Supplementals may target UNCOVERED types.
-              supplementalResources: [
-                {
-                  id: "biz:1" as BizId,
-                  content: { visits: [1] } satisfies Visits,
-                  directives: freshFor1,
-                },
-                {
-                  id: "extra:1" as ExtraId,
-                  content: { blob: "x" } satisfies BlobContent,
-                  directives: freshFor1,
-                },
-              ],
-            };
-          },
-        }));
+        const fetchSite = wrapProducer(
+          cache,
+          {},
+          producerByIdType(cache, {
+            site_day: async (req) => {
+              // Contextually typed per key -- narrowed, and NOT any.
+              expectType<Equal<typeof req.id, SiteId>>();
+              return {
+                content: { visits: [1] },
+                directives: freshFor1,
+                // Supplementals may target UNCOVERED types.
+                supplementalResources: [
+                  {
+                    id: "biz:1" as BizId,
+                    content: { visits: [1] } satisfies Visits,
+                    directives: freshFor1,
+                  },
+                  {
+                    id: "extra:1" as ExtraId,
+                    content: { blob: "x" } satisfies BlobContent,
+                    directives: freshFor1,
+                  },
+                ],
+              };
+            },
+          }),
+        );
 
         const res = await fetchSite({ id: "site:1" });
         expectType<Equal<typeof res.content, Visits>>();
@@ -165,21 +177,26 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     });
 
     it("a two-key record covers the union (with per-id return narrowing); the third type stays uncovered", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("typing-two-key"),
         resourceTypes: registry,
       });
       try {
-        const fetchTwo = wrapProducer(cache, {}, producerByIdType(cache, {
-          site_day: async (req) => {
-            expectType<Equal<typeof req.id, SiteId>>();
-            return { content: { visits: [1, 2] }, directives: freshFor1 };
-          },
-          extra_blob: async (req) => {
-            expectType<Equal<typeof req.id, ExtraId>>();
-            return { content: { blob: "b" }, directives: freshFor1 };
-          },
-        }));
+        const fetchTwo = wrapProducer(
+          cache,
+          {},
+          producerByIdType(cache, {
+            site_day: async (req) => {
+              expectType<Equal<typeof req.id, SiteId>>();
+              return { content: { visits: [1, 2] }, directives: freshFor1 };
+            },
+            extra_blob: async (req) => {
+              expectType<Equal<typeof req.id, ExtraId>>();
+              return { content: { blob: "b" }, directives: freshFor1 };
+            },
+          }),
+        );
 
         const visits = await fetchTwo({ id: "site:1" });
         expectType<Equal<typeof visits.content, Visits>>();
@@ -199,7 +216,8 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     });
 
     it("rejects non-registry keys, mismatched (branch id, content) pairs, and the removed 1.6.0 options", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("typing-rejections"),
         resourceTypes: registry,
       });
@@ -231,7 +249,8 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     });
 
     it("a record where the single producer belongs is rejected, as is a bare function typed for a strict subset; a whole-registry bare function covers everything", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("typing-never"),
         resourceTypes: registry,
       });
@@ -257,7 +276,10 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           // wrapper takes every registry id.
           const whole = wrapProducer(cache, {}, async (req) => {
             expectType<Equal<typeof req.id, SiteId | BizId | ExtraId>>();
-            return { content: { visits: [] as number[] }, directives: freshFor1 };
+            return {
+              content: { visits: [] as number[] },
+              directives: freshFor1,
+            };
           });
           void whole({ id: "site:1" });
           void whole({ id: "biz:1" });
@@ -279,25 +301,30 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     });
 
     it("wrapBulkProducer: request elements are bounded per element by the covered types", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("typing-bulk"),
         resourceTypes: registry,
       });
       try {
-        const bulk = wrapBulkProducer(cache, {}, bulkProducerByIdType(cache, {
-          site_day: async (reqs) => {
-            expectType<Equal<(typeof reqs)[number]["id"], SiteId>>();
-            return reqs.map(() => ({
-              content: { visits: [] as number[] },
-              directives: freshFor1,
-            }));
-          },
-          business_slice: async (reqs) =>
-            reqs.map(() => ({
-              content: { visits: [] as number[] },
-              directives: freshFor1,
-            })),
-        }));
+        const bulk = wrapBulkProducer(
+          cache,
+          {},
+          bulkProducerByIdType(cache, {
+            site_day: async (reqs) => {
+              expectType<Equal<(typeof reqs)[number]["id"], SiteId>>();
+              return reqs.map(() => ({
+                content: { visits: [] as number[] },
+                directives: freshFor1,
+              }));
+            },
+            business_slice: async (reqs) =>
+              reqs.map(() => ({
+                content: { visits: [] as number[] },
+                directives: freshFor1,
+              })),
+          }),
+        );
 
         // A reqs array may mix COVERED types.
         const results = await bulk([{ id: "site:1" }, { id: "biz:1" }]);
@@ -317,18 +344,45 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     });
   });
 
-  describe("soleResourceType's narrowed Id (§6.1, §6.4)", () => {
+  describe("a one-entry registry's narrowed Id (§6.1, §6.4)", () => {
+    // `soleResourceType` no longer takes an `Id` parameter: narrowing the id
+    // space while its guard accepted every string was unsound (see that
+    // function's docs). A narrower id space now comes from a REAL guard, which
+    // is what makes the narrowing enforceable rather than merely asserted --
+    // and the type-level flow pinned below is identical either way.
     const zendeskRegistry = {
-      ticket_schema: soleResourceType<
-        { fields: string[] },
-        `zendesk-ticket-schema:${string}`
-      >(),
+      ticket_schema: resourceType<{ fields: string[] }>()({
+        matches: idStartsWith("zendesk-ticket-schema:"),
+      }),
     } satisfies ResourceTypes;
     type TicketSpec = SpecOf<typeof zendeskRegistry>;
 
     type SiteVisitsKey = JsonOf<{ site: string; date: string }>;
+    /**
+     * For a JSON-branded id, earning the narrower type means actually parsing
+     * it. The old sugar claimed this type off a `typeof id === "string"` check,
+     * so a malformed id was admitted and stored under a spec that said it could
+     * not exist.
+     */
+    const isSiteVisitsKey = (id: string): id is SiteVisitsKey => {
+      const parsed = ((): unknown => {
+        try {
+          return JSON.parse(id);
+        } catch {
+          return undefined;
+        }
+      })();
+      return (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "site" in parsed &&
+        typeof parsed.site === "string" &&
+        "date" in parsed &&
+        typeof parsed.date === "string"
+      );
+    };
     const brandedRegistry = {
-      site_day: soleResourceType<number[], SiteVisitsKey>(),
+      site_day: resourceType<number[]>()({ matches: isSiteVisitsKey }),
     } satisfies ResourceTypes;
 
     const defaultRegistry = {
@@ -338,15 +392,58 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     // The narrowed Id flows through SpecOf...
     expectType<Equal<TicketSpec["id"], `zendesk-ticket-schema:${string}`>>();
     expectType<Equal<SpecOf<typeof brandedRegistry>["id"], SiteVisitsKey>>();
-    // ...while the no-Id form stays `string` for unstructured-id caches.
+    // ...while `soleResourceType` stays `string` for unstructured-id caches.
     expectType<Equal<SpecOf<typeof defaultRegistry>["id"], string>>();
 
+    it("singleTypeCacheOptions: keeps content and id types exact while giving up only the resource-type name", async () => {
+      const defaultName = new Cache(
+        singleTypeCacheOptions<number[]>()({
+          store: new MemoryStore<CacheSpec<string, number[]>>(),
+          name: "typing-single-default-name",
+        }),
+      );
+      const explicitName = new Cache(
+        singleTypeCacheOptions<number[]>()({
+          store: new MemoryStore<CacheSpec<string, number[]>>(),
+          name: "typing-single-explicit-name",
+          resourceTypeName: "visits",
+        }),
+      );
+      try {
+        // The helper trades away only the resource-type NAME's precision --
+        // `classify()` returns `string` rather than the literal, which is the
+        // point of not having to name it. What matters stays exact:
+        expectType<Equal<ReturnType<typeof defaultName.classify>, string>>();
+        expectType<
+          Equal<SpecOf<typeof defaultName.resourceTypes>["content"], number[]>
+        >();
+        expectType<
+          Equal<SpecOf<typeof explicitName.resourceTypes>["content"], number[]>
+        >();
+
+        // The helper's sole type accepts every id, so the id space is exactly
+        // `string`. Narrowing it needs a real guard, which means writing the
+        // one-entry registry out (see the fixtures above) -- the helper has no
+        // asserted-narrowing option, deliberately.
+        if (false as boolean) {
+          const bare = "x" as string;
+          void defaultName.get({ id: bare, params: {}, directives: {} });
+          void explicitName.get({ id: bare, params: {}, directives: {} });
+        }
+      } finally {
+        await defaultName.close();
+        await explicitName.close();
+      }
+    });
+
     it("rejects bare-string ids at the type level (template-literal and branded), while the default form accepts any string", async () => {
-      const zendeskCache = new Cache(memoryStoreFor(zendeskRegistry), {
+      const zendeskCache = new Cache({
+        store: memoryStoreFor(zendeskRegistry),
         name: uniqueCacheName("typing-sole-tpl"),
         resourceTypes: zendeskRegistry,
       });
-      const defaultCache = new Cache(memoryStoreFor(defaultRegistry), {
+      const defaultCache = new Cache({
+        store: memoryStoreFor(defaultRegistry),
         name: uniqueCacheName("typing-sole-default"),
         resourceTypes: defaultRegistry,
       });
@@ -359,7 +456,8 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           const accepted: TicketSpec["id"] = "zendesk-ticket-schema:b1:abc";
           void accepted;
           // @ts-expect-error a string literal does not satisfy a BRANDED sole id
-          const rejectedBrand: SpecOf<typeof brandedRegistry>["id"] = "anything";
+          const rejectedBrand: SpecOf<typeof brandedRegistry>["id"] =
+            "anything";
           void rejectedBrand;
 
           // Request-level enforcement on the cache itself:
@@ -382,11 +480,13 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     });
 
     it("hashInput's return type is the (possibly narrowed) sole id", async () => {
-      const zendeskCache = new Cache(memoryStoreFor(zendeskRegistry), {
+      const zendeskCache = new Cache({
+        store: memoryStoreFor(zendeskRegistry),
         name: uniqueCacheName("typing-sole-hash"),
         resourceTypes: zendeskRegistry,
       });
-      const defaultCache = new Cache(memoryStoreFor(defaultRegistry), {
+      const defaultCache = new Cache({
+        store: memoryStoreFor(defaultRegistry),
         name: uniqueCacheName("typing-default-hash"),
         resourceTypes: defaultRegistry,
       });
@@ -405,31 +505,39 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
             { b: string },
             typeof zendeskRegistry,
             "ticket_schema"
-          >(zendeskCache, {}, {
-            ticket_schema: {
-              hashInput: (input): `zendesk-ticket-schema:${string}` =>
-                `zendesk-ticket-schema:${input.b}`,
-              produce: async () => ({
-                content: { fields: [] as string[] },
-                directives: freshFor1,
-              }),
+          >(
+            zendeskCache,
+            {},
+            {
+              ticket_schema: {
+                hashInput: (input): `zendesk-ticket-schema:${string}` =>
+                  `zendesk-ticket-schema:${input.b}`,
+                produce: async () => ({
+                  content: { fields: [] as string[] },
+                  directives: freshFor1,
+                }),
+              },
             },
-          });
+          );
 
           // ...and the default (un-narrowed) sole form accepts plain strings.
           void wrapComputingProducer<
             { k: string },
             typeof defaultRegistry,
             "visits"
-          >(defaultCache, {}, {
-            visits: {
-              hashInput: (input) => `computed:${input.k}`,
-              produce: async () => ({
-                content: [1, 2],
-                directives: freshFor1,
-              }),
+          >(
+            defaultCache,
+            {},
+            {
+              visits: {
+                hashInput: (input) => `computed:${input.k}`,
+                produce: async () => ({
+                  content: [1, 2],
+                  directives: freshFor1,
+                }),
+              },
             },
-          });
+          );
         }
       } finally {
         await zendeskCache.close();
@@ -463,7 +571,8 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       // only. The two negative fixtures (missing-on-multi rejected,
       // present-on-single rejected) are therefore omitted here -- with them,
       // the suite would not compile against the current implementation.
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("typing-matchesinput"),
         resourceTypes: registry,
       });
@@ -474,27 +583,35 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
             BranchedInput,
             typeof registry,
             "site_day" | "business_slice"
-          >(cache, {}, {
-            site_day: {
-              matchesInput: isInput,
-              hashInput: siteHash,
-              produce: siteProduceFn,
+          >(
+            cache,
+            {},
+            {
+              site_day: {
+                matchesInput: isInput,
+                hashInput: siteHash,
+                produce: siteProduceFn,
+              },
+              business_slice: {
+                matchesInput: isInput,
+                hashInput: bizHash,
+                produce: bizProduceFn,
+              },
             },
-            business_slice: {
-              matchesInput: isInput,
-              hashInput: bizHash,
-              produce: bizProduceFn,
-            },
-          });
+          );
 
           // Single-branch WITHOUT matchesInput: compiles.
           void wrapComputingProducer<
             BranchedInput,
             typeof registry,
             "site_day"
-          >(cache, {}, {
-            site_day: { hashInput: siteHash, produce: siteProduceFn },
-          });
+          >(
+            cache,
+            {},
+            {
+              site_day: { hashInput: siteHash, produce: siteProduceFn },
+            },
+          );
         }
       } finally {
         await cache.close();
@@ -502,7 +619,8 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     });
 
     it("rejects mismatched (branch id, content) pairs in a computing branch", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("typing-computing-mismatch"),
         resourceTypes: registry,
       });
@@ -518,7 +636,8 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     });
 
     it("computing supplementals (restored 1.6.0 parity): cross-branch input-keyed and id-keyed cross-type accepted; id-keyed mismatches rejected", async () => {
-      const cache = new Cache(memoryStoreFor(registry), {
+      const cache = new Cache({
+        store: memoryStoreFor(registry),
         name: uniqueCacheName("typing-computing-supplementals"),
         resourceTypes: registry,
       });
@@ -531,33 +650,37 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
             BranchedInput,
             typeof registry,
             "site_day" | "business_slice"
-          >(cache, {}, {
-            site_day: {
-              matchesInput: isInput,
-              hashInput: siteHash,
-              produce: async (_input: BranchedInput) => ({
-                content: { visits: [] as number[] },
-                directives: freshFor1,
-                supplementalResources: [
-                  {
-                    input: { kind: "biz", key: "b" } as BranchedInput,
-                    content: { visits: [] as number[] },
-                    directives: freshFor1,
-                  },
-                  {
-                    id: "extra:1" as ExtraId,
-                    content: { blob: "x" },
-                    directives: freshFor1,
-                  },
-                ],
-              }),
+          >(
+            cache,
+            {},
+            {
+              site_day: {
+                matchesInput: isInput,
+                hashInput: siteHash,
+                produce: async (_input: BranchedInput) => ({
+                  content: { visits: [] as number[] },
+                  directives: freshFor1,
+                  supplementalResources: [
+                    {
+                      input: { kind: "biz", key: "b" } as BranchedInput,
+                      content: { visits: [] as number[] },
+                      directives: freshFor1,
+                    },
+                    {
+                      id: "extra:1" as ExtraId,
+                      content: { blob: "x" },
+                      directives: freshFor1,
+                    },
+                  ],
+                }),
+              },
+              business_slice: {
+                matchesInput: isInput,
+                hashInput: bizHash,
+                produce: bizProduceFn,
+              },
             },
-            business_slice: {
-              matchesInput: isInput,
-              hashInput: bizHash,
-              produce: bizProduceFn,
-            },
-          });
+          );
 
           // prettier-ignore
           // @ts-expect-error an id-keyed supplemental's (id, content) must correlate: an extra_blob id cannot carry site_day content

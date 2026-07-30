@@ -47,7 +47,8 @@ const storiesRegistry = {
 type StoriesCacheSpec = SpecOf<typeof storiesRegistry>;
 
 const makeStoriesCache = () =>
-  new Cache(memoryStoreFor(storiesRegistry), {
+  new Cache({
+    store: memoryStoreFor(storiesRegistry),
     name: "per-id-typing-test",
     resourceTypes: storiesRegistry,
   });
@@ -89,7 +90,8 @@ describe("Per-id content typing", () => {
       const soleRegistry = {
         entries: soleResourceType<string>(),
       } satisfies ResourceTypes;
-      const cache = new Cache(memoryStoreFor(soleRegistry), {
+      const cache = new Cache({
+        store: memoryStoreFor(soleRegistry),
         name: "per-id-sole-type-test",
         resourceTypes: soleRegistry,
       });
@@ -390,7 +392,8 @@ describe("Per-id content typing", () => {
     } satisfies ResourceTypes;
 
     const makeBrandedCache = () =>
-      new Cache(memoryStoreFor(brandedRegistry), {
+      new Cache({
+        store: memoryStoreFor(brandedRegistry),
         name: "per-id-branded-test",
         resourceTypes: brandedRegistry,
       });

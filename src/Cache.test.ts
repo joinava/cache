@@ -80,7 +80,12 @@ describe("Cache", { concurrency: true }, () => {
             default:
               throw new Error(`Unknown store: ${storeName}`);
           }
-          return { cache: new Cache(store, cacheOptions) };
+          return {
+            cache: new Cache({
+              store: store,
+              ...cacheOptions,
+            }),
+          };
         });
 
         describe("totally-uncached responses", () => {
@@ -325,9 +330,7 @@ describe("Cache", { concurrency: true }, () => {
                   content,
                   validators: { etag: "w/11111" },
                 });
-                expect(res.validatable).to.deep.eq([
-                  res.usableWhileRevalidate,
-                ]);
+                expect(res.validatable).to.deep.eq([res.usableWhileRevalidate]);
               },
             );
           });
@@ -424,7 +427,10 @@ describe("Cache", { concurrency: true }, () => {
       // acquire locks in one global order and merely wait on each other. This
       // property drives concurrent same-slot batches in forward and reversed
       // input orders; without deterministic ordering it deadlocks reliably.
-      const cache = new Cache(postgresStore, cacheOptions);
+      const cache = new Cache({
+        store: postgresStore,
+        ...cacheOptions,
+      });
 
       await fc.assert(
         fc.asyncProperty(
@@ -472,7 +478,10 @@ describe("Cache", { concurrency: true }, () => {
     });
 
     it("should only keep the entry with the newest birth date when storing multiple entries with same id and vary", async () => {
-      const cache = new Cache(postgresStore, cacheOptions);
+      const cache = new Cache({
+        store: postgresStore,
+        ...cacheOptions,
+      });
       const id = randomURI();
       const vary = emptyVary;
 
@@ -533,7 +542,10 @@ describe("Cache", { concurrency: true }, () => {
 
   describe("events", () => {
     it("should emit an event for each stored entry", async () => {
-      const cache = new Cache(memoryStore, cacheOptions);
+      const cache = new Cache({
+        store: memoryStore,
+        ...cacheOptions,
+      });
       const listener = mock.fn();
       const results = [
         {
@@ -567,7 +579,10 @@ describe("Cache", { concurrency: true }, () => {
   describe("AbortSignal support", () => {
     describe("Cache.get", () => {
       it("should reject immediately with an already-aborted signal", async () => {
-        const cache = new Cache(memoryStore, cacheOptions);
+        const cache = new Cache({
+          store: memoryStore,
+          ...cacheOptions,
+        });
         const controller = new AbortController();
         controller.abort(new Error("pre-aborted"));
 
@@ -595,7 +610,10 @@ describe("Cache", { concurrency: true }, () => {
           return origGet(id, params);
         }) as typeof store.get;
 
-        const cache = new Cache(store, cacheOptions);
+        const cache = new Cache({
+          store: store,
+          ...cacheOptions,
+        });
         const controller = new AbortController();
 
         try {
@@ -612,7 +630,10 @@ describe("Cache", { concurrency: true }, () => {
       });
 
       it("should still return results normally when signal is not aborted", async () => {
-        const cache = new Cache(memoryStore, cacheOptions);
+        const cache = new Cache({
+          store: memoryStore,
+          ...cacheOptions,
+        });
         const id = randomURI();
         await cache.store([
           {
@@ -634,7 +655,10 @@ describe("Cache", { concurrency: true }, () => {
 
     describe("Cache.getMany", () => {
       it("should reject immediately with an already-aborted signal", async () => {
-        const cache = new Cache(memoryStore, cacheOptions);
+        const cache = new Cache({
+          store: memoryStore,
+          ...cacheOptions,
+        });
         const controller = new AbortController();
         controller.abort(new Error("pre-aborted-many"));
 
@@ -660,7 +684,10 @@ describe("Cache", { concurrency: true }, () => {
           return origGetMany(requests);
         }) as typeof store.getMany;
 
-        const cache = new Cache(store, cacheOptions);
+        const cache = new Cache({
+          store: store,
+          ...cacheOptions,
+        });
         const controller = new AbortController();
 
         try {
@@ -677,7 +704,10 @@ describe("Cache", { concurrency: true }, () => {
       });
 
       it("should still return results normally when signal is not aborted", async () => {
-        const cache = new Cache(memoryStore, cacheOptions);
+        const cache = new Cache({
+          store: memoryStore,
+          ...cacheOptions,
+        });
         const ids = [randomURI(), randomURI()];
         await cache.store(
           ids.map((id, i) => ({

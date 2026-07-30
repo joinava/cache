@@ -56,10 +56,10 @@ describe("wrapComputingProducer", () => {
   let cache: Cache<typeof testRegistry>;
 
   beforeEach(() => {
-    cache = new Cache(
-      new MemoryStore<SpecOf<typeof testRegistry>>(),
-      testCacheOptions,
-    );
+    cache = new Cache({
+      store: new MemoryStore<SpecOf<typeof testRegistry>>(),
+      ...testCacheOptions,
+    });
   });
 
   afterEach(async () => cache.close());
@@ -68,11 +68,11 @@ describe("wrapComputingProducer", () => {
     const producer = mock.fn(async (input: Input) =>
       result(input.text.toUpperCase()),
     );
-    const compute = wrapComputingProducer<Input, typeof testRegistry, "computed">(
-      cache,
-      {},
-      { computed: { hashInput, produce: producer } },
-    );
+    const compute = wrapComputingProducer<
+      Input,
+      typeof testRegistry,
+      "computed"
+    >(cache, {}, { computed: { hashInput, produce: producer } });
 
     const first = await compute({ text: "hello" });
     expect(first.content).to.eq("HELLO");
@@ -87,11 +87,11 @@ describe("wrapComputingProducer", () => {
     const producer = mock.fn(async (input: Input) =>
       result(input.text.toUpperCase()),
     );
-    const compute = wrapComputingProducer<Input, typeof testRegistry, "computed">(
-      cache,
-      {},
-      { computed: { hashInput, produce: producer } },
-    );
+    const compute = wrapComputingProducer<
+      Input,
+      typeof testRegistry,
+      "computed"
+    >(cache, {}, { computed: { hashInput, produce: producer } });
 
     await compute({ text: "a" });
     await compute({ text: "b" });
@@ -100,7 +100,11 @@ describe("wrapComputingProducer", () => {
 
   it("supports an async hashInput", async () => {
     const producer = mock.fn(async (input: Input) => result(input.text));
-    const compute = wrapComputingProducer<Input, typeof testRegistry, "computed">(
+    const compute = wrapComputingProducer<
+      Input,
+      typeof testRegistry,
+      "computed"
+    >(
       cache,
       {},
       {
@@ -124,7 +128,11 @@ describe("wrapComputingProducer", () => {
       await delay(20);
       return result(input.text);
     });
-    const compute = wrapComputingProducer<Input, typeof testRegistry, "computed">(
+    const compute = wrapComputingProducer<
+      Input,
+      typeof testRegistry,
+      "computed"
+    >(
       cache,
       { collapseOverlappingRequestsTime: 0 },
       { computed: { hashInput, produce: producer } },
@@ -152,11 +160,11 @@ describe("wrapComputingProducer", () => {
             ]
           : [],
     }));
-    const compute = wrapComputingProducer<Input, typeof testRegistry, "computed">(
-      cache,
-      {},
-      { computed: { hashInput, produce: producer } },
-    );
+    const compute = wrapComputingProducer<
+      Input,
+      typeof testRegistry,
+      "computed"
+    >(cache, {}, { computed: { hashInput, produce: producer } });
 
     await compute({ text: "primary" });
     expect(producer.mock.callCount()).to.eq(1);
@@ -170,11 +178,11 @@ describe("wrapComputingProducer", () => {
     const producer = mock.fn(async (input: Input) =>
       result(input.text.toUpperCase()),
     );
-    const compute = wrapComputingProducer<Input, typeof testRegistry, "computed">(
-      cache,
-      {},
-      { computed: { hashInput, produce: producer } },
-    );
+    const compute = wrapComputingProducer<
+      Input,
+      typeof testRegistry,
+      "computed"
+    >(cache, {}, { computed: { hashInput, produce: producer } });
 
     expect((await compute({ text: "hello" })).content).to.eq("HELLO");
     expect((await compute({ text: "hello" })).content).to.eq("HELLO");
@@ -199,10 +207,10 @@ describe("wrapBulkComputingProducer", () => {
   let cache: Cache<typeof testRegistry>;
 
   beforeEach(() => {
-    cache = new Cache(
-      new MemoryStore<SpecOf<typeof testRegistry>>(),
-      testCacheOptions,
-    );
+    cache = new Cache({
+      store: new MemoryStore<SpecOf<typeof testRegistry>>(),
+      ...testCacheOptions,
+    });
   });
 
   afterEach(async () => cache.close());
@@ -275,10 +283,12 @@ describe("wrapBulkComputingProducer", () => {
       "computed"
     >(cache, {}, { computed: { hashInput, produce: producer } });
 
-    expect((await compute([{ text: "a" }, { text: "b" }])).map(contentOf))
-      .to.deep.eq(["A", "B"]);
-    expect((await compute([{ text: "a" }, { text: "b" }])).map(contentOf))
-      .to.deep.eq(["A", "B"]);
+    expect(
+      (await compute([{ text: "a" }, { text: "b" }])).map(contentOf),
+    ).to.deep.eq(["A", "B"]);
+    expect(
+      (await compute([{ text: "a" }, { text: "b" }])).map(contentOf),
+    ).to.deep.eq(["A", "B"]);
     expect(producer.mock.callCount()).to.eq(1);
 
     const forced = await compute([{ text: "a" }, { text: "b" }], {
@@ -319,7 +329,8 @@ describe("computing wrappers with heterogeneous branches", () => {
   let cache: Cache<typeof storiesRegistry>;
 
   beforeEach(() => {
-    cache = new Cache(new MemoryStore<SpecOf<typeof storiesRegistry>>(), {
+    cache = new Cache({
+      store: new MemoryStore<SpecOf<typeof storiesRegistry>>(),
       name: "computing-branches-test",
       resourceTypes: storiesRegistry,
     });
@@ -332,26 +343,30 @@ describe("computing wrappers with heterogeneous branches", () => {
       VInput,
       typeof storiesRegistry,
       "story" | "collection"
-    >(cache, {}, {
-      story: {
-        matchesInput: isStory,
-        hashInput: (input): `extract:story:${string}` =>
-          `extract:story:${(input as StoryInput).id}`,
-        produce: async (input) => ({
-          content: makeStory((input as StoryInput).id),
-          directives: { freshUntilAge: 100 },
-        }),
+    >(
+      cache,
+      {},
+      {
+        story: {
+          matchesInput: isStory,
+          hashInput: (input): `extract:story:${string}` =>
+            `extract:story:${(input as StoryInput).id}`,
+          produce: async (input) => ({
+            content: makeStory((input as StoryInput).id),
+            directives: { freshUntilAge: 100 },
+          }),
+        },
+        collection: {
+          matchesInput: isCollection,
+          hashInput: (input): `extract:collection:${string}` =>
+            `extract:collection:${(input as CollInput).ids.join(",")}`,
+          produce: async (input) => ({
+            content: (input as CollInput).ids.map(makeStory),
+            directives: { freshUntilAge: 100 },
+          }),
+        },
       },
-      collection: {
-        matchesInput: isCollection,
-        hashInput: (input): `extract:collection:${string}` =>
-          `extract:collection:${(input as CollInput).ids.join(",")}`,
-        produce: async (input) => ({
-          content: (input as CollInput).ids.map(makeStory),
-          directives: { freshUntilAge: 100 },
-        }),
-      },
-    });
+    );
 
     const story = await compute({ kind: "story", id: "1" });
     expect(story.content).to.deep.eq(makeStory("1"));
@@ -386,20 +401,24 @@ describe("computing wrappers with heterogeneous branches", () => {
       VInput,
       typeof storiesRegistry,
       "story" | "collection"
-    >(cache, {}, {
-      story: {
-        matchesInput: isStory,
-        hashInput: (input): `extract:story:${string}` =>
-          `extract:story:${(input as StoryInput).id}`,
-        produce: storyProduce,
+    >(
+      cache,
+      {},
+      {
+        story: {
+          matchesInput: isStory,
+          hashInput: (input): `extract:story:${string}` =>
+            `extract:story:${(input as StoryInput).id}`,
+          produce: storyProduce,
+        },
+        collection: {
+          matchesInput: isCollection,
+          hashInput: (input): `extract:collection:${string}` =>
+            `extract:collection:${(input as CollInput).ids.join(",")}`,
+          produce: collectionProduce,
+        },
       },
-      collection: {
-        matchesInput: isCollection,
-        hashInput: (input): `extract:collection:${string}` =>
-          `extract:collection:${(input as CollInput).ids.join(",")}`,
-        produce: collectionProduce,
-      },
-    });
+    );
 
     const s1 = await compute({ kind: "story", id: "1" });
     expect(s1.content).to.deep.eq(makeStory("1"));
@@ -426,37 +445,41 @@ describe("computing wrappers with heterogeneous branches", () => {
       VInput,
       typeof storiesRegistry,
       "story" | "collection"
-    >(cache, {}, {
-      story: {
-        matchesInput: isStory,
-        hashInput: (input): `extract:story:${string}` =>
-          `extract:story:${(input as StoryInput).id}`,
-        produce: async (input) => ({
-          content: makeStory((input as StoryInput).id),
-          directives: { freshUntilAge: 100 },
-          supplementalResources: [
-            // A byproduct belonging to the OTHER branch: keyed by a
-            // collection input, so the wrapper must route it via
-            // matchesInput to the collection branch and hash it with ITS
-            // hashInput.
-            {
-              input: {
-                kind: "collection",
-                ids: [(input as StoryInput).id],
-              } satisfies CollInput as VInput,
-              content: [makeStory((input as StoryInput).id)],
-              directives: { freshUntilAge: 100 },
-            },
-          ],
-        }),
+    >(
+      cache,
+      {},
+      {
+        story: {
+          matchesInput: isStory,
+          hashInput: (input): `extract:story:${string}` =>
+            `extract:story:${(input as StoryInput).id}`,
+          produce: async (input) => ({
+            content: makeStory((input as StoryInput).id),
+            directives: { freshUntilAge: 100 },
+            supplementalResources: [
+              // A byproduct belonging to the OTHER branch: keyed by a
+              // collection input, so the wrapper must route it via
+              // matchesInput to the collection branch and hash it with ITS
+              // hashInput.
+              {
+                input: {
+                  kind: "collection",
+                  ids: [(input as StoryInput).id],
+                } satisfies CollInput as VInput,
+                content: [makeStory((input as StoryInput).id)],
+                directives: { freshUntilAge: 100 },
+              },
+            ],
+          }),
+        },
+        collection: {
+          matchesInput: isCollection,
+          hashInput: (input): `extract:collection:${string}` =>
+            `extract:collection:${(input as CollInput).ids.join(",")}`,
+          produce: collectionProduce,
+        },
       },
-      collection: {
-        matchesInput: isCollection,
-        hashInput: (input): `extract:collection:${string}` =>
-          `extract:collection:${(input as CollInput).ids.join(",")}`,
-        produce: collectionProduce,
-      },
-    });
+    );
 
     const s7 = await compute({ kind: "story", id: "7" });
     expect(s7.content).to.deep.eq(makeStory("7"));
@@ -480,44 +503,49 @@ describe("computing wrappers with heterogeneous branches", () => {
         matches: idStartsWith("snapshot:"),
       }),
     } satisfies ResourceTypes;
-    const snapshotCache = new Cache(
-      new MemoryStore<SpecOf<typeof snapshotRegistry>>(),
-      { name: "computing-id-keyed-suppl-test", resourceTypes: snapshotRegistry },
-    );
+    const snapshotCache = new Cache({
+      store: new MemoryStore<SpecOf<typeof snapshotRegistry>>(),
+      name: "computing-id-keyed-suppl-test",
+      resourceTypes: snapshotRegistry,
+    });
     try {
       const compute = wrapComputingProducer<
         VInput,
         typeof snapshotRegistry,
         "story" | "collection"
-      >(snapshotCache, {}, {
-        story: {
-          matchesInput: isStory,
-          hashInput: (input): `extract:story:${string}` =>
-            `extract:story:${(input as StoryInput).id}`,
-          produce: async (input) => ({
-            content: makeStory((input as StoryInput).id),
-            directives: { freshUntilAge: 100 },
-            supplementalResources: [
-              // Id-keyed: a plain ProducerResultResource, stored under its
-              // own natural id and classified at store time.
-              {
-                id: `snapshot:${(input as StoryInput).id}`,
-                content: `raw-html-${(input as StoryInput).id}`,
-                directives: { freshUntilAge: 100 },
-              },
-            ],
-          }),
+      >(
+        snapshotCache,
+        {},
+        {
+          story: {
+            matchesInput: isStory,
+            hashInput: (input): `extract:story:${string}` =>
+              `extract:story:${(input as StoryInput).id}`,
+            produce: async (input) => ({
+              content: makeStory((input as StoryInput).id),
+              directives: { freshUntilAge: 100 },
+              supplementalResources: [
+                // Id-keyed: a plain ProducerResultResource, stored under its
+                // own natural id and classified at store time.
+                {
+                  id: `snapshot:${(input as StoryInput).id}`,
+                  content: `raw-html-${(input as StoryInput).id}`,
+                  directives: { freshUntilAge: 100 },
+                },
+              ],
+            }),
+          },
+          collection: {
+            matchesInput: isCollection,
+            hashInput: (input): `extract:collection:${string}` =>
+              `extract:collection:${(input as CollInput).ids.join(",")}`,
+            produce: async (input) => ({
+              content: (input as CollInput).ids.map(makeStory),
+              directives: { freshUntilAge: 100 },
+            }),
+          },
         },
-        collection: {
-          matchesInput: isCollection,
-          hashInput: (input): `extract:collection:${string}` =>
-            `extract:collection:${(input as CollInput).ids.join(",")}`,
-          produce: async (input) => ({
-            content: (input as CollInput).ids.map(makeStory),
-            directives: { freshUntilAge: 100 },
-          }),
-        },
-      });
+      );
 
       const s3 = await compute({ kind: "story", id: "3" });
       expect(s3.content).to.deep.eq(makeStory("3"));
@@ -550,34 +578,38 @@ describe("computing wrappers with heterogeneous branches", () => {
       VInput,
       typeof storiesRegistry,
       "story" | "collection"
-    >(cache, {}, {
-      story: {
-        matchesInput: isStory,
-        hashInput: (input): `extract:story:${string}` =>
-          `extract:story:${(input as StoryInput).id}`,
-        produce: async (input) => ({
-          content: makeStory((input as StoryInput).id),
-          directives: { freshUntilAge: 100 },
-          supplementalResources: [
-            {
-              // Matches neither branch's matchesInput.
-              input: { kind: "neither" } as unknown as VInput,
-              content: makeStory("x"),
-              directives: { freshUntilAge: 100 },
-            },
-          ],
-        }),
+    >(
+      cache,
+      {},
+      {
+        story: {
+          matchesInput: isStory,
+          hashInput: (input): `extract:story:${string}` =>
+            `extract:story:${(input as StoryInput).id}`,
+          produce: async (input) => ({
+            content: makeStory((input as StoryInput).id),
+            directives: { freshUntilAge: 100 },
+            supplementalResources: [
+              {
+                // Matches neither branch's matchesInput.
+                input: { kind: "neither" } as unknown as VInput,
+                content: makeStory("x"),
+                directives: { freshUntilAge: 100 },
+              },
+            ],
+          }),
+        },
+        collection: {
+          matchesInput: isCollection,
+          hashInput: (input): `extract:collection:${string}` =>
+            `extract:collection:${(input as CollInput).ids.join(",")}`,
+          produce: async (input) => ({
+            content: (input as CollInput).ids.map(makeStory),
+            directives: { freshUntilAge: 100 },
+          }),
+        },
       },
-      collection: {
-        matchesInput: isCollection,
-        hashInput: (input): `extract:collection:${string}` =>
-          `extract:collection:${(input as CollInput).ids.join(",")}`,
-        produce: async (input) => ({
-          content: (input as CollInput).ids.map(makeStory),
-          directives: { freshUntilAge: 100 },
-        }),
-      },
-    });
+    );
 
     const thrown = await expectRejection(() =>
       compute({ kind: "story", id: "9" }),
@@ -591,39 +623,46 @@ describe("computing wrappers with heterogeneous branches", () => {
       VInput,
       typeof storiesRegistry,
       "story" | "collection"
-    >(cache, {}, {
-      story: {
-        matchesInput: isStory,
-        hashInput: (input): `extract:story:${string}` =>
-          `extract:story:${(input as StoryInput).id}`,
-        produce: async (input) => ({
-          content: makeStory((input as StoryInput).id),
-          directives: { freshUntilAge: 100 },
-          supplementalResources: [
-            // Routed to the collection branch, whose buggy hashInput below
-            // mints a story-prefixed id.
-            {
-              input: { kind: "collection", ids: ["9"] } satisfies CollInput as VInput,
-              content: [makeStory("9")],
-              directives: { freshUntilAge: 100 },
-            },
-          ],
-        }),
+    >(
+      cache,
+      {},
+      {
+        story: {
+          matchesInput: isStory,
+          hashInput: (input): `extract:story:${string}` =>
+            `extract:story:${(input as StoryInput).id}`,
+          produce: async (input) => ({
+            content: makeStory((input as StoryInput).id),
+            directives: { freshUntilAge: 100 },
+            supplementalResources: [
+              // Routed to the collection branch, whose buggy hashInput below
+              // mints a story-prefixed id.
+              {
+                input: {
+                  kind: "collection",
+                  ids: ["9"],
+                } satisfies CollInput as VInput,
+                content: [makeStory("9")],
+                directives: { freshUntilAge: 100 },
+              },
+            ],
+          }),
+        },
+        collection: {
+          matchesInput: isCollection,
+          // BUG under test: mints an id in the story branch's id space. The
+          // type system rejects this honestly, so the buggy value is cast
+          // through -- the runtime mint-check is the net for exactly these
+          // type-level bypasses.
+          hashInput: (input): `extract:collection:${string}` =>
+            `extract:story:${(input as CollInput).ids.join(",")}` as unknown as `extract:collection:${string}`,
+          produce: async (input) => ({
+            content: (input as CollInput).ids.map(makeStory),
+            directives: { freshUntilAge: 100 },
+          }),
+        },
       },
-      collection: {
-        matchesInput: isCollection,
-        // BUG under test: mints an id in the story branch's id space. The
-        // type system rejects this honestly, so the buggy value is cast
-        // through -- the runtime mint-check is the net for exactly these
-        // type-level bypasses.
-        hashInput: (input): `extract:collection:${string}` =>
-          `extract:story:${(input as CollInput).ids.join(",")}` as unknown as `extract:collection:${string}`,
-        produce: async (input) => ({
-          content: (input as CollInput).ids.map(makeStory),
-          directives: { freshUntilAge: 100 },
-        }),
-      },
-    });
+    );
 
     const thrown = await expectRejection(() =>
       compute({ kind: "story", id: "9" }),

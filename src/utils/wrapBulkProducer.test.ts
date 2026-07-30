@@ -46,7 +46,10 @@ describe("wrapBulkProducer", () => {
         await fc.assert(
           fc.asyncProperty(UsableEntryArb, async ({ entry, consumerDirs }) => {
             const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-            const cache = new Cache(store, testCacheOptions);
+            const cache = new Cache({
+              store: store,
+              ...testCacheOptions,
+            });
             try {
               await store.store([{ entry, maxStoreForSeconds: 100 }]);
 
@@ -98,7 +101,10 @@ describe("wrapBulkProducer", () => {
               const store = new MemoryStore<SpecOf<typeof testRegistry>>();
               const storeMock = mock.method(store, "store");
 
-              const cache = new Cache(store, testCacheOptions);
+              const cache = new Cache({
+                store: store,
+                ...testCacheOptions,
+              });
               try {
                 await store.store([{ entry, maxStoreForSeconds: 100 }]);
                 storeMock.mock.resetCalls();
@@ -148,7 +154,10 @@ describe("wrapBulkProducer", () => {
               const store = new MemoryStore<SpecOf<typeof testRegistry>>();
               const storeMock = mock.method(store, "store");
 
-              const cache = new Cache(store, testCacheOptions);
+              const cache = new Cache({
+                store: store,
+                ...testCacheOptions,
+              });
               try {
                 await store.store([{ entry, maxStoreForSeconds: 100 }]);
                 storeMock.mock.resetCalls();
@@ -204,7 +213,10 @@ describe("wrapBulkProducer", () => {
             fc.boolean(),
             async ({ entry, consumerDirs }, shouldStoreEntry) => {
               const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-              const cache = new Cache(store, testCacheOptions);
+              const cache = new Cache({
+                store: store,
+                ...testCacheOptions,
+              });
               try {
                 if (shouldStoreEntry) {
                   await store.store([{ entry, maxStoreForSeconds: 100 }]);
@@ -299,7 +311,10 @@ describe("wrapBulkProducer", () => {
             Unstored,
           }) => {
             const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-            const cache = new Cache(store, testCacheOptions);
+            const cache = new Cache({
+              store: store,
+              ...testCacheOptions,
+            });
             try {
               const unstoredIds = Unstored.map(({ entry }) => entry.id);
 
@@ -446,7 +461,10 @@ describe("wrapBulkProducer", () => {
           async (cachedRequests, uncachedRequests) => {
             // Create fresh cache and pre-populate with some entries
             const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-            const cache = new Cache(store, testCacheOptions);
+            const cache = new Cache({
+              store: store,
+              ...testCacheOptions,
+            });
 
             const genericError = new Error("test");
 
@@ -509,7 +527,10 @@ describe("wrapBulkProducer", () => {
     describe("onCacheReadFailure option", () => {
       it("should throw when cache read fails and onCacheReadFailure is 'throw'", async () => {
         const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-        const cache = new Cache(store, testCacheOptions);
+        const cache = new Cache({
+          store: store,
+          ...testCacheOptions,
+        });
 
         // Mock cache.getMany to simulate a cache read failure
         const originalGetMany = cache.getMany.bind(cache);
@@ -546,7 +567,10 @@ describe("wrapBulkProducer", () => {
 
       it("should fall back to producer when cache read fails and onCacheReadFailure is 'call-producer'", async () => {
         const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-        const cache = new Cache(store, testCacheOptions);
+        const cache = new Cache({
+          store: store,
+          ...testCacheOptions,
+        });
 
         // Mock cache.getMany to simulate a cache read failure
         const originalGetMany = cache.getMany.bind(cache);
@@ -594,7 +618,10 @@ describe("wrapBulkProducer", () => {
     describe("collapseOverlappingRequestsTime option", () => {
       it("should collapse identical overlapping requests within time window", async () => {
         const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-        const cache = new Cache(store, testCacheOptions);
+        const cache = new Cache({
+          store: store,
+          ...testCacheOptions,
+        });
 
         try {
           let callCount = 0;
@@ -644,7 +671,10 @@ describe("wrapBulkProducer", () => {
 
       it("should not collapse requests outside the time window", async () => {
         const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-        const cache = new Cache(store, testCacheOptions);
+        const cache = new Cache({
+          store: store,
+          ...testCacheOptions,
+        });
 
         try {
           let callCount = 0;
@@ -688,7 +718,10 @@ describe("wrapBulkProducer", () => {
     describe("supplemental resources", () => {
       it("should cache supplemental resources returned by the bulk producer", async () => {
         const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-        const cache = new Cache(store, testCacheOptions);
+        const cache = new Cache({
+          store: store,
+          ...testCacheOptions,
+        });
 
         try {
           const bulkProducer = mock.fn(
@@ -752,15 +785,17 @@ describe("wrapBulkProducer", () => {
   describe("AbortSignal support", () => {
     it("should reject immediately with an already-aborted signal", async () => {
       const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-      const cache = new Cache(store, testCacheOptions);
+      const cache = new Cache({
+        store: store,
+        ...testCacheOptions,
+      });
 
       try {
-        const producer = mock.fn(
-          async (reqs: readonly { id: string }[]) =>
-            reqs.map((req) => ({
-              content: `c-${req.id}`,
-              directives: { freshUntilAge: 1 },
-            })),
+        const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
+          reqs.map((req) => ({
+            content: `c-${req.id}`,
+            directives: { freshUntilAge: 1 },
+          })),
         );
 
         const wrappedBulk = wrapBulkProducer(cache, {}, producer);
@@ -770,10 +805,9 @@ describe("wrapBulkProducer", () => {
 
         await assert.rejects(
           async () =>
-            wrappedBulk(
-              [{ id: "a" }, { id: "b" }],
-              { signal: controller.signal },
-            ),
+            wrappedBulk([{ id: "a" }, { id: "b" }], {
+              signal: controller.signal,
+            }),
           { message: "pre-aborted" },
         );
 
@@ -785,7 +819,10 @@ describe("wrapBulkProducer", () => {
 
     it("should reject if signal fires before the cache read completes (i.e., before producer is called)", async () => {
       const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-      const cache = new Cache(store, testCacheOptions);
+      const cache = new Cache({
+        store: store,
+        ...testCacheOptions,
+      });
 
       let cacheGetManyResolve: (v: any) => void;
       const originalGetMany = cache.getMany.bind(cache);
@@ -796,12 +833,11 @@ describe("wrapBulkProducer", () => {
 
       try {
         const controller = new AbortController();
-        const producer = mock.fn(
-          async (reqs: readonly { id: string }[]) =>
-            reqs.map((r) => ({
-              content: `c-${r.id}`,
-              directives: { freshUntilAge: 1 },
-            })),
+        const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
+          reqs.map((r) => ({
+            content: `c-${r.id}`,
+            directives: { freshUntilAge: 1 },
+          })),
         );
 
         const wrappedBulk = wrapBulkProducer(
@@ -810,10 +846,9 @@ describe("wrapBulkProducer", () => {
           producer,
         );
 
-        const resultPromise = wrappedBulk(
-          [{ id: "abort-during-read" }],
-          { signal: controller.signal },
-        );
+        const resultPromise = wrappedBulk([{ id: "abort-during-read" }], {
+          signal: controller.signal,
+        });
 
         await delay(5);
         controller.abort(new Error("cancelled-during-read"));
@@ -822,10 +857,9 @@ describe("wrapBulkProducer", () => {
         // should fire.
         cacheGetManyResolve!([{ validatable: [] }]);
 
-        await assert.rejects(
-          async () => resultPromise,
-          { message: "cancelled-during-read" },
-        );
+        await assert.rejects(async () => resultPromise, {
+          message: "cancelled-during-read",
+        });
 
         assert.equal(producer.mock.callCount(), 0);
       } finally {
@@ -836,26 +870,29 @@ describe("wrapBulkProducer", () => {
 
     it("should reject when signal is aborted mid-producer, but still store the producer's result", async () => {
       const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-      const cache = new Cache(store, testCacheOptions);
+      const cache = new Cache({
+        store: store,
+        ...testCacheOptions,
+      });
 
       try {
         const controller = new AbortController();
         const slowProducer = mock.fn(
           async (reqs: readonly { id: string }[]) =>
-            new Promise<{ content: string; directives: { freshUntilAge: number } }[]>(
-              (resolve) => {
-                setTimeout(
-                  () =>
-                    resolve(
-                      reqs.map((r) => ({
-                        content: `slow-${r.id}`,
-                        directives: { freshUntilAge: 10 },
-                      })),
-                    ),
-                  100,
-                );
-              },
-            ),
+            new Promise<
+              { content: string; directives: { freshUntilAge: number } }[]
+            >((resolve) => {
+              setTimeout(
+                () =>
+                  resolve(
+                    reqs.map((r) => ({
+                      content: `slow-${r.id}`,
+                      directives: { freshUntilAge: 10 },
+                    })),
+                  ),
+                100,
+              );
+            }),
         );
 
         const wrappedBulk = wrapBulkProducer(
@@ -864,18 +901,16 @@ describe("wrapBulkProducer", () => {
           slowProducer,
         );
 
-        const resultPromise = wrappedBulk(
-          [{ id: "mid-abort" }],
-          { signal: controller.signal },
-        );
+        const resultPromise = wrappedBulk([{ id: "mid-abort" }], {
+          signal: controller.signal,
+        });
 
         await delay(10);
         controller.abort(new Error("cancelled-mid-producer"));
 
-        await assert.rejects(
-          async () => resultPromise,
-          { message: "cancelled-mid-producer" },
-        );
+        await assert.rejects(async () => resultPromise, {
+          message: "cancelled-mid-producer",
+        });
 
         // Wait for the producer to finish and store its result.
         await delay(150);
@@ -892,15 +927,17 @@ describe("wrapBulkProducer", () => {
 
     it("should still return cache hits even when signal is provided", async () => {
       const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-      const cache = new Cache(store, testCacheOptions);
+      const cache = new Cache({
+        store: store,
+        ...testCacheOptions,
+      });
 
       try {
-        const producer = mock.fn(
-          async (reqs: readonly { id: string }[]) =>
-            reqs.map((r) => ({
-              content: `fresh-${r.id}`,
-              directives: { freshUntilAge: 10 },
-            })),
+        const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
+          reqs.map((r) => ({
+            content: `fresh-${r.id}`,
+            directives: { freshUntilAge: 10 },
+          })),
         );
 
         const wrappedBulk = wrapBulkProducer(
@@ -915,10 +952,9 @@ describe("wrapBulkProducer", () => {
 
         // Second call with signal should still get cache hits
         const controller = new AbortController();
-        const results = await wrappedBulk(
-          [{ id: "hit-a" }, { id: "hit-b" }],
-          { signal: controller.signal },
-        );
+        const results = await wrappedBulk([{ id: "hit-a" }, { id: "hit-b" }], {
+          signal: controller.signal,
+        });
 
         const entries = results as Exclude<(typeof results)[number], Error>[];
         assert.equal(entries[0]?.content, "fresh-hit-a");
@@ -931,7 +967,10 @@ describe("wrapBulkProducer", () => {
 
     it("should not treat abort errors as cache read failures eligible for fallback", async () => {
       const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-      const cache = new Cache(store, testCacheOptions);
+      const cache = new Cache({
+        store: store,
+        ...testCacheOptions,
+      });
 
       // Make cache.getMany throw an abort error
       const originalGetMany = cache.getMany.bind(cache);
@@ -941,12 +980,11 @@ describe("wrapBulkProducer", () => {
       };
 
       try {
-        const producer = mock.fn(
-          async (reqs: readonly { id: string }[]) =>
-            reqs.map((r) => ({
-              content: `c-${r.id}`,
-              directives: { freshUntilAge: 1 },
-            })),
+        const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
+          reqs.map((r) => ({
+            content: `c-${r.id}`,
+            directives: { freshUntilAge: 1 },
+          })),
         );
 
         const wrappedBulk = wrapBulkProducer(
@@ -960,10 +998,7 @@ describe("wrapBulkProducer", () => {
 
         await assert.rejects(
           async () =>
-            wrappedBulk(
-              [{ id: "test" }],
-              { signal: controller.signal },
-            ),
+            wrappedBulk([{ id: "test" }], { signal: controller.signal }),
           { message: "aborted-during-getmany" },
         );
 
@@ -1013,7 +1048,9 @@ describe("wrapBulkProducer", () => {
       // >10ms under full-suite load. The bound only needs to reject entries
       // from a wrong source (the arbitraries' seeded entries carry far-past
       // dates), so seconds-level is plenty.
-    } else if (Math.abs(actual.date.getTime() - expected.date.getTime()) < 5000) {
+    } else if (
+      Math.abs(actual.date.getTime() - expected.date.getTime()) < 5000
+    ) {
       return assert.deepEqual(omit(actual, ["date"]), omit(expected, ["date"]));
     }
 

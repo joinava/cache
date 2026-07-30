@@ -62,13 +62,18 @@ type BulkReqs = readonly { readonly id: string }[];
 const makeHarness = (label: string) => {
   const name = uniqueCacheName(label);
   const store = memoryStoreFor(registry);
-  const cache = new Cache(store, { name, resourceTypes: registry });
+  const cache = new Cache({
+    store: store,
+    name,
+    resourceTypes: registry,
+  });
   return { name, store, cache };
 };
 
 const makeSoleHarness = (label: string) => {
   const name = uniqueCacheName(label);
-  const cache = new Cache(memoryStoreFor(soleRegistry), {
+  const cache = new Cache({
+    store: memoryStoreFor(soleRegistry),
     name,
     resourceTypes: soleRegistry,
   });
@@ -468,7 +473,11 @@ describe("single producer function + by-id-type sugar", () => {
       const store = memoryStoreFor(registry);
       const getSpy = mock.method(store, "get");
       const getManySpy = mock.method(store, "getMany");
-      const cache = new Cache(store, { name, resourceTypes: registry });
+      const cache = new Cache({
+        store: store,
+        name,
+        resourceTypes: registry,
+      });
       const storyProducer = mock.fn(async (req: { readonly id: string }) => ({
         content: `story-${req.id}`,
         directives: freshFor100,
@@ -524,7 +533,11 @@ describe("single producer function + by-id-type sugar", () => {
       const store = memoryStoreFor(registry);
       const getSpy = mock.method(store, "get");
       const getManySpy = mock.method(store, "getMany");
-      const cache = new Cache(store, { name, resourceTypes: registry });
+      const cache = new Cache({
+        store: store,
+        name,
+        resourceTypes: registry,
+      });
       const storyBulk = mock.fn(async (reqs: BulkReqs) =>
         reqs.map((req) => ({
           content: `story-${req.id}`,
@@ -686,7 +699,9 @@ describe("single producer function + by-id-type sugar", () => {
           getBare({ id: "v1" }),
           getRecord({ id: "v1" }),
         ]);
-        expect(omit(bareHit, ["date"])).to.deep.equal(omit(recordHit, ["date"]));
+        expect(omit(bareHit, ["date"])).to.deep.equal(
+          omit(recordHit, ["date"]),
+        );
         expect(bareProducer.mock.callCount()).to.equal(1);
         expect(recordProducer.mock.callCount()).to.equal(1);
 
@@ -718,7 +733,11 @@ describe("single producer function + by-id-type sugar", () => {
       const getBulk = wrapBulkProducer(cache, {}, bulkProducer);
       try {
         await cache.store([
-          { id: "cached-1", content: "cached-content", directives: freshFor100 },
+          {
+            id: "cached-1",
+            content: "cached-content",
+            directives: freshFor100,
+          },
         ]);
 
         const results = await getBulk([

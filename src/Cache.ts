@@ -23,6 +23,8 @@ import {
   type ProducerResultResource,
   type ResourceTypeName,
   type ResourceTypes,
+  type ResourceTypeSpec,
+  soleResourceType,
   type SpecForId,
   type SpecOf,
   type Store,
@@ -136,6 +138,47 @@ function foundForLookupResult(result: {
 }
 
 /**
+ * Everything a {@link Cache} needs, as one bag. The store is a field rather
+ * than a separate constructor argument because `options` has no useful default
+ * (`name` and `resourceTypes` are both required), so there was never a call
+ * shape where passing the store alone said anything.
+ */
+export type CacheOptions<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+> = {
+  /**
+   * REQUIRED. The backing store that will actually hold cache entries.
+   *
+   * Note: the Store interface should _already_ be invariant in its Params, but
+   * TS's underlying handling of functions as always bivariant (which the
+   * compiler tries to hide/override in some cases under strictFunctionTypes,
+   * but this doesn't apply to class methods; see
+   * https://www.typescriptlang.org/tsconfig/#strictFunctionTypes) means that we
+   * have to use `InvariantOf<Params>` explicitly to get the type errors we want.
+   */
+  store: Store<SpecOf<RT>, Validators, InvariantOf<Params>>;
+  /**
+   * REQUIRED. Names this cache instance (≈ the backing table) in every
+   * diagnostics message. Instance-unique per process by convention;
+   * uniqueness is not enforced.
+   */
+  name: string;
+  /**
+   * REQUIRED. The cache's resource-type registry; see {@link ResourceTypes}.
+   * Must partition the id space. For a cache with exactly one resource type,
+   * {@link singleTypeCacheOptions} builds this (and names it) for you.
+   */
+  resourceTypes: RT;
+  logger?: Logger;
+  onGetAfterClose?: "throw" | "act-empty";
+  onStoreAfterClose?: "throw" | "no-op";
+  normalizeParamName?: NormalizeParamName<Params>;
+  normalizeParamValue?: NormalizeParamValue<Params>;
+};
+
+/**
  * This class implements a cache using a generalized version of HTTP's
  * underlying caching model, but w/o encoding HTTP-specific details (like header
  * parsing), so that it can be useful in more contexts. As part of this
@@ -203,40 +246,10 @@ export default class Cache<
   public readonly normalizeParamName: NormalizeParamName<Params>;
   public readonly normalizeParamValue: NormalizeParamValue<Params>;
 
-  /**
-   * @param dataStore The backing store that will actually hold cache entries.
-   */
-  constructor(
-    // note: the Store interface should _already_ be invariant in its Params,
-    // but TS's underlying handling of functions as always bivariant (which the
-    // compiler tries to hide/override in some cases under strictFunctionTypes,
-    // but this doesn't apply to class methods; see
-    // https://www.typescriptlang.org/tsconfig/#strictFunctionTypes) means that
-    // we have to use `InvariantOf<Params>` explicitly to get the type errors we
-    // want.
-    dataStore: Store<SpecOf<RT>, Validators, InvariantOf<Params>>,
-    options: {
-      /**
-       * REQUIRED. Names this cache instance (≈ the backing table) in every
-       * diagnostics message. Instance-unique per process by convention;
-       * uniqueness is not enforced.
-       */
-      name: string;
-      /**
-       * REQUIRED. The cache's resource-type registry; see
-       * {@link ResourceTypes}. Must partition the id space.
-       */
-      resourceTypes: RT;
-      logger?: Logger;
-      onGetAfterClose?: "throw" | "act-empty";
-      onStoreAfterClose?: "throw" | "no-op";
-      normalizeParamName?: NormalizeParamName<Params>;
-      normalizeParamValue?: NormalizeParamValue<Params>;
-    },
-  ) {
+  constructor(options: CacheOptions<RT, Validators, Params>) {
     const unboundLogger = options.logger ?? defaultLoggersByComponent.cache;
     this.#logger = unboundLogger.bind(null, "cache");
-    this.#dataStore = dataStore;
+    this.#dataStore = options.store;
     this.#onGetAfterClose = options.onGetAfterClose ?? "throw";
     this.#onStoreAfterClose = options.onStoreAfterClose ?? "throw";
     this.name = options.name;
@@ -520,9 +533,7 @@ export default class Cache<
 
     // Classify every request id up front: a classification failure rejects
     // the whole operation before we touch the store.
-    const resourceTypes = mapNonEmpty(requests, (req) =>
-      this.classify(req.id),
-    );
+    const resourceTypes = mapNonEmpty(requests, (req) => this.classify(req.id));
 
     const publishRead = (
       requestIndex: number,
@@ -846,4 +857,82 @@ function calculateStoreFor(
     0,
     Math.min(requestedStoreFor, entryUtils.potentiallyUsefulFor(entry, at)),
   );
+}
+
+/**
+ * The one-entry registry {@link singleTypeCacheOptions} builds. Keyed by an
+ * index signature, because the name is a runtime value the caller asked not to
+ * think about. Nothing is lost by that: \`SpecOf\` of this registry is exactly
+ * \`CacheSpec<string, Content>\`, so the id space and the content type stay
+ * precise. The only imprecision is the NAME -- \`classify()\` returns \`string\`
+ * on such a cache rather than the literal. Write the registry out by hand if
+ * you want the literal.
+ */
+type SingleTypeRegistry<Content> = {
+  readonly [name: string]: ResourceTypeSpec<string, Content>;
+};
+
+/**
+ * Builds {@link CacheOptions} for a cache with exactly ONE resource type, so the
+ * caller does not have to invent a name for that type or nest a one-entry
+ * registry literal:
+ *
+ * \`\`\`ts
+ * const cache = new Cache(singleTypeCacheOptions<Json>()({ store, name: "xyz-cache" }));
+ * \`\`\`
+ *
+ * The resource type is named after the cache unless \`resourceTypeName\` says
+ * otherwise. That name reaches diagnostics only -- it is never part of a store
+ * key -- so naming it after the cache cannot invalidate entries, and it keeps
+ * \`resourceType\` meaningful across caches instead of collapsing every
+ * sole-type cache into one shared literal. Spread the result to add anything
+ * else {@link CacheOptions} accepts.
+ *
+ * Curried for the same reason {@link resourceType} is: \`Content\` cannot be
+ * inferred from anything, so it must be given explicitly, and TS has no partial
+ * type-argument inference.
+ *
+ * ## The id space here is always \`string\`
+ *
+ * There is deliberately no way to narrow it. A narrower id space needs a real
+ * runtime guard (see {@link soleResourceType} for why an asserted one is
+ * unsound), and \`resourceType\` already expresses exactly that -- at which
+ * point naming the entry is the smaller half of the job:
+ *
+ * \`\`\`ts
+ * new Cache({
+ *   store,
+ *   name: "tickets",
+ *   resourceTypes: {
+ *     tickets: resourceType<Schema>()({ matches: idStartsWith("ticket:") }),
+ *   },
+ * });
+ * \`\`\`
+ *
+ * A \`validateId\` option was tried here and dropped. It made the guard a second
+ * inference site alongside \`store\`, and an untyped \`new MemoryStore()\` won --
+ * silently collapsing the id space back to \`string\`, i.e. reintroducing the
+ * asserted-but-unenforced narrowing this change exists to remove. Forcing the
+ * guard to win (\`NoInfer\`) then made every caller spell out the store spec,
+ * which is a worse common case in exchange for a rare one the two lines above
+ * already serve.
+ */
+export function singleTypeCacheOptions<Content>(): <
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+>(
+  options: Omit<
+    CacheOptions<SingleTypeRegistry<Content>, Validators, Params>,
+    "resourceTypes"
+  > & {
+    /** Defaults to the cache own \`name\`. */
+    resourceTypeName?: string;
+  },
+) => CacheOptions<SingleTypeRegistry<Content>, Validators, Params> {
+  return ({ resourceTypeName, ...rest }) => ({
+    ...rest,
+    resourceTypes: {
+      [resourceTypeName ?? rest.name]: soleResourceType<Content>(),
+    },
+  });
 }

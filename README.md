@@ -18,7 +18,7 @@ Stores never see resource-type names or classification (below); those are entire
 
 ### The resource-type registry
 
-Every `Cache` is built over a **resource-type registry** ([`ResourceTypes`](./src/types/00_ResourceTypes.ts)): a record naming each *kind* of resource the cache can hold, pairing a runtime classifier for that kind's id sub-space (`matches`) with its content type (a type-level phantom). Both constructor options are required:
+Every `Cache` is built over a **resource-type registry** ([`ResourceTypes`](./src/types/00_ResourceTypes.ts)): a record naming each *kind* of resource the cache can hold, pairing a runtime classifier for that kind's id sub-space (`matches`) with its content type (a type-level phantom). `Cache` takes a single options bag; `store`, `name` and `resourceTypes` are all required:
 
 ```ts
 const storiesResourceTypes = {
@@ -26,7 +26,8 @@ const storiesResourceTypes = {
   collection: resourceType<Story[]>()({ matches: idStartsWith("collection:") }),
 } satisfies ResourceTypes;
 
-const cache = new Cache(store, {
+const cache = new Cache({
+  store: store,
   name: "stories", // names this cache instance in every diagnostics message
   resourceTypes: storiesResourceTypes,
 });
@@ -34,18 +35,31 @@ const cache = new Cache(store, {
 
 The registry's `matches` guards must **partition the id space**: for every id the cache will ever see (requests, primary results, supplemental results, deletes), exactly one entry must match. `cache.classify(id)` evaluates *every* guard: zero matches throws `UnclassifiableIdError`, two or more throws `AmbiguousResourceTypeError` — fail loud over first-match-wins, so a registry overlap is caught the first time it occurs. Classification runs on every `get`/`getMany` request id, every stored entry id (primary *and* supplemental, all validated before anything persists — a producer minting a malformed id can't write a permanently unreadable row), and every `delete` id. Guards should be cheap (prefix checks preferred); ids must carry their type in-band: **an id must be classifiable by inspection**.
 
-Single-type caches can use `soleResourceType`:
+A cache with exactly **one** resource type doesn't have to name it — `singleTypeCacheOptions` builds the whole options bag, naming the type after the cache (override with `resourceTypeName`):
 
 ```ts
-const cache = new Cache(store, {
+const cache = new Cache(
+  singleTypeCacheOptions<TicketSchema>()({ store, name: "zendesk_ticket_schemas" }),
+);
+```
+
+Its sole type accepts every id (`soleResourceType` under the hood), so classification never fails and the id space is `string`. Spread the result to set anything else `CacheOptions` accepts. The one thing it gives up is precision of the resource-type *name*: `classify()` returns `string` rather than a literal, which is the point of not having to pick one.
+
+To narrow the id space below `string` — template-literal or branded ids flowing through to every request, producer, and entry type — write the one-entry registry with a **real guard**:
+
+```ts
+const cache = new Cache({
+  store,
   name: "zendesk_ticket_schemas",
   resourceTypes: {
-    ticket_schema: soleResourceType<TicketSchema, `zendesk-ticket-schema:${string}`>(),
+    ticket_schema: resourceType<TicketSchema>()({
+      matches: idStartsWith("zendesk-ticket-schema:"),
+    }),
   },
 });
 ```
 
-Its runtime guard is trivially true (classification never fails on a sole-type cache), while the optional second type argument still narrows the id space *at the type level* — template-literal and branded ids flow through to every request, producer, and entry type. When runtime enforcement is wanted too, write the one-entry registry with a real guard instead.
+Through 2.0's review `soleResourceType` took a second type argument that narrowed the id space while its guard still accepted every string. That was unsound and has been removed: the guard admitted any id, so a malformed one classified happily and was stored under a spec whose type said it could not exist, with nothing but call-site compile checks in the way — and a cast or an untyped boundary (parsed JSON, a queue payload) walks straight past those. A guard you actually write is enforced, and throws `UnclassifiableIdError` on a nonconforming id.
 
 ### Per-id content typing (heterogeneous caches)
 

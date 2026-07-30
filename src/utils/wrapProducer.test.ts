@@ -34,7 +34,10 @@ const testCacheOptions = {
   resourceTypes: testRegistry,
 };
 const makeTestCache = () =>
-  new Cache(new MemoryStore<SpecOf<typeof testRegistry>>(), testCacheOptions);
+  new Cache({
+    store: new MemoryStore<SpecOf<typeof testRegistry>>(),
+    ...testCacheOptions,
+  });
 type TestCache = ReturnType<typeof makeTestCache>;
 type WrappedFn = (
   req: {
@@ -82,11 +85,7 @@ describe("wrapProducer", () => {
         }) satisfies RequestPairedProducerResult<any, any, any>,
     );
 
-    sut = wrapProducer(
-      cache,
-      { collapseOverlappingRequestsTime: 0 },
-      fetcher,
-    );
+    sut = wrapProducer(cache, { collapseOverlappingRequestsTime: 0 }, fetcher);
   });
 
   afterEach(async () => {

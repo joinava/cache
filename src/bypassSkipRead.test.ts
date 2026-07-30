@@ -42,7 +42,11 @@ const makeHarness = (label: string) => {
   const store = memoryStoreFor(registry);
   const getSpy = mock.method(store, "get");
   const getManySpy = mock.method(store, "getMany");
-  const cache = new Cache(store, { name, resourceTypes: registry });
+  const cache = new Cache({
+    store: store,
+    name,
+    resourceTypes: registry,
+  });
   return { name, store, getSpy, getManySpy, cache };
 };
 
@@ -345,9 +349,10 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       ).to.deep.equal(["site:plain-a", "site:plain-b"]);
 
       // Only the plain elements appear on the read channel.
-      expect(
-        capture.read.map((m) => m.resourceId).sort(),
-      ).to.deep.equal(["site:plain-a", "site:plain-b"]);
+      expect(capture.read.map((m) => m.resourceId).sort()).to.deep.equal([
+        "site:plain-a",
+        "site:plain-b",
+      ]);
 
       // Fetch per element: bypass flagged, plain not.
       expect(capture.fetch).to.have.lengthOf(3);
@@ -390,9 +395,9 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       // And a PURE-bypass bulk call performs no store read of any shape.
       const readsBefore = getSpy.mock.callCount() + getManySpy.mock.callCount();
       await getBulk([{ id: "site:bypass-a", directives: { maxAge: 0 } }]);
-      expect(
-        getSpy.mock.callCount() + getManySpy.mock.callCount(),
-      ).to.equal(readsBefore);
+      expect(getSpy.mock.callCount() + getManySpy.mock.callCount()).to.equal(
+        readsBefore,
+      );
     } finally {
       capture.stop();
       await cache.close();
