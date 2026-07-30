@@ -135,11 +135,10 @@ export type BulkProducersFor<
  *   and both counts. Both directions mean the sub-producer disagrees with the
  *   slice it was handed, so its positional pairing is no longer trustworthy, and
  *   catching it here is what makes the error name the offending sub-producer;
- *   the wrapper's equivalent check sees only the merged batch and can report a
- *   total at best. (This is stricter than the wrapper, which does not police a
- *   bare producer's over-return.) Padding the missing slots with `Error`s
- *   instead would turn a contract violation into a per-request failure and hide
- *   the bug.
+ *   the wrapper makes the same check in both directions for a bare producer, but
+ *   sees only the merged batch and so can report a total at best. Padding the
+ *   missing slots with `Error`s instead would turn a contract violation into a
+ *   per-request failure and hide the bug.
  *
  * Requests routed through this helper are classified twice, for the reason
  * given on `producerByIdType`.

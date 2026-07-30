@@ -539,6 +539,39 @@ describe("wrapBulkProducer", () => {
       );
     });
 
+    it("should reject the whole invocation, storing nothing, when the producer returns MORE results than requests", async () => {
+      // The extras have no request to pair with, so the positional (result,
+      // request) pairing is no longer trustworthy -- the same reason an
+      // under-return fails the invocation rather than degrading to a per-request
+      // failure. This is the bare-producer path; `bulkProducerByIdType` makes the
+      // equivalent check per sub-producer slice, where it can also name which
+      // sub-producer broke its contract.
+      const { store, cache } = makeTestStoreAndCache();
+      const storeMock = mock.method(store, "store");
+      const bulkProducer = mock.fn(
+        async (reqs: readonly { readonly id: string }[]) => [
+          ...reqs.map((req) => ({
+            content: `ok-${req.id}`,
+            directives: { freshUntilAge: 100 },
+          })),
+          { content: "extra-nobody-asked-for", directives: { freshUntilAge: 100 } },
+        ],
+      );
+      const wrappedBulkProducer = wrapBulkProducer(cache, {}, bulkProducer);
+
+      try {
+        await assert.rejects(
+          async () => wrappedBulkProducer([{ id: "a" }, { id: "b" }]),
+          /producer returned 3 results for 2 requests \(the extra results have no request to pair with\)/,
+        );
+        // Not even the two results that DO have requests are kept: the whole
+        // batch is suspect, so nothing reaches the store.
+        assert.equal(storeMock.mock.callCount(), 0);
+      } finally {
+        await cache.close();
+      }
+    });
+
     describe("onCacheReadFailure option", () => {
       it("should throw when cache read fails and onCacheReadFailure is 'throw'", async () => {
         const { cache } = makeTestStoreAndCache();

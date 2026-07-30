@@ -300,14 +300,24 @@ export function wrapBulkProducer<
       let requestPairedProducerResults: (LooseResult | ErrorType)[];
       try {
         requestPairedProducerResults = await callProducerAndLog(reqs);
-        // A producer that returns fewer results than requests (or an
-        // undefined element) violated its contract, and the positional
-        // (result, request) pairing is no longer trustworthy -- a dropped
-        // middle element would silently pair later results with the wrong
-        // requests. So nothing is stored and the WHOLE invocation fails:
-        // this throw rejects it, settling every waiting element's fetch as
-        // `producer-error` via the group's rejection handler.
+        // A producer whose results do not line up 1:1 with the requests it was
+        // given violated its contract, and the positional (result, request)
+        // pairing is no longer trustworthy -- a dropped middle element would
+        // silently pair later results with the wrong requests. So nothing is
+        // stored and the WHOLE invocation fails: these throws reject it,
+        // settling every waiting element's fetch as `producer-error` via the
+        // group's rejection handler.
         //
+        // Over-return is checked separately rather than folded into the count
+        // below, because "how many requests were answered" is the wrong question
+        // for it: every request has a result, and the extras have no request to
+        // pair with at all, so that check would report the batch fully answered.
+        if (requestPairedProducerResults.length > reqs.length) {
+          throw new Error(
+            `wrapBulkProducer: producer returned ${String(requestPairedProducerResults.length)} results for ${String(reqs.length)} requests (the extra results have no request to pair with)`,
+          );
+        }
+
         // Tests FILLED slots rather than the array's `length`, which is not the
         // same thing: a producer that hands back a sparse array, or one holding
         // an explicit `undefined`, has the right `length` and still answered

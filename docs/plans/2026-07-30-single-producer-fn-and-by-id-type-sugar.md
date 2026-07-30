@@ -626,11 +626,16 @@ the helper now compares each sub-producer's result count against the slice it wa
 given and throws, naming the resource type and both counts. A count comparison
 also needs no premise about which values are legal.
 
-**Both directions.** Over-return fails too, which is stricter than the wrapper —
-it still does not police a bare producer's over-return. Extras mean the sub-producer
-disagrees with the slice it was handed, so its positional pairing is no longer
-trustworthy — a stronger signal than a bare producer over-returning against a
-batch it received whole.
+**Both directions, at both levels.** Over-return fails too: extras mean the
+sub-producer disagrees with the slice it was handed, so its positional pairing is
+no longer trustworthy. `wrapBulkProducer` was initially left lenient about a
+*bare* producer's over-return, which made the sugar stricter than the primitive
+it desugars to — an asymmetry with no justification, since the reason extras
+break pairing doesn't depend on who assembled the batch. Reviewed and closed:
+the wrapper now rejects over-return too, as its own case rather than folded into
+the answered-count check (every request *has* a result there, so that check would
+report the batch fully answered). What the sugar still adds is naming the
+sub-producer at fault.
 
 **What does not change.** Per-type error *isolation* is untouched: a sub-producer
 that throws or rejects still settles only its own slots as `Error`s, and that path

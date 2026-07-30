@@ -255,9 +255,10 @@ describe("bulkProducerByIdType", () => {
   });
 
   it("an OVER-RETURNING sub-producer fails the whole invocation too", async () => {
-    // Stricter than the wrapper, which does not police a bare producer's
-    // over-return: extras mean this sub-producer disagrees with the slice it was
-    // handed, so its positional pairing is no longer trustworthy.
+    // Extras mean this sub-producer disagrees with the slice it was handed, so
+    // its positional pairing is no longer trustworthy. The wrapper rejects a bare
+    // producer's over-return for the same reason (wrapBulkProducer.test.ts); what
+    // this level adds is naming which sub-producer did it.
     const producer = bulkProducerByIdType(registry, {
       site_day: async (reqs) => [
         ...reqs.map((req) => ({
