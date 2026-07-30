@@ -43,11 +43,12 @@ export function completeRequest<Params extends AnyParams, Id extends string>(
  * supplemental resources may correspond to any variant -- not just the one
  * matching the request's id.
  *
- * The user-facing (id, content) correlation backstop comes from the
- * `RequestPairedProducer<Spec, V, P>` *signature* (which, in multi-id-type
- * mode, makes the producer generic over the request's specific id). This
- * helper's job is just to build the runtime store input. TS can't see
- * through the conditional/distributive types involved here, so the
+ * The user-facing (id, content) correlation backstop comes from the per-type
+ * producer records the wrappers take (`ResourceTypeProducer` /
+ * `BulkResourceTypeProducer`): each producer's `req.id` is pinned to its own
+ * registry branch, so its result can only pair that branch's content with that
+ * branch's ids. This helper's job is just to build the runtime store input. TS
+ * can't see through the conditional/distributive types involved here, so the
  * construction needs an unsafe cast; the cast is sound because we don't
  * synthesize id/content -- we just spread fields the producer already
  * paired correctly.
