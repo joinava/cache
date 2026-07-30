@@ -7,28 +7,29 @@ import type {
   ProducerResultResource,
   ProducerResultResourceObject,
 } from "./04_ProducerResult.js";
-import type { IsSingleType } from "./utils.js";
 
 /**
  * A producer paired with a consumer request: invoked with the full request,
  * the producer is expected to return a {@link RequestPairedProducerResult}
  * for that request's `id`.
  *
- * The shape of `RequestPairedProducer` depends on whether the cache's `Spec`
- * is a *single id type* or a *multi-id type* (a union of {@link CacheSpec}s):
+ * Generic over the request's specific id, so the return type's content is
+ * required to match the spec variant that id selects. Implementing this shape
+ * directly is awkward -- TypeScript can't narrow the function's free type
+ * parameter based on runtime checks on `req.id` -- so a producer that must
+ * handle several resource types is better written as a per-resource-type record
+ * handed to `producerByIdType` / `bulkProducerByIdType`, whose sub-producers
+ * each see one branch's ids.
  *
- * - **Single-id-type mode** (one `CacheSpec` variant — the most common case):
- *   the producer is a plain non-generic function. The (id, content)
- *   correlation is trivially preserved because there's only one possible
- *   content type.
+ * This type describes that shape for callers who want to name it; the wrappers
+ * themselves take a `CoveringProducer` and dispatch through their own erased
+ * internal shape, so nothing in the package consumes this type.
  *
- * - **Multi-id-type mode** (a union of `CacheSpec`s): the producer is generic
- *   over the request's specific id, so its return type is required to match
- *   the spec variant that id selects. Implementing such a producer directly
- *   is awkward (TypeScript can't narrow the function's free type parameter
- *   based on runtime checks on `req.id`), so users are encouraged to build
- *   one with the {@link producerByIdType} helper, which handles per-variant
- *   dispatch and contains the necessary internal cast.
+ * Takes no `AbortSignal`. Every producer invocation goes through the wrappers'
+ * collapsed-invocation task, which is shared between logical callers, so there
+ * is no single signal it could forward without letting one caller cancel
+ * another's work. Callers' aborts are honored one level up, where each caller's
+ * *wait* is raced against its own signal.
  *
  * Implementations of this type MUST NOT be `instanceof Error`, as instanceof
  * Error is used elsewhere to detect if the result could not be returned.
@@ -37,43 +38,8 @@ export type RequestPairedProducer<
   Spec extends CacheSpec,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
-> =
-  IsSingleType<Spec> extends true
-    ? SingleIdTypeRequestPairedProducer<Spec, Validators, Params>
-    : MultiIdTypeRequestPairedProducer<Spec, Validators, Params>;
-
-/**
- * The single-id-type form of {@link RequestPairedProducer}: a non-generic
- * function whose return need only be valid for the spec's one variant.
- */
-export type SingleIdTypeRequestPairedProducer<
-  Spec extends CacheSpec,
-  Validators extends AnyValidators = AnyValidators,
-  Params extends AnyParams = AnyParams,
-> = (
-  req: ReadonlyDeep<ConsumerRequest<Params, Spec["id"]>>,
-  options?: { signal?: AbortSignal },
-) => Promise<RequestPairedProducerResult<Spec, Validators, Params>>;
-
-/**
- * The multi-id-type form of {@link RequestPairedProducer}: generic over the
- * request's specific id, so the return type's content is required to match
- * the spec variant that id selects.
- *
- * This is the form that internal code (`wrapProducer`,
- * `requestPairedProducerResultToResources`, etc.) operates against. In
- * single-id-type mode the loose user-facing form is coerced to this one
- * inside `wrapProducer`; that coercion is sound because all ids in single-
- * id-type mode share the same content type, so any valid loose result is
- * also a valid result for an arbitrary requested id.
- */
-export type MultiIdTypeRequestPairedProducer<
-  Spec extends CacheSpec,
-  Validators extends AnyValidators = AnyValidators,
-  Params extends AnyParams = AnyParams,
 > = <Id extends Spec["id"]>(
   req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
-  options?: { signal?: AbortSignal },
 ) => Promise<RequestPairedProducerResult<Spec, Validators, Params, Id>>;
 
 /**

@@ -1,230 +1,176 @@
-import type { ReadonlyDeep } from "type-fest";
-import type { CacheSpec } from "../types/00_CacheSpec.js";
+/**
+ * @fileoverview Per-resource-type producer dispatch: opt-in sugar over the
+ * single-producer primitive that both wrappers take.
+ *
+ * Split out from the wrappers because it needs no `Cache` at all: routing an id
+ * to a sub-producer is a function of the resource-type registry's `matches`
+ * guards and nothing else. What it does still need it imports -- the
+ * {@link coveredTypes} carrier and the id-erased internal shapes from
+ * `wrapProducer`, the routing errors from `producer-errors` -- so the runtime
+ * import graph runs one way (this file -> those) and the bulk side is type-only.
+ *
+ * @module
+ */
 import type {
-  MultiIdTypeRequestPairedProducer,
-  RequestPairedProducerResult,
-} from "../types/05_RequestPairedProducer.js";
-import type {
-  AnyParams,
-  AnyValidators,
-  ConsumerRequest,
-  RequestPairedProducer,
-} from "../types/index.js";
+  ResourceTypeName,
+  ResourceTypes,
+} from "../types/00_ResourceTypes.js";
+import {
+  classifyIdAgainst,
+  type IdClassification,
+  resourceTypesEntries,
+  type ResourceTypesEntries,
+} from "../resourceTypeClassification.js";
+import type { AnyParams, AnyValidators } from "../types/index.js";
+import {
+  UnroutableIdError,
+  type UnroutableIdReason,
+} from "./producer-errors.js";
+import { assertUnreachable } from "./utils.js";
+import {
+  coveredTypes,
+  emptyProducersRecordMessage,
+  type CoveringProducer,
+  type LooseProducer,
+  type LooseRequestFor,
+  type ProducersFor,
+} from "./wrapProducer.js";
 
 /**
- * A single branch of a {@link producerByIdType} producer: pairs a runtime
- * type guard for a subset of the spec's ids with a handler whose return type
- * is narrowed to that subset's content.
+ * Classifies `id` against the registry a by-id-type helper was built from and
+ * resolves the sub-producer to dispatch to, throwing {@link UnroutableIdError}
+ * when the id doesn't classify to exactly one *covered* resource type.
  *
- * `NarrowedId` distributes over the spec's id types, so providing a guard
- * that only matches one variant gives a handler whose `req.id` is the
- * variant's id (literal or template-literal) and whose return type is
- * required to be content for *that* variant.
+ * Returns the sub-producer rather than just its name so the membership test and
+ * the lookup are one own-property read: "is this type covered" and "which
+ * function covers it" cannot then disagree, and neither call site needs a
+ * non-null assertion. Shared by the single and bulk helpers so their routing --
+ * and so which failures are contract violations rather than dispositions --
+ * cannot drift.
  */
-export type ProducerBranch<
-  Spec extends CacheSpec,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-  NarrowedId extends Spec["id"] = Spec["id"],
-> = NarrowedId extends Spec["id"]
-  ? {
-      readonly matches: (id: Spec["id"]) => id is NarrowedId;
-      readonly handle: (
-        req: ReadonlyDeep<ConsumerRequest<Params, NarrowedId>>,
-        options?: { signal?: AbortSignal },
-      ) => Promise<
-        RequestPairedProducerResult<Spec, Validators, Params, NarrowedId>
-      >;
+export function resolveCoveredSubProducer<SubProducer>(
+  entries: ResourceTypesEntries<ResourceTypes>,
+  subProducers: Readonly<Record<string, SubProducer>>,
+  coveredResourceTypes: readonly string[],
+  id: string,
+): { readonly resourceType: string; readonly subProducer: SubProducer } {
+  const unroutable = (detail: UnroutableIdReason) =>
+    new UnroutableIdError({ id, coveredResourceTypes, detail });
+
+  const classification: IdClassification<ResourceTypes> = classifyIdAgainst(
+    entries,
+    id,
+  );
+  switch (classification.matched) {
+    case "one": {
+      const { name } = classification;
+      // Own-property read: the record came from a spread of the caller's, so
+      // inherited keys must never resolve a producer.
+      const subProducer = Object.hasOwn(subProducers, name)
+        ? subProducers[name]
+        : undefined;
+      if (subProducer === undefined) {
+        throw unroutable({ reason: "uncovered", resourceType: name });
+      }
+      return { resourceType: name, subProducer };
     }
-  : never;
-
-/**
- * The fluent builder returned by {@link producerByIdType}. Use `.when(...)`
- * to add per-id-type branches; each call infers its own `NarrowedId` from
- * the type guard, so the handler's `req.id` is concrete and TypeScript can
- * fully verify the (id, content) correlation in the body. End the chain
- * with `.build()` to produce the final {@link RequestPairedProducer}.
- *
- * The phantom `Covered` parameter accumulates the union of `NarrowedId`s
- * supplied to each `.when(...)` call so that `.build()` can statically
- * verify the chain is exhaustive for `Spec["id"]`. When the chain is
- * non-exhaustive, `.build()` returns a {@link _NonExhaustiveBuildError}
- * whose tuple shape names the missing ids and is not assignable to
- * `RequestPairedProducer`; the resulting error surfaces at the call site
- * that consumes the build result (typically `wrapProducer`).
- */
-export type ProducerByIdTypeBuilder<
-  Spec extends CacheSpec,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-  Covered extends Spec["id"] = never,
-> = {
-  readonly when: <NarrowedId extends Spec["id"]>(
-    matches: (id: Spec["id"]) => id is NarrowedId,
-    handle: (
-      req: ReadonlyDeep<ConsumerRequest<Params, NarrowedId>>,
-      options?: { signal?: AbortSignal },
-    ) => Promise<
-      RequestPairedProducerResult<Spec, Validators, Params, NarrowedId>
-    >,
-  ) => ProducerByIdTypeBuilder<
-    Spec,
-    Validators,
-    Params,
-    Covered | NarrowedId
-  >;
-  readonly build: () => _BuildResult<Spec, Validators, Params, Covered>;
-};
-
-/**
- * Error type produced by `.build()` when the builder hasn't covered every
- * id type in `Spec["id"]`. Surfaces as a TS error wherever the build result
- * is used (e.g., the `wrapProducer(...)` call site), naming the missing
- * ids in the message.
- */
-type _NonExhaustiveBuildError<Missing> = readonly [
-  "producerByIdType: builder is non-exhaustive; missing `.when(...)` branches for these ids:",
-  Missing,
-];
-
-type _BuildResult<
-  Spec extends CacheSpec,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-  Covered extends Spec["id"],
-> = [Exclude<Spec["id"], Covered>] extends [never]
-  ? RequestPairedProducer<Spec, Validators, Params>
-  : _NonExhaustiveBuildError<Exclude<Spec["id"], Covered>>;
-
-/**
- * Builds a {@link RequestPairedProducer} for a multi-id-type cache from a
- * sequence of per-id-pattern branches.
- *
- * This is the recommended way to write per-id-typed producers. Each branch's
- * `handle` function is non-generic over `Id`, so the request's id is a
- * concrete (template-literal or branded) type and TypeScript can fully
- * verify the (id, content) correlation within its body. The unsafe
- * `Id`-bridging cast that a hand-written multi-id producer would require
- * lives once, inside this helper, and is justified by the type guards
- * provided to each `.when(...)`.
- *
- * Branches are tried in declaration order. If no branch matches a request's
- * id at runtime, the returned producer rejects with a descriptive error.
- * (Use exhaustive specs and matching guards to avoid this in production
- * code paths.)
- *
- * @example
- *   type StoriesSpec =
- *     | CacheSpec<`story:${string}`, Story>
- *     | CacheSpec<`collection:${string}`, Story[]>;
- *
- *   const fetcher = wrapProducer<StoriesSpec>(cache, options,
- *     producerByIdType<StoriesSpec>()
- *       .when(idStartsWith("story:"), async (req) => ({
- *         // req.id: `story:${string}`  ⇒  content must be Story
- *         content: { id: req.id, title: `Story ${req.id}` },
- *         directives: { freshUntilAge: 1 },
- *       }))
- *       .when(idStartsWith("collection:"), async (req) => ({
- *         // req.id: `collection:${string}`  ⇒  content must be Story[]
- *         content: [{ id: "1", title: "a" }],
- *         directives: { freshUntilAge: 1 },
- *       }))
- *       .build(),
- *   );
- */
-export function producerByIdType<
-  Spec extends CacheSpec,
-  Validators extends AnyValidators = AnyValidators,
-  Params extends AnyParams = AnyParams,
->(): ProducerByIdTypeBuilder<Spec, Validators, Params> {
-  // Internal mutable list of accumulated branches. We only ever append, so
-  // each `.when(...)` returns a builder backed by the same list.
-  // `NarrowedId` is erased here (`Spec["id"]` is the safe upper bound) --
-  // it's already been verified at each `.when(...)` call.
-  const branches: ProducerBranch<Spec, Validators, Params>[] = [];
-
-  // The runtime builder is a single object shared across all chained
-  // `.when(...)` calls. The exhaustiveness tracking lives entirely in the
-  // type system (the phantom `Covered` parameter on the public type), so
-  // we cast once at the bottom to surface that to TS while keeping a
-  // single value at runtime.
-  const builder = {
-    when(
-      matches: ProducerBranch<Spec, Validators, Params>["matches"],
-      handle: ProducerBranch<Spec, Validators, Params>["handle"],
-    ) {
-      branches.push({ matches, handle } as unknown as ProducerBranch<
-        Spec,
-        Validators,
-        Params
-      >);
-      return builder;
-    },
-
-    build() {
-      const dispatch: MultiIdTypeRequestPairedProducer<
-        Spec,
-        Validators,
-        Params
-      > = async <Id extends Spec["id"]>(
-        req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
-        options?: { signal?: AbortSignal },
-      ) => {
-        for (const branch of branches) {
-          if (branch.matches(req.id)) {
-            // SAFETY: the guard above just confirmed `req.id` is in
-            // `branch`'s `NarrowedId`, so `req` is a valid argument to
-            // `branch.handle` and the result's (id, content) correlation
-            // is valid for the actual call's effective `Id`.
-            return (await branch.handle(
-              req as unknown as ReadonlyDeep<
-                ConsumerRequest<Params, Spec["id"]>
-              >,
-              options,
-            )) as RequestPairedProducerResult<Spec, Validators, Params, Id>;
-          }
-        }
-        throw new Error(
-          `producerByIdType: no branch matched request id ${JSON.stringify(req.id)}`,
-        );
-      };
-
-      // The declared return type of `.build()` is `_BuildResult`, which
-      // resolves to either a `RequestPairedProducer` (when the chain is
-      // exhaustive) or a `_NonExhaustiveBuildError` tuple (when it isn't).
-      // The runtime value is always a producer; in the non-exhaustive case
-      // the user gets a TS error at the consuming call site (typically
-      // `wrapProducer`) with the missing ids spelled out in the type.
-      return dispatch as unknown as _BuildResult<
-        Spec,
-        Validators,
-        Params,
-        never
-      >;
-    },
-  };
-
-  return builder as unknown as ProducerByIdTypeBuilder<
-    Spec,
-    Validators,
-    Params
-  >;
+    case "none": {
+      throw unroutable({
+        reason: "unclassifiable",
+        cause: classification.cause,
+      });
+    }
+    case "many": {
+      throw unroutable({
+        reason: "ambiguous",
+        matchedResourceTypes: classification.names,
+      });
+    }
+    default: {
+      return assertUnreachable(classification);
+    }
+  }
 }
 
 /**
- * Type guard helper: matches ids whose runtime value starts with a prefix.
- * Useful with template-literal-keyed specs (e.g., `\`story:${string}\``)
- * when used with {@link producerByIdType}.
+ * Sugar over {@link wrapProducer}'s single-producer primitive: turns a record
+ * with one entry per covered resource type into ONE function that dispatches
+ * by the request's classified type, and that declares its covered set in
+ * {@link coveredTypes} so `wrapProducer` can both infer `Covered` from it and
+ * enforce it at runtime.
  *
- * The returned guard is generic in the input id, so passing it to a
- * `producerByIdType` branch correctly narrows the spec's id union down to
- * its `${Prefix}${string}` constituents.
+ * Use this when a wrapper should cover a strict subset of the registry, or
+ * when each resource type has its own origin. A producer that covers the whole
+ * registry needs no helper: pass it to `wrapProducer` directly.
+ *
+ * Throws at construction on an empty record: a helper whose whole purpose is to
+ * declare a covered set has nothing to declare.
+ *
+ * Note that requests routed through this helper are classified TWICE (once
+ * here to pick the sub-producer, once in the wrapper for dispatch/telemetry).
+ * That is the price of the sugar being opt-in; guards are meant to be cheap.
+ *
+ * @param resourceTypes - The registry the producer's ids will be classified
+ *   against: `cache.resourceTypes` for the cache it will be wrapped against.
+ *   The registry, not the cache, because routing by id type needs nothing else
+ *   -- so a by-id-type producer is a value in its own right, buildable and
+ *   testable before any cache exists. It is also the inference site for `RT`
+ *   (see {@link Cache.resourceTypes} for why a bare-`RT` member is needed for
+ *   that at all).
+ * @param producers - One {@link ResourceTypeProducer} per covered resource
+ *   type; `Covered` is inferred from the keys.
  */
-export function idStartsWith<Prefix extends string>(
-  prefix: Prefix,
-): <Id extends string>(id: Id) => id is Extract<Id, `${Prefix}${string}`> {
-  return ((id: string) => id.startsWith(prefix)) as <Id extends string>(
-    id: Id,
-  ) => id is Extract<Id, `${Prefix}${string}`>;
+export function producerByIdType<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+>(
+  resourceTypes: RT,
+  producers: ProducersFor<RT, Covered, Validators, Params>,
+): CoveringProducer<RT, Covered, Validators, Params> {
+  // SAFETY: see LooseProducer. A value is only read out of this record after
+  // classification succeeds and the key is confirmed to be the record's own,
+  // so the request's id is in exactly the id sub-space that sub-producer
+  // declared. Snapshotted for the reason given on `coveredTypeSet`.
+  const looseProducers: Readonly<
+    Record<string, LooseProducer<RT, Validators, Params>>
+  > = {
+    ...(producers as unknown as Readonly<
+      Record<string, LooseProducer<RT, Validators, Params>>
+    >),
+  };
+  const coveredResourceTypes = Object.keys(looseProducers);
+
+  if (coveredResourceTypes.length === 0) {
+    throw new Error(
+      emptyProducersRecordMessage("producerByIdType", "wrapProducer"),
+    );
+  }
+
+  // Computed once, here, rather than per classified id.
+  const entries = resourceTypesEntries(resourceTypes);
+
+  type LooseRequest = LooseRequestFor<RT, Params>;
+
+  const dispatchingProducer = async (req: LooseRequest) => {
+    // Throws UnroutableIdError when the id doesn't classify to exactly one
+    // covered type. Unreachable through `wrapProducer` unless the registry here
+    // disagrees with the cache's; reachable whenever the returned producer is
+    // driven directly. Fail loud either way rather than serving nothing.
+    const { subProducer } = resolveCoveredSubProducer(
+      entries,
+      looseProducers,
+      coveredResourceTypes,
+      req.id,
+    );
+    return subProducer(req);
+  };
+
+  // SAFETY: the dispatching function is id-erased internally (see
+  // LooseProducer), and the covered names are the record's own keys, so the
+  // declared set and the reachable sub-producers cannot disagree.
+  return Object.assign(dispatchingProducer, {
+    [coveredTypes]: coveredResourceTypes,
+  }) as unknown as CoveringProducer<RT, Covered, Validators, Params>;
 }

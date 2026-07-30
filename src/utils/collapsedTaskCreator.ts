@@ -91,3 +91,118 @@ export default function collapsedTaskCreator<
     return res[0];
   };
 }
+
+/**
+ * A live handle on one actual (collapsed) producer invocation, passed to the
+ * task function so it can attribute its telemetry to the invocation.
+ * @internal
+ */
+export type CollapsedInvocation = {
+  /**
+   * Why the invocation was initiated (the label its CREATOR attached). Later
+   * callers riding the invocation never re-label it.
+   */
+  readonly trigger: "miss" | "revalidation" | "bypass";
+  /**
+   * The number of logical callers attached to this invocation so far
+   * (the initiator plus any riders that joined via request collapsing).
+   * Live: read it at publish time.
+   */
+  readonly attachedCallerCount: () => number;
+};
+
+/**
+ * The producer wrappers' internal variant of {@link collapsedTaskCreator}:
+ * identical collapse semantics (same args + pending + within
+ * `collapseTasksMs` of the task's start ⇒ reuse), but purpose-built for
+ * producer-invocation telemetry:
+ *
+ * - each call is labeled with the trigger that motivated it; the label of
+ *   the call that actually CREATES an invocation is fixed as that
+ *   invocation's trigger (riders never re-label it);
+ * - the task function receives a {@link CollapsedInvocation} handle so it can
+ *   publish invocation-scoped diagnostics (trigger, attached-caller count);
+ * - each call's return says whether it `rode` an already-in-flight
+ *   invocation (true) or initiated one (false). Settlements that DEPEND on
+ *   the invocation (served-from-producer / producer-error /
+ *   served-stale-after-error / aborted-while-waiting) report this as the
+ *   fetch channel's `collapsed` flag; cache-served settlements (fresh or
+ *   stale-while-revalidating) report `collapsed: false` even when they
+ *   attached a background revalidation as a rider, since their settlement
+ *   never depended on it (see CacheFetchMessage.collapsed).
+ *
+ * Not exported from the package: the public `collapsedTaskCreator` remains
+ * the general-purpose utility.
+ * @internal
+ */
+export function collapsedInvocationTaskCreator<Args extends unknown[], Result>(
+  taskCreator: (
+    invocation: CollapsedInvocation,
+    ...args: Args
+  ) => Promise<Result>,
+  collapseTasksMs: number,
+  makeKey: (args: Args) => string,
+  logger: Logger = defaultLoggersByComponent["collapsed-task-creator"],
+): (
+  trigger: CollapsedInvocation["trigger"],
+  ...args: Args
+) => { promise: Promise<Result>; rode: boolean } {
+  type PendingInvocation = {
+    promise: Promise<Result>;
+    taskStartTimestamp: number;
+    /**
+     * Its own cell so the task function can read a LIVE count: the
+     * `CollapsedInvocation` handle has to exist before `taskCreator` runs, but
+     * riders increment the count afterwards.
+     */
+    callers: { count: number };
+  };
+  const pendingTasks = new Map<string, PendingInvocation>();
+  const logTrace = logger.bind(null, "collapsed-task-creator", "trace");
+
+  return (trigger, ...args) => {
+    const taskKey = makeKey(args);
+    const existing = pendingTasks.get(taskKey);
+    const now = Date.now();
+
+    if (existing && now - existing.taskStartTimestamp <= collapseTasksMs) {
+      logTrace(
+        "reusing result from prior, still-in-progress run of task for args/taskKey",
+        { args, taskKey },
+      );
+      existing.callers.count += 1;
+      return { promise: existing.promise, rode: true };
+    }
+
+    logTrace(
+      existing
+        ? "started new task; there _was_ an in-progress one, but it's too old"
+        : "started new task b/c there was no in-progress task for these args",
+      args,
+    );
+
+    // The caller count lives in its own cell so the handle below can be built
+    // (and read live) before the pending record exists.
+    const callers = { count: 1 };
+    const invocation: CollapsedInvocation = {
+      trigger,
+      attachedCallerCount: () => callers.count,
+    };
+
+    const promise = taskCreator(invocation, ...args).finally(() => {
+      // Only remove this task from pendingTasks if pendingTasks[taskKey]
+      // is still the same task. (It could be a new one if the old one was
+      // overwritten for taking longer than collapseTasksMs.) Identified by its
+      // promise, since that is unique per invocation.
+      if (pendingTasks.get(taskKey)?.promise === promise) {
+        logTrace("completed = new state for taskKey/args", { args, taskKey });
+        pendingTasks.delete(taskKey);
+      }
+    });
+
+    // Save the new task as a pending task. This will be _replacing_
+    // an existing pending task for this key if the other was too old.
+    pendingTasks.set(taskKey, { promise, taskStartTimestamp: now, callers });
+    return { promise, rode: false };
+  };
+}

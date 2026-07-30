@@ -3,14 +3,50 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import { setTimeout as delay } from "timers/promises";
 import Cache from "../Cache.js";
-import { MemoryStore } from "../index.js";
+import {
+  MemoryStore,
+  resourceType,
+  type ResourceTypes,
+  type SpecOf,
+} from "../index.js";
 import type {
   AnyParams,
   AnyValidators,
-  CacheSpec,
+  ConsumerDirectives,
+  Entry,
   RequestPairedProducerResult,
 } from "../types/index.js";
 import wrapProducer from "./wrapProducer.js";
+
+// The wrapper takes ONE producer function over a required registry, and a bare
+// function covers the whole registry. This suite's behavior is
+// id-structure-agnostic, so it uses a sole-type registry and passes its
+// producers bare; per-type dispatch (`producerByIdType`) and
+// coverage/classification behavior live in coverageRuntime.test.ts and
+// resourceTypeClassification.test.ts.
+const testRegistry = {
+  resources: resourceType<unknown>()({
+    matches: (id): id is string => typeof id === "string",
+  }),
+} satisfies ResourceTypes;
+const testCacheOptions = {
+  name: "wrap-producer-test",
+  resourceTypes: testRegistry,
+};
+const makeTestCache = () =>
+  new Cache({
+    store: new MemoryStore<SpecOf<typeof testRegistry>>(),
+    ...testCacheOptions,
+  });
+type TestCache = ReturnType<typeof makeTestCache>;
+type WrappedFn = (
+  req: {
+    id: string;
+    params?: Partial<AnyParams>;
+    directives?: ConsumerDirectives;
+  },
+  options?: { signal?: AbortSignal },
+) => Promise<Entry<SpecOf<typeof testRegistry>, AnyValidators, AnyParams>>;
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 describe("wrapProducer", () => {
@@ -21,11 +57,11 @@ describe("wrapProducer", () => {
         }) => Promise<RequestPairedProducerResult<any, any, any>>
       >
     >,
-    cache: Cache<any>,
-    sut: ReturnType<typeof wrapProducer>;
+    cache: TestCache,
+    sut: WrappedFn;
 
   beforeEach(() => {
-    cache = new Cache(new MemoryStore());
+    cache = makeTestCache();
     fetcher = mock.fn(
       async (_req) =>
         ({
@@ -82,31 +118,94 @@ describe("wrapProducer", () => {
   });
 
   it("should not call the fetcher again during the freshness window", async () => {
-    await sut({ id: "myUrl" });
-    await delay(30);
-    await sut({ id: "myUrl" });
+    // A wide self-owned freshness window: the shared fixture's 100ms window
+    // is routinely exceeded by (first call + 30ms delay) under full-suite
+    // load, flaking this test. The subject — a second request within the
+    // freshness window must not refetch — is unchanged.
+    const freshFetcher = mock.fn(
+      async (_req: { id: string }) =>
+        ({
+          content: "fresh",
+          directives: { freshUntilAge: 30 },
+        }) satisfies RequestPairedProducerResult<any, any, any>,
+    );
+    const freshSut = wrapProducer(
+      cache,
+      { collapseOverlappingRequestsTime: 0 },
+      freshFetcher,
+    );
 
-    expect(fetcher.mock.callCount()).to.eq(1);
+    await freshSut({ id: "myUrl" });
+    await delay(30);
+    await freshSut({ id: "myUrl" });
+
+    expect(freshFetcher.mock.callCount()).to.eq(1);
   });
 
   it("should call but not block on the fetcher during the staleWhileRefresh window, if any", async () => {
+    // Per-test wrapper with wide windows: the fixture's 100ms/400ms windows
+    // require the second request to land inside a 400ms wall-clock band,
+    // which full-suite load stalls (>1s observed) can miss. First result:
+    // 1s fresh + 30s SWR band; refreshed results are hour-fresh so the
+    // settle-polling below can never trigger further revalidations.
+    let producerCalls = 0;
+    const swrFetcher = mock.fn(async () => {
+      producerCalls += 1;
+      return {
+        content: `produced-${producerCalls}`,
+        directives:
+          producerCalls === 1
+            ? {
+                freshUntilAge: 1,
+                maxStale: {
+                  withoutRevalidation: 0,
+                  whileRevalidate: 30,
+                  ifError: 30,
+                },
+              }
+            : { freshUntilAge: 3600 },
+      } satisfies RequestPairedProducerResult<any, any, any>;
+    });
+    const swrSut = wrapProducer(
+      cache,
+      { collapseOverlappingRequestsTime: 0 },
+      swrFetcher,
+    );
+
     // Load content into the cache.
-    const res1 = await sut({ id: "myUrl", params: {} });
+    const res1 = await swrSut({ id: "myUrl", params: {} });
 
-    // get into the stale while validate window
-    await delay(150);
+    // Get past the 1s freshness window (structurally guaranteed — the timer
+    // can only fire later than its deadline) into the 30s-wide SWR band.
+    await delay(1100);
 
-    // request cached data, which should come back to us immediately w/ the old
-    // result (faster than the fetcher loads), while a second load is triggered.
-    const res2 = await sut({ id: "myUrl" });
+    // Request cached data, which should come back to us immediately w/ the
+    // old result (faster than the fetcher loads), while a second load is
+    // triggered.
+    const res2 = await swrSut({ id: "myUrl" });
     expect(res1.content).to.deep.eq(res2.content);
 
-    // After the fetcher resolves, we should see that second load result
-    // if we query the cache again.
-    await delay(10);
-    const res3 = await sut({ id: "myUrl" });
+    // Wait for the refresh's fire-and-forget store to become visible using
+    // DIRECT cache reads, which never trigger producers. Polling through the
+    // wrapper instead would serve-stale again on every pre-visibility poll
+    // and fire an extra revalidation each time, breaking the exact
+    // call-count below. The old entry is past its 1s freshness, so `usable`
+    // is populated if and only if the refreshed (hour-fresh) entry landed.
+    const waitForRefreshedEntry = async (attempt: number): Promise<void> => {
+      const direct = await cache.get({
+        id: "myUrl",
+        params: {},
+        directives: {},
+      });
+      if (direct.usable !== undefined || attempt >= 200) return;
+      await delay(25);
+      return waitForRefreshedEntry(attempt + 1);
+    };
+    await waitForRefreshedEntry(0);
+
+    const res3 = await swrSut({ id: "myUrl" });
     expect(res2.content).to.not.deep.eq(res3.content);
-    expect(fetcher.mock.callCount()).to.eq(2);
+    expect(swrFetcher.mock.callCount()).to.eq(2);
   });
 
   it("should call the fetcher again and block after the expiration window", async () => {
@@ -135,14 +234,19 @@ describe("wrapProducer", () => {
 
   it("should use the cached response if fetcher rejects during the staleIfError window", async () => {
     const testError = new Error("test");
+    // Windows sized so each phase keeps seconds of margin: the original
+    // 50ms/100ms windows required the stale-if-error request to land inside
+    // a 100ms-wide wall-clock band, which full-suite load stalls (>1s
+    // observed) routinely miss. Phase boundaries: fresh until 1s, if-error
+    // usable until 5s.
     const testResult = {
       content: { body: { test: true }, headers: {} },
       directives: {
-        freshUntilAge: 0.05,
+        freshUntilAge: 1,
         maxStale: {
           withoutRevalidation: 0,
           whileRevalidate: 0,
-          ifError: 0.1,
+          ifError: 4,
         },
       },
     } satisfies RequestPairedProducerResult<any, any, any>;
@@ -169,7 +273,7 @@ describe("wrapProducer", () => {
     const firstRes = await sut2({ id: "someUrl" });
     expect(firstRes).to.deep.include(testResult);
 
-    await delay(80);
+    await delay(1100); // past 1s freshness, well inside the 5s if-error bound
 
     // first res is expired, and the fetcher errored, but we should
     // be able to reuse the first res anyway because of staleIfError.
@@ -177,7 +281,7 @@ describe("wrapProducer", () => {
     expect(secondRes).to.deep.include(testResult);
     expect(customTestFetcher.mock.callCount()).to.eq(2);
 
-    await delay(120);
+    await delay(4600); // now past the 5s if-error bound
 
     // now, the staleIfError window should be up, so we have to go back
     // to the fetcher, but it errors again, so we should get that error.
@@ -226,11 +330,10 @@ describe("wrapProducer", () => {
 
   describe("the onCacheReadFailure setting", async () => {
     const err = new Error("Cache get error 2");
-    type BasicCacheSpec = CacheSpec<string, unknown>;
-    let mockCache: Cache<BasicCacheSpec, AnyValidators, AnyParams>;
+    let mockCache: TestCache;
 
     beforeEach(() => {
-      mockCache = new Cache(new MemoryStore());
+      mockCache = makeTestCache();
       mockCache.get = async () => {
         throw err;
       };
@@ -261,7 +364,7 @@ describe("wrapProducer", () => {
     });
 
     it("should call the producer if configured and cache's get method rejects", async () => {
-      const mockProducer = mock.fn(async ({ id }) => ({
+      const mockProducer = mock.fn(async ({ id }: { id: string }) => ({
         content: id,
         directives: { freshUntilAge: 1 },
       }));
@@ -277,7 +380,7 @@ describe("wrapProducer", () => {
     });
 
     it("should call the producer by default if cache's get method rejects", async () => {
-      const mockProducer = mock.fn(async ({ id }) => ({
+      const mockProducer = mock.fn(async ({ id }: { id: string }) => ({
         content: id,
         directives: { freshUntilAge: 1 },
       }));
@@ -288,9 +391,6 @@ describe("wrapProducer", () => {
       expect(res.content).to.eq("test");
     });
   });
-
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
-  it.skip("collapsing overlapping requests to producer", () => {});
 
   describe("AbortSignal support", () => {
     it("should reject immediately with an already-aborted signal", async () => {
@@ -311,11 +411,8 @@ describe("wrapProducer", () => {
     it("should reject if signal is aborted before the cache read completes (i.e., before producer is called)", async () => {
       const controller = new AbortController();
       let cacheGetResolve: (v: any) => void;
-      type BasicCacheSpec = CacheSpec<string, unknown>;
 
-      const mockCache = new Cache<BasicCacheSpec, AnyValidators, AnyParams>(
-        new MemoryStore(),
-      );
+      const mockCache = makeTestCache();
 
       // Make cache.get hang until we resolve it manually, simulating a slow
       // cache read during which the signal fires.
@@ -407,33 +504,6 @@ describe("wrapProducer", () => {
       const result = await slowSut({ id: "mid-producer-abort" });
       expect(result.content).to.eq("slow-but-stored");
       expect(slowFetcher.mock.callCount()).to.eq(1);
-    });
-
-    it("should pass signal through to the producer for uncacheable requests", async () => {
-      const controller = new AbortController();
-      let receivedSignal: AbortSignal | undefined;
-
-      const signalCapturingFetcher = mock.fn(
-        async (_req: any, opts?: { signal?: AbortSignal }) => {
-          receivedSignal = opts?.signal;
-          return {
-            content: "test",
-            directives: { freshUntilAge: 1 },
-          } satisfies RequestPairedProducerResult<any, any, any>;
-        },
-      );
-
-      const sut2 = wrapProducer(
-        cache,
-        {
-          collapseOverlappingRequestsTime: 0,
-          isCacheable: () => false,
-        },
-        signalCapturingFetcher,
-      );
-
-      await sut2({ id: "signal-test" }, { signal: controller.signal });
-      expect(receivedSignal).to.eq(controller.signal);
     });
 
     it("should reject the aborting caller but not the other, and still store the collapsed result", async () => {
@@ -530,13 +600,7 @@ describe("wrapProducer", () => {
 
     it("should not treat abort errors as cache read failures eligible for fallback", async () => {
       const controller = new AbortController();
-      const mockCache = new Cache<
-        CacheSpec<string, unknown>,
-        AnyValidators,
-        AnyParams
-      >(
-        new MemoryStore<CacheSpec<string, unknown>, AnyValidators, AnyParams>(),
-      );
+      const mockCache = makeTestCache();
 
       // Make cache.get throw an abort error
       mockCache.get = async (_req, options) => {

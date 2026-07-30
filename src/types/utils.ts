@@ -1,4 +1,4 @@
-import type { IsEqual, Simplify } from "type-fest";
+import type { Simplify } from "type-fest";
 
 export type { JSON } from "type-party";
 
@@ -20,17 +20,3 @@ export type Bind2<
 export type MakeKeysOptional<T extends object, K extends keyof T> = Simplify<
   Omit<T, K> & Partial<Pick<T, K>>
 >;
-
-/**
- * True iff `T` is a single type rather than a union.
- *
- * Implemented by distributing over `T` and checking each constituent against
- * the whole: a non-union `T` has its single constituent equal to itself, so
- * the distributed result is `true`; a union has each constituent strictly
- * narrower than the whole, so each comparison is `false`, and the union of
- * `false`s collapses to `false`.
- */
-export type IsSingleType<T> = _IsSingleTypeImpl<T, T>;
-type _IsSingleTypeImpl<Case, Union> = Case extends unknown
-  ? IsEqual<Case, Union>
-  : never;

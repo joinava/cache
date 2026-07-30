@@ -4,19 +4,39 @@ import type { PublicInterface } from "type-party";
 
 import type Cache from "../Cache.js";
 import type { CacheLookupResult } from "../Cache.js";
-import { publishCacheResult } from "../diagnostics.js";
-import type { CacheSpec, SpecForId } from "../types/00_CacheSpec.js";
-import type { MultiIdTypeRequestPairedProducer } from "../types/05_RequestPairedProducer.js";
+import {
+  NoProducerForResourceTypeError,
+  rethrowUnroutableWithCacheName,
+} from "./producer-errors.js";
+import {
+  cacheProduceChannel,
+  publishCacheFetch,
+  publishCacheProduce,
+  type CacheFetchDisposition,
+} from "../diagnostics.js";
+import type { SpecForId } from "../types/00_CacheSpec.js";
+import {
+  type IdOfResourceType,
+  type ResourceTypeName,
+  type ResourceTypes,
+  type SpecOf,
+} from "../types/00_ResourceTypes.js";
 import type {
   AnyParams,
   AnyValidators,
   ConsumerDirectives,
   ConsumerRequest,
+  Entry,
+  EntryForId,
   Logger,
-  RequestPairedProducer,
+  ReadonlyConsumerRequest,
+  RequestPairedProducerResult,
   Vary,
 } from "../types/index.js";
-import collapsedTaskCreator from "./collapsedTaskCreator.js";
+import {
+  collapsedInvocationTaskCreator,
+  type CollapsedInvocation,
+} from "./collapsedTaskCreator.js";
 import { normalizeVary } from "./normalization.js";
 import {
   completeRequest,
@@ -30,55 +50,7 @@ import {
   raceWithSignal,
 } from "./utils.js";
 
-/**
- * Represents the outcome of a cache lookup operation.
- */
-export type CacheResultOutcome =
-  /**
-   * A cached value was returned without contacting producer. (Value was fresh
-   * or within consumer's tolerance for stale values without revalidation.)
-   */
-  | "hit"
-  /**
-   * A stale cached value was returned while revalidating in background
-   */
-  | "stale_while_revalidate"
-  /**
-   * The consumer requested to bypass the cache by providing directives that
-   * could _never_ be satisfied with cached data (e.g., `maxAge: 0`). This is
-   * arguably a type of miss, but is distinguised from other misses.
-   */
-  | "bypass"
-  /**
-   * No cached value was suitable; the producer was contacted. E.g., the cache
-   * had no stored value, or the stored value's age exceeded consumer's max-age.
-   */
-  | "miss"
-  /**
-   * Request was not cacheable; producer was contacted directly.
-   */
-  | "uncacheable";
-
-export type WrapProducerOptions<V extends AnyParams> = {
-  /**
-   * A name for this cache, used for identifying it in diagnostics/monitoring.
-   * This name is included in messages published to the diagnostics channel.
-   */
-  cacheName?: string;
-  /**
-   * A function returning whether a given request can have its response cached.
-   * Defaults to assuming all requests are cacheable (i.e., always returning
-   * true). Of course, producers can indicate in their individual responses that
-   * the response is not cachable (e.g., through the `maxAge: 0, storeFor: 0`
-   * directives), but this function allows the cache to always pass-through
-   * whole classes of requests. E.g., an HTTP cache built with this would return
-   * false for all requests where a `method` request parameter is POST.
-   */
-  isCacheable?(
-    this: void,
-    id: string,
-    params: ReadonlyDeep<Partial<V>>,
-  ): boolean;
+export type WrapProducerOptions = {
   /**
    * Controls whether the function returned by `wrapProducer`/`wrapBulkProducer`
    * will fall back to calling the produer if its attempt to read from the cache
@@ -122,87 +94,415 @@ export type WrapProducerOptions<V extends AnyParams> = {
 };
 
 /**
- * Fundamentally, this function takes a function that returns values (likely
- * without the help of a cache), and returns another function that's a drop-in
- * replacement for the first, except that it tries to lookup and reuse prior
- * results from a cache, before calling the underlying user-provided function.
+ * A producer over some set of resource types: it sees exactly those types' ids
+ * and returns results stamped with them. Used at both scales -- with a single
+ * `K` it is a {@link producerByIdType} sub-producer (which sees only its own
+ * branch's ids), and with a whole covered set it is the function half of
+ * {@link CoveringProducer}, which is what the wrappers take.
  *
- * Note that any supplemental resources returned by the producer will be
+ * Note: {@link RequestPairedProducerResult} already allows
+ * `supplementalResources` from ANY spec variant, so (e.g.) a `site_day`
+ * producer can still attach `business_slice` supplementals.
+ */
+export type ResourceTypeProducer<
+  RT extends ResourceTypes,
+  K extends ResourceTypeName<RT>,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = (
+  req: ReadonlyDeep<ConsumerRequest<Params, IdOfResourceType<RT[K]>>>,
+) => Promise<
+  RequestPairedProducerResult<
+    SpecOf<RT>,
+    Validators,
+    Params,
+    IdOfResourceType<RT[K]>
+  >
+>;
+
+/**
+ * {@link producerByIdType}'s argument: one entry per covered resource type,
+ * any non-empty subset of the registry. `Covered` is inferred from the
+ * record's keys. Non-coverage is expressed by omission, so a wrapper never has
+ * to make claims about types that other wrappers may produce.
+ */
+export type ProducersFor<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = {
+  readonly [K in Covered]: ResourceTypeProducer<RT, K, Validators, Params>;
+};
+
+/**
+ * The key under which a producer function declares WHICH resource types it
+ * covers. A real runtime symbol carrying a real runtime value (see
+ * {@link CoveringProducer}), not a type-only phantom: the wrappers read it to
+ * enforce coverage, and it is exported so declaration emit can name it.
+ */
+export const coveredTypes: unique symbol = Symbol(
+  "@zingage/cache.coveredTypes",
+);
+
+/**
+ * A producer function that may additionally declare WHICH resource types it
+ * covers. The property carries a real runtime value -- the covered type names
+ * -- so it serves double duty: `Covered` is inferred from it at compile time,
+ * and the wrapper reads it at runtime to enforce coverage before touching the
+ * store. A value-less phantom would leave the wrapper with no runtime source for
+ * the covered set, since there are no record keys to read.
+ *
+ * ## Why the property is conditionally required
+ *
+ * It is optional when `Covered` is the whole registry -- that is what lets a
+ * bare function be passed with no ceremony, and no runtime check is needed
+ * there because the compiler already made the function prove it accepts every
+ * registry id. It is REQUIRED when `Covered` is a strict subset, which makes
+ * "narrowed coverage implies runtime proof of that narrowing" an invariant the
+ * type system enforces rather than a convention.
+ *
+ * That requirement is what keeps coverage from having two sources that can
+ * disagree. You might expect an explicit `Covered` type argument
+ * (`wrapProducer<RT, "story">(...)`) to be enough to narrow coverage; it is
+ * rejected precisely because it would narrow the TYPES while leaving the runtime
+ * covered set absent, which the wrapper reads as "the whole registry". The types
+ * still ban uncovered ids at the call site, so the gap is only reachable by
+ * defeating them (a cast or a loosely-typed id -- see
+ * {@link NoProducerForResourceTypeError}), but that is exactly the case that
+ * error exists to catch: instead of throwing, the wrapper would hand the id to a
+ * producer written for a different resource type and then store its content
+ * under the incoming id. Routing partial coverage through
+ * {@link producerByIdType}, which always supplies the runtime value, makes the
+ * declared set and the reachable producers one and the same by construction.
+ *
+ * `Covered` still infers from the property even though it also appears in the
+ * condition (probed, along with the deferred case where `Covered` is an
+ * unresolved generic -- how the hashed-input wrappers forward theirs).
+ *
+ * Narrowing each result's `Id` to `IdOfResourceType<RT[Covered]>` bounds the
+ * PRIMARY result to covered types only. Supplementals are unaffected: they are
+ * a separate field typed over the full `SpecOf<RT>`, so a covered producer can
+ * still attach supplementals for any registry type.
+ */
+export type CoveringProducer<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+> = ResourceTypeProducer<RT, Covered, Validators, Params> &
+  CoveredTypesCarrier<RT, Covered>;
+
+export type { PartialConsumerRequest };
+
+/**
+ * The conditionally-required {@link coveredTypes} carrier: optional when
+ * `Covered` is the whole registry, REQUIRED when it is a strict subset. Shared
+ * by {@link CoveringProducer} and its bulk counterpart so the two cannot drift
+ * -- relaxing one to always-optional would reopen the hole described on
+ * `CoveringProducer` for that wrapper alone.
+ *
+ * The tuple brackets make this a whole-set comparison rather than a
+ * distributive, member-by-member one.
+ */
+export type CoveredTypesCarrier<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+> = [ResourceTypeName<RT>] extends [Covered]
+  ? { readonly [coveredTypes]?: readonly Covered[] }
+  : { readonly [coveredTypes]: readonly Covered[] };
+
+/**
+ * A request as the wrappers' id-erased internals see it: every id the wrapper
+ * could be handed, with `id` still usable as that type (see
+ * {@link ReadonlyConsumerRequest}).
+ */
+export type LooseRequestFor<
+  RT extends ResourceTypes,
+  Params extends AnyParams,
+> = ReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>;
+
+/** An entry as the wrappers' id-erased internals see it. */
+export type LooseEntryFor<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = Entry<SpecForId<SpecOf<RT>, SpecOf<RT>["id"]>, Validators, Params>;
+
+/** A cache lookup result as the wrappers' id-erased internals see it. */
+export type LooseLookupResultFor<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = CacheLookupResult<
+  SpecForId<SpecOf<RT>, SpecOf<RT>["id"]>,
+  Validators,
+  Params
+>;
+
+/** A request-paired producer result over the whole registry. */
+export type LooseResultFor<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = RequestPairedProducerResult<SpecOf<RT>, Validators, Params>;
+
+/**
+ * The internal, id-erased shape all wrapper plumbing dispatches through.
+ * SAFETY: the producer is only invoked after (a) `cache.classify(req.id)`
+ * succeeds and (b) the coverage check confirms the classified type is one the
+ * producer declared (or the producer declared none, i.e. it covers the whole
+ * registry) -- so the request's id is in exactly the id sub-space the producer
+ * accepts.
+ */
+export type LooseProducer<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = (
+  req: LooseRequestFor<RT, Params>,
+) => Promise<LooseResultFor<RT, Validators, Params>>;
+
+/**
+ * Snapshots a producer's declared covered set for the coverage check: a `Set`
+ * for membership testing, insertion-ordered so the error message can still
+ * list the names in their declared order, and a copy so a post-wrap mutation
+ * of the caller's array can't widen (or otherwise change) coverage later.
+ * `undefined` means the producer declared nothing, which (see
+ * {@link CoveringProducer}) means it covers the whole registry: there is no
+ * covered set to enumerate and nothing to check.
+ */
+export function coveredTypeSet(producer: {
+  readonly [coveredTypes]?: readonly string[];
+}): ReadonlySet<string> | undefined {
+  const declared = producer[coveredTypes];
+  return declared === undefined ? undefined : new Set(declared);
+}
+
+/**
+ * The write side of the coverage contract: what `producerByIdType` and
+ * `bulkProducerByIdType` throw when handed an empty record. Shared so the two
+ * helpers can't word the same refusal differently, and kept next to the read
+ * side ({@link coveredTypeSet}) because both are statements about where a
+ * declared covered set comes from.
+ */
+export function emptyProducersRecordMessage(
+  helper: "producerByIdType" | "bulkProducerByIdType",
+  wrapper: "wrapProducer" | "wrapBulkProducer",
+): string {
+  return (
+    `${helper}: \`producers\` must be a record with one entry per covered ` +
+    `resource type and cannot be empty. (A producer that covers the whole ` +
+    `registry needs no helper: pass the function itself to ${wrapper}.)`
+  );
+}
+
+/**
+ * Throws {@link NoProducerForResourceTypeError} if `resourceType` is outside a
+ * DECLARED covered set. `covered === undefined` (a whole-registry producer)
+ * checks nothing.
+ */
+export function assertResourceTypeCovered(
+  cacheName: string,
+  covered: ReadonlySet<string> | undefined,
+  resourceType: string,
+  id: string,
+): void {
+  if (covered !== undefined && !covered.has(resourceType)) {
+    throw new NoProducerForResourceTypeError({
+      cacheName,
+      resourceType,
+      coveredResourceTypes: [...covered],
+      id,
+    });
+  }
+}
+
+/**
+ * What {@link wrapProducer} returns. Named because it is spelled both in the
+ * signature and in the closing cast, far enough apart to drift, and the cast is
+ * the only thing that would notice them disagreeing.
+ */
+type WrappedProducerFn<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = <Id extends IdOfResourceType<RT[Covered]>>(
+  req: PartialConsumerRequest<Params, Id>,
+  options?: { signal?: AbortSignal },
+) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>>;
+
+/**
+ * Logged by both wrappers when a producer failure is absorbed by the request's
+ * own if-error entry. Shared so a rewording can't land in one wrapper only,
+ * leaving operators grepping for two different strings for one event.
+ */
+export const PRODUCER_ERROR_FALLBACK_WARNING =
+  "error calling producer; falling back to a cached value, as permitted";
+
+/** The always-unreachable tail of a wrapper's abort path. */
+export function throwUnreachableAbort(signal: AbortSignal | undefined): never {
+  signal?.throwIfAborted();
+  // Unreachable: only called after observing `signal.aborted`.
+  throw new Error("unreachable: throwAborted called without an aborted signal");
+}
+
+/**
+ * Fundamentally, this function takes a producer that returns values (likely
+ * without the help of a cache), and returns a function that's a drop-in
+ * replacement for it, except that it tries to lookup and reuse prior
+ * results from a cache, before calling the underlying user-provided producer.
+ *
+ * Exactly ONE producer function is passed, and it is the primitive:
+ *
+ * - A **bare function covers the whole registry.** `Covered` defaults to
+ *   every registry type name, and the compiler makes the function prove it --
+ *   its parameter must accept every registry id. Sole-type caches therefore
+ *   just pass their producer.
+ * - **Partial coverage requires {@link producerByIdType}**, which turns a
+ *   per-resource-type record into a single function carrying its covered set
+ *   in the optional {@link coveredTypes} property. `Covered` is inferred from
+ *   that property (inference beats the default whenever it is present), which
+ *   bounds the returned function's request type: it accepts exactly the
+ *   covered types' ids, and requests for uncovered types are compile errors.
+ *
+ * A type with no producer in any wrapper is legal and normal: its entries are
+ * written as other producers' supplemental resources (or direct `store()`
+ * calls) and read via `Cache.get` -- the serve-if-present contract. Partial
+ * coverage is also what makes capability-scoped and split wrappers honest: a
+ * second `wrapProducer` call can cover a different subset of the same cache,
+ * and adding a registry type grants no existing wrapper-holder fetch authority
+ * over it.
+ *
+ * The wrapper calls `cache.classify(req.id)` once per request; the classify
+ * result is what stamps `resourceType` on the `fetch`/`produce` diagnostics
+ * messages. If the producer declared a covered set and the classified type is
+ * not in it -- reachable only via a cast or loosely-typed id -- the wrapper
+ * throws {@link NoProducerForResourceTypeError} before reading the cache. A
+ * bare function declares no covered set, so that check is skipped entirely
+ * (its coverage is the whole registry by construction).
+ *
+ * ## Producer purity contract
+ *
+ * A producer passed to any wrapper must be a side-effect-free read of its
+ * resource type's origin: every invocation may be collapsed (shared with
+ * other concurrent logical callers) and its result stored, so producer calls
+ * are never 1:1 with callers. Requests "made for their side effects" should
+ * not route through a wrapper at all; a consumer that must reach the origin
+ * sends bypass directives (`maxAge: 0`); a producer whose response must not
+ * be stored returns `storeFor: 0` directives.
+ *
+ * ## Bypass requests skip the cache read
+ *
+ * When the consumer's directives could never be satisfied by cached data
+ * (`maxAge: 0`), the wrapper does not call `Cache.get` at all: `maxAge: 0`
+ * structurally guarantees producer contact (closing the age-≤0/clock-skew
+ * hole where a same-millisecond or future-dated entry has age ≤ 0 and would
+ * satisfy `maxAge: 0` from cache), and bypass requests don't pollute the
+ * `read` channel. Bypass requests still collapse (only with
+ * identical-directive peers -- the collapse key includes directives) and
+ * their results are still stored.
+ *
+ * Note that any supplemental resources returned by a producer will be
  * cached but not returned to the caller.
  *
  * The wrapped function is generic over the specific id of an incoming request
- * so that the result's content type is narrowed (when `Spec` is a union of
- * cache key shapes) to the variants compatible with that id.
+ * so that the result's content type is narrowed to the covered spec variants
+ * compatible with that id.
  *
  * ## AbortSignal support
  *
- * The returned function accepts an optional `{ signal }` parameter. The signal
- * is propagated differently depending on the request path:
+ * The returned function accepts an optional `{ signal }` parameter. The
+ * signal is forwarded to `cache.get()`, so the store read can be aborted. If
+ * the signal fires before the cache read completes, the function throws
+ * without ever contacting the producer. Once the cache read resolves and the
+ * producer must be called, no signal reaches the producer -- because that call
+ * may be sharing one underlying producer invocation with other callers who have
+ * not aborted. Producers accordingly take **no** `options` parameter at all
+ * (see {@link CoveringProducer}): every producer call goes through the
+ * collapsed-invocation task, so there is never a single caller's signal that
+ * could be forwarded without letting one caller cancel another's work. The
+ * caller's wait for the producer result is instead **raced** against the signal,
+ * so the caller can bail out immediately without waiting for the producer to
+ * finish.
  *
- * - **Uncacheable requests** (per `isCacheable`): the signal is forwarded
- *   directly to the producer, so the producer can use it to abort its own work
- *   (e.g., cancel an outgoing fetch). These calls are never collapsed.
- *
- * - **Cacheable requests**: the signal is forwarded to `cache.get()`, so the
- *   store read can be aborted. If the signal fires before the cache read
- *   completes, the function throws without ever contacting the producer.
- *   Once the cache read resolves and the producer must be called, the signal is
- *   **not** forwarded to the producer — because that call goes through the
- *   `collapsedTaskCreator`, which may be sharing the same underlying producer
- *   call with other callers who have not aborted. However, the caller's wait
- *   for the producer result is **raced** against the signal, so the caller can
- *   bail out immediately without waiting for the producer to finish.
- *
- *   Critically, bailing out does NOT prevent the producer's result from being
- *   stored: `callProducerAndStore` always fires a (non-awaited) `cache.store()`
- *   after the producer resolves, so the work is never wasted. The trade-off is
- *   that the producer itself cannot observe the signal to cancel its own
- *   in-progress work (e.g., an outgoing HTTP request). Supporting that would
- *   require either (a) aborting the shared task only when *all* callers have
- *   aborted, which adds significant complexity, or (b) giving up request
- *   collapsing for callers that pass a signal, which would defeat its purpose.
+ * Critically, bailing out does NOT prevent the producer's result from being
+ * stored: the collapsed invocation always fires a (non-awaited)
+ * `cache.store()` after the producer resolves, so the work is never wasted.
+ * The trade-off is that the producer itself cannot observe the signal to
+ * cancel its own in-progress work (e.g., an outgoing HTTP request).
+ * Supporting that would require either (a) aborting the shared task only
+ * when *all* callers have aborted, which adds significant complexity, or (b)
+ * giving up request collapsing for callers that pass a signal, which would
+ * defeat its purpose.
  *
  * @param cache - An instance of the cache class. This is where values returned
  *   by the producer (see below) will actually be stored.
  *
  * @param options - See `WrapProducerOptions` for details.
  *
- * @param producer - The function that's actually responsible for returning the
- *   result that will be sent to the user and/or stored in the cache. It acts as
- *   the origin or "producer" for the cache. This function is passed the request
- *   (id and params) along with the caller's cache directives, which may be
- *   needed in case this producer function is itself backed by a cache, and it
- *   needs to decide whether to contact its origin.
+ * @param producer - The function actually responsible for returning the
+ *   results that will be sent to the user and/or stored in the cache. It acts
+ *   as the origin or "producer" for every resource type it covers. It is
+ *   passed the request (id and params) along with the caller's cache
+ *   directives, which may be needed in case the producer is itself backed by a
+ *   cache, and it needs to decide whether to contact its origin. Pass a bare
+ *   function to cover the whole registry, or {@link producerByIdType}'s result
+ *   to cover a subset with one sub-producer per resource type.
  */
 export default function wrapProducer<
-  Spec extends CacheSpec,
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT> = ResourceTypeName<RT>,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 >(
-  cache: PublicInterface<Cache<Spec, Validators, Params>>,
-  options: WrapProducerOptions<Params> | undefined,
-  producer: RequestPairedProducer<Spec, Validators, Params>,
-) {
+  cache: PublicInterface<Cache<RT, Validators, Params>>,
+  options: WrapProducerOptions | undefined,
+  producer: CoveringProducer<RT, Covered, Validators, Params>,
+): WrappedProducerFn<RT, Covered, Validators, Params> {
   const {
-    cacheName,
-    isCacheable = () => true,
     collapseOverlappingRequestsTime = 3,
     onCacheReadFailure = "call-producer",
     logger = defaultLoggersByComponent["wrap-producer"],
   } = options ?? {};
 
+  // SAFETY: see LooseProducer.
+  const looseProducer = producer as unknown as LooseProducer<
+    RT,
+    Validators,
+    Params
+  >;
+
+  const covered = coveredTypeSet(producer);
+
   const logTrace = logger.bind(null, "wrap-producer", "trace");
   const logWarning = logger.bind(null, "wrap-producer", "warn");
 
-  // Coerce the user-facing `RequestPairedProducer` -- which is the loose
-  // non-generic shape in single-id-type mode -- to the strict generic
-  // `MultiIdTypeRequestPairedProducer` used by all internal plumbing. The
-  // cast is sound: in single-id-type mode `Spec` has only one variant, so
-  // any valid loose result is also a valid result for an arbitrary `Id
-  // extends Spec["id"]`; in multi-id-type mode the user-facing type *is*
-  // already this shape and the cast is the identity.
-  const multiIdProducer =
-    producer as MultiIdTypeRequestPairedProducer<Spec, Validators, Params>;
+  type LooseRequest = LooseRequestFor<RT, Params>;
+  type LooseResult = LooseResultFor<RT, Validators, Params>;
+  type LooseEntry = LooseEntryFor<RT, Validators, Params>;
+  type LooseLookupResult = LooseLookupResultFor<RT, Validators, Params>;
+
+  const callProducerAndLog = async (req: LooseRequest) => {
+    logTrace("contacting producer", req);
+    // A by-id-type producer routes ids itself and has no cache to name in its
+    // errors; this is where the cache's name is put back on (see
+    // rethrowUnroutableWithCacheName). Every other rejection passes through.
+    //
+    // try/catch rather than a `.catch()` on the returned promise, so that a
+    // producer which fails SYNCHRONOUSLY (a non-async function that routes and
+    // throws before returning a promise) is mapped too -- a handler attached to
+    // the return value never runs for one of those.
+    let resp: LooseResult;
+    try {
+      resp = await looseProducer(req);
+    } catch (error: unknown) {
+      rethrowUnroutableWithCacheName(cache.name, error);
+    }
+    logTrace("got response from producer", resp);
+    return resp;
+  };
 
   // Suppose the caller is requesting a resource, and we're already in the
   // process of requesting that resource from the producer (or storing the
@@ -242,13 +542,14 @@ export default function wrapProducer<
   // `collapseOverlappingRequestsTime` configurable to placate any user worried
   // about the miniscule risk of inconsistency from this caching.
   //
-  // We do this using the getCollapsedTask utility. That utility does track the
-  // pending tasks in memory, so this optimzation will be hindered a bit if the
-  // cache frontend is horizontally-scaled across more than one server, but
-  // that's fine. We _could_ put this data in the backing store, but that seems
-  // like it could create more race conditions? And since batching identical
-  // requests at all is an optimization, putting this in the store would
-  // probably be overkill.
+  // We do this using the collapsedInvocationTaskCreator utility (the
+  // metadata-carrying sibling of the public collapsedTaskCreator). That
+  // utility does track the pending tasks in memory, so this optimzation will
+  // be hindered a bit if the cache frontend is horizontally-scaled across
+  // more than one server, but that's fine. We _could_ put this data in the
+  // backing store, but that seems like it could create more race conditions?
+  // And since batching identical requests at all is an optimization, putting
+  // this in the store would probably be overkill.
   //
   // Finally, note is that we only collapse requests that target the same id
   // _with the same parameters_. If we didn't require the params to match, we
@@ -257,43 +558,61 @@ export default function wrapProducer<
   // second request (that we were trying to avoid making). So we'd have to add
   // fallback logic to handle actually issuing the second request in that case,
   // and that would be too much extra complexity to be worth it. We're in a
-  // similar situation with directives, which must also match.
+  // similar situation with directives, which must also match -- which is also
+  // what keeps bypass (`maxAge: 0`) invocations from ever being shared with
+  // plain-miss callers.
   //
-  // Of course, we can only use this IF THE REQUEST IS CACHEABLE.
-  const callProducerAndLog = async <Id extends Spec["id"]>(
-    req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
-    opts?: { signal?: AbortSignal },
-  ) => {
-    logTrace("contacting producer", req);
-    const resp = opts
-      ? await multiIdProducer(req, opts)
-      : await multiIdProducer(req);
-    logTrace("got response from producer", resp);
-    return resp;
-  };
-
-  // For collapsed tasks, don't forward the signal to the producer, because the
-  // task may be shared with other callers who haven't aborted.
-  // This function always fires a (non-awaited) cache.store() after the
-  // producer resolves. This is critical for the abort-signal design: since
-  // collapsed producer calls don't receive a signal and can't be cancelled by
-  // individual callers, we rely on the fact that the producer's work always
-  // flows into the cache -- ensuring it isn't wasted even when the caller that
-  // triggered it has aborted.
-  const collapsedCallProducerAndStore = collapsedTaskCreator(
-    async <Id extends Spec["id"]>(
-      req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
-      opts?: { signal?: AbortSignal },
+  // No signal reaches the producer (`CoveringProducer` takes no options
+  // parameter at all), because the
+  // task may be shared with other callers who haven't aborted. It always
+  // fires a (non-awaited) cache.store() after the producer resolves. This is
+  // critical for the abort-signal design: since collapsed producer calls
+  // don't receive a signal and can't be cancelled by individual callers, we
+  // rely on the fact that the producer's work always flows into the cache --
+  // ensuring it isn't wasted even when the caller that triggered it has
+  // aborted.
+  //
+  // It also publishes the invocation's `produce` diagnostics message when the
+  // producer settles (one message per actual invocation; collapsed callers
+  // share one).
+  const collapsedCallProducerAndStore = collapsedInvocationTaskCreator(
+    async (
+      invocation: CollapsedInvocation,
+      req: LooseRequest,
+      resourceType: string,
     ) => {
-      const requestPairedResult = await callProducerAndLog(req, opts);
+      const start = performance.now();
+      let requestPairedResult: LooseResult;
+
+      const publishProduce = (outcome: "success" | "error") => {
+        // `publish` would discard the message, but not before the argument was
+        // built -- so the test has to be here, not left to the channel. Same
+        // reasoning as the bulk wrapper and `Cache.store`.
+        if (!cacheProduceChannel.hasSubscribers) {
+          return;
+        }
+        publishCacheProduce({
+          cache: cache.name,
+          trigger: invocation.trigger,
+          requests: [{ resourceType, resourceId: req.id }],
+          collapsedCallerCount: invocation.attachedCallerCount(),
+          outcome,
+          durationMs: performance.now() - start,
+        });
+      };
+
+      try {
+        requestPairedResult = await callProducerAndLog(req);
+      } catch (error) {
+        publishProduce("error");
+        throw error;
+      }
+      publishProduce("success");
 
       logTrace(`attempting to store response.`);
       cache
         .store(
-          requestPairedProducerResultToResources(
-            requestPairedResult,
-            req.id satisfies ReadonlyDeep<Id> as Id,
-          ),
+          requestPairedProducerResultToResources(requestPairedResult, req.id),
         )
         .then(() => {
           logTrace(`successfully stored producer's response`);
@@ -305,69 +624,151 @@ export default function wrapProducer<
       return requestPairedResult;
     },
     collapseOverlappingRequestsTime * 1000,
-    stableStringify,
+    // The key covers the full request (id, params, directives) but not the
+    // resourceType arg, which is derived from the id and so adds nothing.
+    ([req]) => stableStringify(req),
   );
 
   const normalizeVaryBound = (vary: Vary<Params>) =>
     normalizeVary(cache.normalizeParamName, cache.normalizeParamValue, vary);
 
-  const wrappedProducer = async function <Id extends Spec["id"]>(
-    req: PartialConsumerRequest<Params, Id>,
-    options?: { signal?: AbortSignal },
-  ) {
-    const signal = options?.signal;
-    signal?.throwIfAborted();
+  const wrappedProducer = async function (
+    req: PartialConsumerRequest<Params, SpecOf<RT>["id"]>,
+    callOptions?: { signal?: AbortSignal },
+  ): Promise<LooseEntry> {
+    const signal = callOptions?.signal;
 
-    const finalRequest = completeRequest(req);
+    const finalRequest = completeRequest(req) as LooseRequest;
     const { id, params, directives } = finalRequest;
 
-    const reqIsCacheable = isCacheable(id, params);
-    logTrace(
-      reqIsCacheable
-        ? `deemed that request is cacheable; asking the cache for a response`
-        : `deemed that request is NOT cacheable; skipping contacting the cache`,
-      { id, params },
-    );
+    // Classify once per request: the result dispatches to the producer AND
+    // stamps `resourceType` on the fetch/produce messages, so dispatch and
+    // telemetry cannot disagree. Classification errors propagate (they're
+    // contract violations, not dispositions -- no fetch message).
+    const resourceType = cache.classify(id);
 
-    // If this request is not cacheable, we absolutely must contact the origin,
-    // without any collapsing of concurrent requests, as the request could be
-    // being made for its side effects. Pass signal directly since this call
-    // is not shared with other callers.
-    if (!reqIsCacheable) {
-      publishCacheResult({ cacheName, outcome: "uncacheable", cacheKey: id });
+    // A classified type outside this wrapper's DECLARED coverage throws BEFORE
+    // any cache read (see NoProducerForResourceTypeError's docs). Skipped
+    // entirely for a bare producer, which declares no covered set because it
+    // covers the whole registry.
+    assertResourceTypeCovered(cache.name, covered, resourceType, id);
 
-      const unnormalizedResult = await callProducerAndLog(
-        finalRequest,
-        options,
+    const publishFetch = (
+      collapsed: boolean,
+      disposition: CacheFetchDisposition,
+    ) => {
+      publishCacheFetch({
+        cache: cache.name,
+        resourceType,
+        resourceId: id,
+        collapsed,
+        ...disposition,
+      });
+    };
+
+    const directivesImpliedBypass = isRequestingCacheBypass(directives);
+
+    // Every abort-caused rejection settles the logical request as `aborted`.
+    const throwAborted = (collapsed: boolean): never => {
+      publishFetch(collapsed, {
+        disposition: "aborted",
+        directivesImpliedBypass,
+      });
+      throwUnreachableAbort(signal);
+    };
+
+    if (signal?.aborted) {
+      throwAborted(false);
+    }
+
+    // Awaits an in-flight producer invocation on behalf of this caller:
+    // races the caller's wait against its signal, settles the fetch message,
+    // and applies the caller's own usableIfError fallback on producer error.
+    const settleOnProducer = async (
+      attached: { promise: Promise<LooseResult>; rode: boolean },
+      usableIfError: LooseEntry | undefined,
+    ): Promise<LooseEntry> => {
+      let result: LooseEntry;
+      try {
+        result = await raceWithSignal(
+          attached.promise.then((it) =>
+            primaryNormalizedResultResourceFromRequestPairedProducerResult<
+              SpecOf<RT>,
+              Validators,
+              Params,
+              SpecOf<RT>["id"]
+            >(normalizeVaryBound, it, id),
+          ),
+          signal,
+        );
+      } catch (error) {
+        // If the error was the signal being aborted, propagate that; don't
+        // treat it as a producer failure (or fall back to a cached
+        // usable-if-error value).
+        if (signal?.aborted) {
+          throwAborted(attached.rode);
+        }
+
+        if (usableIfError) {
+          logWarning(PRODUCER_ERROR_FALLBACK_WARNING, {
+            error,
+            entry: usableIfError,
+          });
+          publishFetch(attached.rode, {
+            disposition: "served-stale-after-error",
+          });
+          return usableIfError;
+        }
+
+        publishFetch(attached.rode, {
+          disposition: "producer-error",
+          directivesImpliedBypass,
+        });
+        throw error;
+      }
+
+      publishFetch(attached.rode, {
+        disposition: "served-from-producer",
+        directivesImpliedBypass,
+      });
+      return result;
+    };
+
+    // Bypass requests skip the cache read entirely (see the function docs):
+    // no `read` message, guaranteed producer contact, result still stored,
+    // still collapsed with identical-directive peers.
+    if (directivesImpliedBypass) {
+      logTrace(
+        `request has cache-bypassing directives; skipping the cache read`,
+        { id, params },
       );
-
-      signal?.throwIfAborted();
-
-      return primaryNormalizedResultResourceFromRequestPairedProducerResult(
-        normalizeVaryBound,
-        unnormalizedResult,
-        finalRequest.id satisfies ReadonlyDeep<Id> as Id,
+      return settleOnProducer(
+        collapsedCallProducerAndStore("bypass", finalRequest, resourceType),
+        undefined,
       );
     }
 
+    logTrace(`asking the cache for a response`, { id, params });
+
     const cacheRes = await cache
-      .get(finalRequest, options)
+      .get<SpecOf<RT>["id"]>(finalRequest, callOptions)
       .catch((e: unknown) => {
-        // If the errror was the signal being aborted, propagate that; don't
-        // assume a read failure.
-        signal?.throwIfAborted();
+        // If the errror was the signal being aborted, propagate that (as an
+        // `aborted` settlement); don't assume a read failure.
+        if (signal?.aborted) {
+          throwAborted(false);
+        }
 
         switch (onCacheReadFailure) {
           case "throw":
+            // The request never reached a disposition: no fetch message.
             throw e;
           case "call-producer":
             // Pretend the cache returned no results so that we'll fall through to
             // the producer
-            return { validatable: [] } satisfies CacheLookupResult<
-              SpecForId<Spec, Id>,
-              Validators,
-              Params
-            > as CacheLookupResult<SpecForId<Spec, Id>, Validators, Params>;
+            return {
+              validatable: [],
+            } satisfies LooseLookupResult as LooseLookupResult;
           default:
             assertUnreachable(onCacheReadFailure);
         }
@@ -377,12 +778,13 @@ export default function wrapProducer<
 
     // We have ready-to-go content from the cache, w/ no refresh required.
     if (usable) {
-      publishCacheResult({ cacheName, outcome: "hit", cacheKey: id });
-
+      publishFetch(false, { disposition: "served-from-cache" });
       return usable;
     }
 
-    signal?.throwIfAborted();
+    if (signal?.aborted) {
+      throwAborted(false);
+    }
 
     // If we're here, we either don't have usable content at all, or we have
     // content that's only usable in the event of an origin error, or if we make
@@ -410,65 +812,42 @@ export default function wrapProducer<
     // underlying task may be shared with other callers who haven't aborted).
     // However, we race the caller's observation of the result against the
     // signal so they can bail out immediately. The underlying producer task
-    // keeps running and its result is stored via callProducerAndStore.
-    const newContentPromise = raceWithSignal(
-      collapsedCallProducerAndStore(finalRequest).then((it) =>
-        primaryNormalizedResultResourceFromRequestPairedProducerResult(
-          normalizeVaryBound,
-          it,
-          finalRequest.id satisfies ReadonlyDeep<Id> as Id,
-        ),
-      ),
-      signal,
+    // keeps running and its result is stored via the collapsed invocation.
+    //
+    // The trigger labels the invocation's INITIATING cause; if this call
+    // instead rides an invocation already in flight, that invocation's
+    // original trigger stands.
+    const attached = collapsedCallProducerAndStore(
+      usableWhileRevalidate ? "revalidation" : "miss",
+      finalRequest,
+      resourceType,
     );
 
     if (usableWhileRevalidate) {
-      publishCacheResult({
-        cacheName,
-        outcome: "stale_while_revalidate",
-        cacheKey: id,
-      });
-
       // swallow error rather than crash.
-      newContentPromise.catch(() => {
+      attached.promise.catch(() => {
         logWarning(
           "error asynchronously requesting refreshed content from producer",
           { id, params, directives },
         );
       });
+      publishFetch(false, { disposition: "served-stale-while-revalidating" });
       return usableWhileRevalidate;
     }
 
-    // Cache miss - we need to wait for the producer result
-    publishCacheResult({
-      cacheName,
-      outcome: isRequestingCacheBypass(req.directives ?? {})
-        ? "bypass"
-        : "miss",
-      cacheKey: id,
-    });
-
-    return usableIfError
-      ? newContentPromise.catch((error: unknown) => {
-          // If the errror was the signal being aborted, propagate that rather
-          // than returning the cached, usable-if-error value.
-          signal?.throwIfAborted();
-
-          logWarning(
-            "error calling producer; falling back to a cached value, as permitted",
-            { error, entry: usableIfError },
-          );
-
-          return usableIfError;
-        })
-      : newContentPromise;
+    return settleOnProducer(attached, usableIfError);
   };
 
-  // Expose the cache on the returned function
-  // (for convenience, e.g., in closing it).
-  wrappedProducer.cache = cache;
-
-  return wrappedProducer;
+  // SAFETY: the runtime function is id-erased internally (see LooseProducer),
+  // but every path upholds the per-id contract the signature promises: the
+  // cache read narrows by id, and the producer's request-paired result is
+  // stamped with the request's own id.
+  return wrappedProducer as unknown as WrappedProducerFn<
+    RT,
+    Covered,
+    Validators,
+    Params
+  >;
 }
 
 export function isRequestingCacheBypass(
