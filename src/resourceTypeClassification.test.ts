@@ -22,7 +22,6 @@ import {
   producerByIdType,
   resourceType,
   singleTypeCacheOptions,
-  soleResourceType,
   UnclassifiableIdError,
   type CacheSpec,
   type ResourceTypes,
@@ -54,11 +53,15 @@ const overlappingRegistry = {
 } satisfies ResourceTypes;
 
 const soleVisitsRegistry = {
-  visits: soleResourceType<string>(),
+  visits: resourceType<string>()({
+    matches: (id): id is string => typeof id === "string",
+  }),
 } satisfies ResourceTypes;
 
 const soleAnythingRegistry = {
-  anything: soleResourceType<string>(),
+  anything: resourceType<string>()({
+    matches: (id): id is string => typeof id === "string",
+  }),
 } satisfies ResourceTypes;
 
 const freshFor100 = { freshUntilAge: 100 };
@@ -701,7 +704,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
     });
   });
 
-  describe("soleResourceType registries: classification never fails (§6.1)", () => {
+  describe("accept-everything registries: classification never fails (§6.1)", () => {
     it("classifies every string -- however adversarial -- to the sole type", async () => {
       const name = uniqueCacheName("sole-classify");
       const cache = new Cache({
@@ -852,7 +855,7 @@ describe("singleTypeCacheOptions", () => {
 
 describe("a one-entry registry with a real guard rejects nonconforming ids", () => {
   // The counterpart to singleTypeCacheOptions: narrowing a sole type's id space
-  // is done with a REAL guard now, since `soleResourceType<Content, Id>`'s
+  // is done with a REAL guard now, since the old sole-resource-type sugar's
   // asserted narrowing was unsound -- its guard accepted every string, so a
   // malformed id classified happily and was stored under a spec whose type said
   // it could not exist. Here the guard actually runs.

@@ -18,11 +18,13 @@ import {
   NoProducerForResourceTypeError,
   producerByIdType,
   resourceType,
-  soleResourceType,
   wrapBulkProducer,
   wrapProducer,
   type ResourceTypes,
+  type SpecOf,
 } from "./index.js";
+import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
+import type { ResourceTypeSpec } from "./types/00_ResourceTypes.js";
 
 /**
  * Runtime contract tests for the single-producer-function change
@@ -47,7 +49,9 @@ const registry = {
 
 /** The sole-type shape the majority of the monorepo's caches use (§7). */
 const soleRegistry = {
-  visits: soleResourceType<string>(),
+  visits: resourceType<string>()({
+    matches: (id): id is string => typeof id === "string",
+  }),
 } satisfies ResourceTypes;
 
 const freshFor100 = { freshUntilAge: 100 };
@@ -59,14 +63,31 @@ const freshFor100 = { freshUntilAge: 100 };
  */
 type BulkReqs = readonly { readonly id: string }[];
 
+/**
+ * A general-purpose store's spec: strictly WIDER than `registry`, which covers
+ * only `story` and `collection`.
+ */
+type WiderStoreSpec = SpecOf<{
+  story: ResourceTypeSpec<`story:${string}`, string>;
+  collection: ResourceTypeSpec<`collection:${string}`, string>;
+  unused_by_this_cache: ResourceTypeSpec<`other:${string}`, string>;
+}>;
+
+/**
+ * Every test in this file is deliberately backed by a store that supports MORE
+ * resource types than the cache's registry -- the common case, since most stores
+ * are general-purpose. Note what is NOT needed: no explicit type arguments, and
+ * no re-instantiating the store with artificially narrowed ones. `Store` is
+ * invariant in its `Spec`, so `Store<Wider>` is not assignable to
+ * `Store<SpecOf<typeof registry>>`; the cache captures the store's own spec in
+ * `StoreSupportedTypes` and only checks that it *covers* the registry.
+ *
+ * A fresh store per harness, so tests stay isolated.
+ */
 const makeHarness = (label: string) => {
   const name = uniqueCacheName(label);
-  const store = memoryStoreFor(registry);
-  const cache = new Cache({
-    store: store,
-    name,
-    resourceTypes: registry,
-  });
+  const store = new MemoryStore<WiderStoreSpec>();
+  const cache = new Cache({ store, name, resourceTypes: registry });
   return { name, store, cache };
 };
 

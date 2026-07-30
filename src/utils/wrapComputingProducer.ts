@@ -3,10 +3,7 @@ import type { ReadonlyDeep } from "type-fest";
 import type { PublicInterface } from "type-party";
 
 import type Cache from "../Cache.js";
-import {
-  AmbiguousResourceTypeError,
-  UnclassifiableIdError,
-} from "../Cache.js";
+import { AmbiguousResourceTypeError, UnclassifiableIdError } from "../Cache.js";
 import type { CacheSpec, SpecForId } from "../types/00_CacheSpec.js";
 import type {
   IdOfResourceType,
@@ -64,7 +61,7 @@ import {
  * type's `matches` guard accepts. This is checked at runtime: the wrapper
  * classifies each hashed id and throws
  * `UnclassifiableIdError`/`AmbiguousResourceTypeError` on mismatch, naming
- * the branch. For `soleResourceType` registries that runtime check is vacuous
+ * the branch. For accept-everything registries that runtime check is vacuous
  * (the guard accepts everything); there, `hashInput`'s compile-checked return
  * type — `IdOfResourceType`, i.e. the narrowed `Id` when the sole type
  * declares one — is the line of defense.
@@ -140,7 +137,10 @@ export type ComputingProducerResult<
 > & {
   supplementalResources?: (
     | (CoveredSpec extends unknown
-        ? Omit<ProducerResultResource<CoveredSpec, Validators, Params>, "id"> & {
+        ? Omit<
+            ProducerResultResource<CoveredSpec, Validators, Params>,
+            "id"
+          > & {
             input: Input;
             id?: never;
           }
@@ -213,7 +213,9 @@ type LooseBranch<Input> = {
   hashInput: (input: Input) => string | Promise<string>;
   produce: (
     input: ReadonlyDeep<Input>,
-  ) => Promise<ComputingProducerResult<Input, CacheSpec, AnyValidators, AnyParams>>;
+  ) => Promise<
+    ComputingProducerResult<Input, CacheSpec, AnyValidators, AnyParams>
+  >;
 };
 
 /**
@@ -281,7 +283,7 @@ function findBranch<B extends { matchesInput?: (input: unknown) => boolean }>(
  * Checks that a branch's `hashInput` minted an id that classifies to that
  * branch's own resource type, rethrowing the classification errors with the
  * offending branch named. Runs before the id is used for anything (in
- * particular, before any cache read). Vacuous for `soleResourceType`
+ * particular, before any cache read). Vacuous for accept-everything
  * registries, whose guard accepts every id.
  */
 function checkMintedId(
@@ -370,10 +372,7 @@ export function wrapComputingProducer<
   options?: { directives?: ConsumerDirectives; signal?: AbortSignal },
 ) => Promise<
   Entry<
-    SpecForId<
-      SpecOf<RT>,
-      IdOfResourceType<RT[Covered & ResourceTypeName<RT>]>
-    >,
+    SpecForId<SpecOf<RT>, IdOfResourceType<RT[Covered & ResourceTypeName<RT>]>>,
     Validators,
     Params
   >
@@ -411,7 +410,12 @@ export function wrapComputingProducer<
   // unresolved generic. Runtime dispatch upholds the contract: each producer
   // only ever receives ids its branch's `hashInput` minted (checked, below,
   // to classify to that branch's type before any request is made).
-  const wrapped = wrapProducer<RT, Covered & ResourceTypeName<RT>, Validators, Params>(
+  const wrapped = wrapProducer<
+    RT,
+    Covered & ResourceTypeName<RT>,
+    Validators,
+    Params
+  >(
     cache,
     options,
     producerByIdType<RT, Covered & ResourceTypeName<RT>, Validators, Params>(
@@ -432,7 +436,11 @@ export function wrapComputingProducer<
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
 
-    const [branchName, branch] = findBranch("wrapComputingProducer", branchEntries, input);
+    const [branchName, branch] = findBranch(
+      "wrapComputingProducer",
+      branchEntries,
+      input,
+    );
     const id = await branch.hashInput(input);
     signal?.throwIfAborted();
 
@@ -569,20 +577,28 @@ export function wrapBulkComputingProducer<
         const inputs = reqs.map((req) =>
           registry.get(req.id),
         ) as readonly ReadonlyDeep<Input>[];
-        return branch.produce(inputs).then(async (results) =>
-          Promise.all(
-            results.map(async (result) =>
-              result instanceof Error ? result : hashSupplementals(result),
+        return branch
+          .produce(inputs)
+          .then(async (results) =>
+            Promise.all(
+              results.map(async (result) =>
+                result instanceof Error ? result : hashSupplementals(result),
+              ),
             ),
-          ),
-        );
+          );
       },
     ]),
   );
 
   // Same routing through the by-id-type helper, and same bridging cast, as
   // wrapComputingProducer's (see there).
-  const wrapped = wrapBulkProducer<RT, Covered & ResourceTypeName<RT>, Validators, Params, ErrorType>(
+  const wrapped = wrapBulkProducer<
+    RT,
+    Covered & ResourceTypeName<RT>,
+    Validators,
+    Params,
+    ErrorType
+  >(
     cache,
     options,
     bulkProducerByIdType<
@@ -614,7 +630,8 @@ export function wrapBulkComputingProducer<
     // `hashInput` (bounded by `hashLimit`; `hashInput` may be sync — p-limit
     // handles that).
     const branchNames = inputs.map(
-      (input) => findBranch("wrapBulkComputingProducer", branchEntries, input)[0],
+      (input) =>
+        findBranch("wrapBulkComputingProducer", branchEntries, input)[0],
     );
     const ids = await Promise.all(
       inputs.map(async (input, index) =>
@@ -716,9 +733,7 @@ function makeSupplementalHasher<Input>(
               branchEntries,
               input,
             );
-            const id = await Promise.resolve(
-              branch.hashInput(input as Input),
-            );
+            const id = await Promise.resolve(branch.hashInput(input as Input));
             checkMintedId(cache, branchName, id);
             return { ...rest, id };
           }),

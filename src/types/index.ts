@@ -6,7 +6,6 @@ export type { CacheSpec, ContentForId, SpecForId } from "./00_CacheSpec.js";
 export {
   idStartsWith,
   resourceType,
-  soleResourceType,
   type ContentOfResourceType,
   type IdOfResourceType,
   type ResourceTypeName,

@@ -27,7 +27,6 @@ import {
   idStartsWith,
   producerByIdType,
   resourceType,
-  soleResourceType,
   wrapBulkProducer,
   wrapComputingProducer,
   type CacheFetchMessage,
@@ -54,7 +53,9 @@ const registry = {
 } satisfies ResourceTypes;
 
 const soleVisitsRegistry = {
-  visits: soleResourceType<string>(),
+  visits: resourceType<string>()({
+    matches: (id): id is string => typeof id === "string",
+  }),
 } satisfies ResourceTypes;
 
 const freshFor100 = { freshUntilAge: 100 };

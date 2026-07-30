@@ -43,9 +43,23 @@ const cache = new Cache(
 );
 ```
 
-Its sole type accepts every id (`soleResourceType` under the hood), so classification never fails and the id space is `string`. Spread the result to set anything else `CacheOptions` accepts. The one thing it gives up is precision of the resource-type *name*: `classify()` returns `string` rather than a literal, which is the point of not having to pick one.
+By default its sole type accepts every id, so classification never fails and the id space is `string`. Spread the result to set anything else `CacheOptions` accepts. The one thing it gives up is precision of the resource-type *name*: `classify()` returns `string` rather than a literal, which is the point of not having to pick one.
 
-To narrow the id space below `string` — template-literal or branded ids flowing through to every request, producer, and entry type — write the one-entry registry with a **real guard**:
+To narrow the id space below `string` — template-literal or branded ids flowing through to every request, producer, and entry type — pass a **real guard** as `validateId`:
+
+```ts
+const cache = new Cache(
+  singleTypeCacheOptions<TicketSchema>()({
+    store: new MemoryStore<CacheSpec<`zendesk-ticket-schema:${string}`, TicketSchema>>(),
+    name: "zendesk_ticket_schemas",
+    validateId: idStartsWith("zendesk-ticket-schema:"),
+  }),
+);
+```
+
+`validateId` is only reachable through a call signature that *requires* it, so a narrowed id type always has a runtime check behind it. Note the store is typed for the narrowed id space above: `Id` is inferred from the guard *and* the store, so an untyped `new MemoryStore()` contributes a `string` candidate and widens the id space back to `string`. The guard still runs either way, so that's the safe direction — types wider than runtime, never narrower.
+
+Writing the one-entry registry out by hand stays equivalent, and is the better choice when you also want the literal resource-type name:
 
 ```ts
 const cache = new Cache({
@@ -59,7 +73,20 @@ const cache = new Cache({
 });
 ```
 
-Through 2.0's review `soleResourceType` took a second type argument that narrowed the id space while its guard still accepted every string. That was unsound and has been removed: the guard admitted any id, so a malformed one classified happily and was stored under a spec whose type said it could not exist, with nothing but call-site compile checks in the way — and a cast or an untyped boundary (parsed JSON, a queue payload) walks straight past those. A guard you actually write is enforced, and throws `UnclassifiableIdError` on a nonconforming id.
+Through 2.0's review there was a `soleResourceType<Content, Id>` sugar whose second type argument narrowed the id space while its guard still accepted every string. That was unsound, and the sugar has been **removed entirely** (it is no longer exported): the guard admitted any id, so a malformed one classified happily and was stored under a spec whose type said it could not exist, with nothing but call-site compile checks in the way — and a cast or an untyped boundary (parsed JSON, a queue payload) walks straight past those. A guard you actually write is enforced, and throws `UnclassifiableIdError` on a nonconforming id.
+
+### The store may support more types than the cache
+
+`Store` is invariant in its `Spec` — `Spec` appears both in `store()`/`delete()`'s parameters and in `get()`/`getMany()`'s return types — so a `Store<Wide>` is not assignable to a `Store<Narrow>`, even though for any id the narrow cache actually asks for, the wide store returns exactly the same thing. Since most stores are general-purpose, requiring an exact match would mean re-instantiating them with artificially narrowed type arguments.
+
+So the cache doesn't require a match: it captures the store's own spec and only checks that it **covers** the registry. A general-purpose store just works, with no type arguments and no narrowing:
+
+```ts
+const store = new MemoryStore<SpecOf<typeof everyResourceTypeWeHave>>();
+const cache = new Cache({ store, name: "stories", resourceTypes: storiesResourceTypes });
+```
+
+A store that does *not* cover the registry is still rejected, so this convenience can't silently accept a store that would fail at runtime on an id it doesn't handle.
 
 ### Per-id content typing (heterogeneous caches)
 

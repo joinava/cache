@@ -9,7 +9,6 @@ import {
   idStartsWith,
   producerByIdType,
   resourceType,
-  soleResourceType,
   type ResourceTypes,
   type SpecOf,
 } from "./index.js";
@@ -88,7 +87,9 @@ describe("Per-id content typing", () => {
       // in bare: a vanilla `async (req) => ({...})` lambda satisfies the
       // wrapper directly, with no record and no dispatch helper.
       const soleRegistry = {
-        entries: soleResourceType<string>(),
+        entries: resourceType<string>()({
+          matches: (id): id is string => typeof id === "string",
+        }),
       } satisfies ResourceTypes;
       const cache = new Cache({
         store: memoryStoreFor(soleRegistry),

@@ -14,9 +14,9 @@ import {
 import Cache from "../Cache.js";
 import {
   MemoryStore,
-  soleResourceType,
   wrapProducer,
   type ProducerDirectives,
+  resourceType,
   type ResourceTypes,
   type SpecOf,
 } from "../index.js";
@@ -32,7 +32,9 @@ import { wrapBulkProducer } from "./wrapBulkProducer.js";
 // diagnosticsChannels.test.ts. The 1.6.0 `isCacheable` tests were removed with
 // the option itself (§6.3's producer purity contract).
 const testRegistry = {
-  resources: soleResourceType<unknown>(),
+  resources: resourceType<unknown>()({
+    matches: (id): id is string => typeof id === "string",
+  }),
 } satisfies ResourceTypes;
 const testCacheOptions = {
   name: "wrap-bulk-producer-test",
@@ -155,7 +157,7 @@ describe("wrapBulkProducer", () => {
               const storeMock = mock.method(store, "store");
 
               const cache = new Cache({
-                store: store,
+                store,
                 ...testCacheOptions,
               });
               try {
@@ -418,13 +420,44 @@ describe("wrapBulkProducer", () => {
               const producerWontError = (it: { entry: { id: string } }) =>
                 !shouldError(it.entry.id);
 
+              // A request whose directives imply a cache bypass (`maxAge: 0`)
+              // never reaches the cache read at all, so it joins neither the
+              // miss nor the revalidation group: it gets its OWN collapsed
+              // invocation, fired before the read, with its own `cache.store()`.
+              // So a batch can produce THREE store calls, not two -- see the
+              // COLLAPSE GRANULARITY note in wrapBulkProducer.ts.
+              //
+              // Only `UnusableEntryArb` ever generates `maxAge: 0` (with it, any
+              // entry of positive age classifies as Unusable), so this partition
+              // is what makes the count right for ~0.4% of generated entries.
+              // Folding bypass into the miss group instead was a genuine bug: it
+              // coincidentally agreed whenever bypass was the ONLY storing
+              // group, and disagreed otherwise (~5% of property runs).
+              const impliesBypass = (it: {
+                consumerDirs: { maxAge?: number | undefined };
+              }) => it.consumerDirs.maxAge === 0;
+
+              const allItems = [
+                ...Usable,
+                ...UsableWhileRevalidate,
+                ...UsableIfError,
+                ...Unusable,
+                ...Unstored,
+              ];
+              const bypassGroup = allItems.filter(impliesBypass);
+              const missGroup = [
+                ...Unstored,
+                ...Unusable,
+                ...UsableIfError,
+              ].filter((it) => !impliesBypass(it));
+              const revalidationGroup = UsableWhileRevalidate.filter(
+                (it) => !impliesBypass(it),
+              );
+
               const expectedStoreCalls =
-                ([...Unstored, ...Unusable, ...UsableIfError].filter(
-                  producerWontError,
-                ).length > 0
-                  ? 1
-                  : 0) +
-                (UsableWhileRevalidate.filter(producerWontError).length > 0
+                (bypassGroup.filter(producerWontError).length > 0 ? 1 : 0) +
+                (missGroup.filter(producerWontError).length > 0 ? 1 : 0) +
+                (revalidationGroup.filter(producerWontError).length > 0
                   ? 1
                   : 0);
 

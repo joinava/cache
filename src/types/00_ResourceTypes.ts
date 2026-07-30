@@ -70,34 +70,6 @@ export function resourceType<Content>(): <Id extends string>(def: {
   return (def) => def;
 }
 
-/**
- * Sugar for single-type caches: matches every id, so its id space is exactly
- * `string`. A cache whose registry has exactly one entry may use this instead
- * of writing a trivial guard -- and via {@link singleTypeCacheOptions} it does
- * not have to invent a name for that entry either.
- *
- * ## Why there is no narrowed-`Id` form
- *
- * Through 2.0's review this took a second type parameter, `Id extends string`,
- * that narrowed the id space at the TYPE level while the runtime guard stayed
- * trivially true. That is unsound, and the combination is the reason: the guard
- * accepts every string, so a malformed id classifies happily and is stored
- * under a spec whose type says such an id cannot exist. Nothing rejects it --
- * the only enforcement was call-site compile checks, which a cast or an
- * untyped boundary (parsed JSON, a queue payload) walks straight past.
- *
- * A narrower id space is still available, and is now honest about it: write the
- * one-entry registry with a REAL guard --
- * `resourceType<Content>()({ matches: idStartsWith("story:") })`, or any
- * `(id: string) => id is Id` -- which throws `UnclassifiableIdError` on a
- * nonconforming id instead of quietly admitting it.
- * {@link singleTypeCacheOptions}'s `validateId` is the same thing with the
- * naming boilerplate removed.
- */
-export function soleResourceType<Content>(): ResourceTypeSpec<string, Content> {
-  return { matches: (id: string): id is string => typeof id === "string" };
-}
-
 /** A cache's registry: resource-type name → spec. */
 export type ResourceTypes = { readonly [name: string]: ResourceTypeSpec };
 

@@ -6,7 +6,7 @@ import { makeTestWithFixture } from "test-with-fixture";
 import { setTimeout as delay } from "timers/promises";
 import { dummyEntryData, postgresStoreFixture } from "../test/fixtures.js";
 import Cache from "./Cache.js";
-import { soleResourceType, type ResourceTypes } from "./index.js";
+import { resourceType } from "./index.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 import type PostgresStore from "./stores/PostgresStore/PostgresStore.js";
 import type { CacheSpec } from "./types/00_CacheSpec.js";
@@ -17,12 +17,13 @@ import { type JSON } from "./types/utils.js";
 // resource types). Classification-specific behavior is covered in
 // resourceTypeClassification.test.ts; store-entry channel payloads in
 // diagnosticsChannels.test.ts.
-const testResourceTypes = {
-  entries: soleResourceType<JSON>(),
-} satisfies ResourceTypes;
 const cacheOptions = {
   name: "cache-test",
-  resourceTypes: testResourceTypes,
+  resourceTypes: {
+    entries: resourceType<JSON>()({
+      matches: (id: string): id is string => typeof id === "string",
+    }),
+  },
 };
 
 /* eslint-disable @typescript-eslint/no-explicit-any */

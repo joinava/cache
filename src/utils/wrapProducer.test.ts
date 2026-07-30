@@ -5,7 +5,7 @@ import { setTimeout as delay } from "timers/promises";
 import Cache from "../Cache.js";
 import {
   MemoryStore,
-  soleResourceType,
+  resourceType,
   type ResourceTypes,
   type SpecOf,
 } from "../index.js";
@@ -27,7 +27,9 @@ import wrapProducer from "./wrapProducer.js";
 // test that lived here was removed with the option itself -- §6.3's producer
 // purity contract.)
 const testRegistry = {
-  resources: soleResourceType<unknown>(),
+  resources: resourceType<unknown>()({
+    matches: (id): id is string => typeof id === "string",
+  }),
 } satisfies ResourceTypes;
 const testCacheOptions = {
   name: "wrap-producer-test",

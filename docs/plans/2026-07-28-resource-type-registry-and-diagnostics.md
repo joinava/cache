@@ -1163,8 +1163,10 @@ PR #13 review round (2026-07-30, user decisions):
 
 ### 6.8 Cache API simplification (2026-07-30 review round)
 
-Three changes from a review of §6.1/§6.2, all breaking, all in the same PR as
-the single-producer-function change.
+Four changes from a review of §6.1/§6.2, all breaking, all in the same PR as the
+single-producer-function change. The fourth (the store's spec no longer having to
+match the registry exactly) came out of noticing that the first three kept
+running into `Store`'s invariance.
 
 **1. `Cache` takes one options bag; `store` moved into it.** Was
 `new Cache(store, { name, resourceTypes, … })`, now
@@ -1175,24 +1177,23 @@ so there is no longer a call shape in which passing the store alone says
 anything. The `InvariantOf<Params>` wrapper and the comment explaining why it is
 needed move to the `store` field unchanged.
 
-**2. `soleResourceType` loses its `Id` type parameter.** It is now
-`soleResourceType<Content>(): ResourceTypeSpec<string, Content>`.
+**2. `soleResourceType` is deleted, not just narrowed.** It is gone from the
+package entirely -- no longer exported, and its ten call sites inlined as
+`resourceType<C>()({ matches: (id): id is string => typeof id === "string" })`.
+`singleTypeCacheOptions` (below) is now the only single-type surface.
 
-The removed form let the id space be narrowed at the type level while the guard
-stayed `typeof id === "string"`. The combination is what made it unsound: the
-guard admits every id, so a malformed one classifies happily and is stored under
-a spec whose type says such an id cannot exist. §6.1's own docstring named the
-only enforcement as call-site compile checks — and a cast or an untyped boundary
-(parsed JSON, a queue payload) walks past those, which is precisely how ids
-arrive in practice.
+What made the removed form unsound was the *combination* of a narrowed `Id` type
+parameter with a guard that accepted every string: the guard admits any id, so a
+malformed one classifies happily and is stored under a spec whose type says such
+an id cannot exist. 6.1's own docstring named the only enforcement as call-site
+compile checks -- and a cast or an untyped boundary (parsed JSON, a queue
+payload) walks past those, which is precisely how ids arrive in practice.
 
-A narrower id space is still available and now honest about it: write the
-one-entry registry with a real guard,
-`resourceType<Content>()({ matches: idStartsWith("ticket:") })`, which throws
-`UnclassifiableIdError` on a nonconforming id. Both narrowed cases in this
-repo's own fixtures converted to one-line guards (a prefix check, and a
-JSON-parsing guard for the branded `JsonOf<…>` id), so the ergonomic cost is
-real but small.
+A narrower id space now requires a real runtime guard, either via
+`singleTypeCacheOptions`' `validateId` or by writing the one-entry registry with
+`resourceType<C>()({ matches })`. Both narrowed cases in this repo's own fixtures
+converted to one-line guards (a prefix check, and a JSON-parsing guard for the
+branded `JsonOf<…>` id).
 
 This also invalidated a rationale comment in `requestPairedProducerUtils.ts`,
 which credited the *per-type producer records* with being "the user-facing
@@ -1206,7 +1207,7 @@ adding content validators to the registry.
 `CacheOptions` for a one-resource-type cache so the caller does not have to
 invent a name for the type or nest a one-entry registry literal. The type is
 named after the cache unless `resourceTypeName` overrides it; that name reaches
-diagnostics only (it is never part of a store key — verified), so naming it
+diagnostics only (it is never part of a store key -- verified), so naming it
 after the cache cannot invalidate entries, and it keeps `resourceType`
 meaningful across caches rather than collapsing every sole-type cache into one
 shared literal. Spreadable, so any other `CacheOptions` field can be set
@@ -1217,34 +1218,87 @@ source, and TS has no partial type-argument inference.
 
 The registry it returns is keyed by an index signature, so `classify()` returns
 `string` on such a cache rather than the literal name. `SpecOf` of that registry
-is still exactly `CacheSpec<string, Content>`, so the id space and content type
-stay precise; only the name is imprecise, which is the thing the helper exists
-to let you stop thinking about.
+is still exactly `CacheSpec<Id, Content>`, so the id space and content type stay
+precise; only the name is imprecise, which is the thing the helper exists to let
+you stop thinking about.
 
-#### The `validateId` option that was tried and dropped
+#### `validateId`, and the `NoInfer` mistake
 
-The review sketched an optional `validateId` on this helper, to narrow the id
-space with a real guard. It was implemented and removed, and the reason is worth
-recording because the failure is not obvious:
+`validateId` narrows the id space below `string`. It is reachable only through a
+second call signature that *requires* it, so a narrower `Id` always has a runtime
+check behind it -- an explicit type argument cannot name one without a guard,
+which is the invariant deleting the old sugar established.
 
-- An optional `validateId` with a defaulted `Id` is unsound in the same way the
-  removed `soleResourceType<Content, Id>` was — an explicit type argument names a
-  narrower `Id` with no guard behind it. Fixing that needs two call signatures,
-  with `validateId` **required** in the narrowing one.
-- Sound or not, the guard is then a second inference site for `Id` alongside
-  `store`, and an untyped `new MemoryStore()` wins: probed, the cache's request
-  id type came back `string` even with a guard supplied. So the narrowing was
-  silently discarded — the exact defect being removed, reintroduced.
-- Forcing the guard to win with `NoInfer<Id>` in the store position works, and
-  then correctly rejects a store typed for the wider id space. But it requires
-  every caller to spell the store's spec out
-  (`new MemoryStore<CacheSpec<Id, Content>>()`), which makes the common case
-  worse in order to serve the rare one.
+`Id` is inferred from **both** `validateId` and `store`, deliberately. An earlier
+iteration wrapped the store's `Id` in `NoInfer` so the guard would be its only
+source. Probing showed that does not do what it reads like: it leaves `Id` with
+no inference candidate at all, so it falls back to its `string` constraint and
+the guard's narrowing is discarded outright. (An intermediate diagnosis -- that
+`NoInfer` "makes the guard win at the cost of every caller spelling out the store
+spec" -- was simply wrong, and the friction objection built on it does not
+apply.)
 
-The rare case already has a two-line answer (the one-entry registry with a real
-guard, per change 2), and that answer is the one this design wants people
-reaching for. So the helper covers naming only, and its id space is always
-`string`. Cheap to add later if a caller actually wants it.
+With both sites live, both outcomes are sound:
+
+- Guard + a store typed for the narrow id space: the candidates agree and the
+  narrowed id space reaches the cache's request types.
+- Guard + an untyped `new MemoryStore()`: the store contributes a `string`
+  candidate, so `Id` widens to `string`. The guard still runs at runtime, so
+  nonconforming ids still throw; you just do not get the *type-level* narrowing.
+  Wider-than-necessary types are safe -- narrower-than-runtime would be unsound,
+  and cannot happen here.
+
+**4. The store may support a WIDER spec than the cache's registry.** `Cache` and
+`CacheOptions` gained a final, defaulted `StoreSupportedTypes extends CacheSpec =
+SpecOf<RT>`; the store's field is
+`Store<StoreSupportedTypes, …> & (SpecOf<RT> extends StoreSupportedTypes ?
+unknown : { __storeMustSupportAtLeast: SpecOf<RT> })`.
+
+`Store` is invariant in `Spec` -- it sits in `store()`/`delete()`'s parameters
+*and* `get()`/`getMany()`'s return types -- so `Store<Wide>` is not assignable to
+`Store<Narrow>` even though, for any id the narrow cache asks for, the wide store
+returns exactly the same thing. Since most stores are general-purpose, requiring
+an exact match forced callers to re-instantiate them with artificially narrowed
+type arguments.
+
+This limitation is **new in 2.0**, and worth understanding as a consequence of
+the registry rather than an inherited wart: through 1.6.0, `Cache<Spec>` took
+`Spec` directly and *inferred it from the store*, so the cache became exactly as
+wide as its store and a mismatch was unrepresentable. Making the registry the
+source of truth is what turned the store into something *checked against* an
+independently-determined spec.
+
+Rather than fight the variance, the store's own spec is captured and only
+*checked* for coverage. Probed findings behind that choice:
+
+- `store()` and `delete()` are already fine wide->narrow (parameter positions).
+- `get` blocks it, and relaxing `Id extends Spec["id"]` to `Id extends string` --
+  making `Spec` output-only -- does **not** help. Relating two generic signatures
+  instantiates the type parameter at its constraint and compares once, so TS
+  checks the worst case; at `Id = string` the wide store's return genuinely *is*
+  wider. The pointwise argument is true per concrete id but TS never reasons
+  pointwise.
+- A declaration-site annotation cannot assert past it either: `in Spec` (the
+  direction that would permit a wider store) is rejected with TS2636 while `Spec`
+  appears in a return type. The same annotation on a Store-shaped type with only
+  `store`/`delete` is accepted, and a wide instance *is* then assignable -- so
+  the only route to genuine variance is taking `Spec` out of the read return
+  types and letting `Cache` do the id->content narrowing. That is arguably the
+  right layering and is deliberately **not** attempted here: it changes the
+  `Store` contract and every implementation.
+
+Cost of the chosen approach: three documented casts at the store boundary inside
+`Cache`, because `SpecForId<StoreSupportedTypes, Id>` does not reduce to
+`SpecForId<SpecOf<RT>, Id>` under a generic `StoreSupportedTypes`. Every id
+involved came from this cache and is therefore in `SpecOf<RT>`, so the two agree
+pointwise -- the same fact TS cannot see.
+
+Ordering note: `StoreSupportedTypes` is **last and defaulted**. An intermediate
+iteration inserted it second, which silently shifted `Validators` into its slot
+at every 3-argument `CacheOptions<RT, Validators, Params>` use -- and in an
+overloaded call that misalignment crashed `tsc` 5.9.3 outright with
+`Debug Failure. No error for last overload signature` rather than producing a
+diagnostic.
 
 #### Test coverage
 
@@ -1255,11 +1309,14 @@ reaching for. So the helper covers naming only, and its id space is always
   classifies every id (property-based).
 - A one-entry registry with a real guard rejects a nonconforming id with
   `UnclassifiableIdError` **before the store is touched** (store spy) and
-  publishes nothing — the enforcement the removed form lacked.
+  publishes nothing -- the enforcement the removed form lacked.
 - Compile fixtures: `store`/`name`/`resourceTypes` each required; the helper
-  keeps `content` exact while `classify()` widens to `string`; a guarded
-  one-entry registry's narrowed id reaches `Cache.get`'s request type, and a
-  bare string is rejected there.
+  keeps `content` exact while `classify()` widens to `string`; `validateId`
+  narrows the id space through to `Cache.get`'s request type; a wider store is
+  accepted with no type arguments, and an under-covering store is rejected.
+- Every test in `singleProducerFn.test.ts` now runs against a store whose spec is
+  strictly wider than its cache's registry, so the covering path is exercised
+  throughout rather than in one fixture.
 
 ## 7. Execution pattern and simulation
 

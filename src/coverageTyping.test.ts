@@ -15,7 +15,6 @@ import {
   producerByIdType,
   resourceType,
   singleTypeCacheOptions,
-  soleResourceType,
   wrapBulkProducer,
   wrapComputingProducer,
   type CacheReadMessage,
@@ -36,7 +35,7 @@ import wrapProducer from "./utils/wrapProducer.js";
  * producer `req`s are contextually narrowed per key; non-registry keys are
  * rejected; supplementals may target uncovered types; a record passed where the
  * single producer function belongs is a compile error; and
- * `soleResourceType`'s optional narrowed `Id` flows through everything.
+ * a one-entry registry's `Id` flows through everything.
  *
  * Follows the perIdTyping.test.ts conventions: compile-time assertions via
  * `expectType<Equal<...>>()`, `@ts-expect-error` fixtures (kept on ONE line
@@ -119,6 +118,33 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           store: new MemoryStore(),
           name: "x",
         });
+      }
+    });
+  });
+
+  describe("the store may support a WIDER spec than the registry (§6.8)", () => {
+    it("accepts a general-purpose store, and rejects one that does not cover the registry", () => {
+      if (false as boolean) {
+        // WIDER than `registry` (which has no `other:` type): accepted with no
+        // explicit type arguments and no narrowing of the store's own type.
+        // `Store` is invariant in `Spec`, so this is only possible because the
+        // cache captures the store's spec separately and checks coverage.
+        void new Cache({
+          store: new MemoryStore<
+            | SpecOf<typeof registry>
+            | CacheSpec<`other:${string}`, { unrelated: true }>
+          >(),
+          name: "wider-store",
+          resourceTypes: registry,
+        });
+
+        // NOT covering: this store handles `site:` and `biz:` but not
+        // `extra:`, which `registry` requires. Coverage is enforced, so the
+        // convenience above cannot silently accept a store that would fail at
+        // runtime on an `extra:` id.
+        // prettier-ignore
+        // @ts-expect-error store must support at least every registry type
+        void new Cache({ store: new MemoryStore<CacheSpec<SiteId, Visits> | CacheSpec<BizId, Visits>>(), name: "under-covering-store", resourceTypes: registry });
       }
     });
   });
@@ -345,11 +371,11 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
   });
 
   describe("a one-entry registry's narrowed Id (§6.1, §6.4)", () => {
-    // `soleResourceType` no longer takes an `Id` parameter: narrowing the id
-    // space while its guard accepted every string was unsound (see that
-    // function's docs). A narrower id space now comes from a REAL guard, which
-    // is what makes the narrowing enforceable rather than merely asserted --
-    // and the type-level flow pinned below is identical either way.
+    // Narrowing a one-entry registry's id space while its guard accepted every
+    // string was unsound, so that form is gone (see `singleTypeCacheOptions`).
+    // A narrower id space now comes only from a REAL guard, which is what makes
+    // the narrowing enforceable rather than merely asserted -- and the
+    // type-level flow pinned below is identical either way.
     const zendeskRegistry = {
       ticket_schema: resourceType<{ fields: string[] }>()({
         matches: idStartsWith("zendesk-ticket-schema:"),
@@ -386,13 +412,16 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     } satisfies ResourceTypes;
 
     const defaultRegistry = {
-      visits: soleResourceType<number[]>(),
+      visits: resourceType<number[]>()({
+        matches: (id): id is string => typeof id === "string",
+      }),
     } satisfies ResourceTypes;
 
     // The narrowed Id flows through SpecOf...
     expectType<Equal<TicketSpec["id"], `zendesk-ticket-schema:${string}`>>();
     expectType<Equal<SpecOf<typeof brandedRegistry>["id"], SiteVisitsKey>>();
-    // ...while `soleResourceType` stays `string` for unstructured-id caches.
+    // ...while an accept-everything guard stays `string`, for caches whose
+    // ids have no inspectable structure.
     expectType<Equal<SpecOf<typeof defaultRegistry>["id"], string>>();
 
     it("singleTypeCacheOptions: keeps content and id types exact while giving up only the resource-type name", async () => {
@@ -421,10 +450,8 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           Equal<SpecOf<typeof explicitName.resourceTypes>["content"], number[]>
         >();
 
-        // The helper's sole type accepts every id, so the id space is exactly
-        // `string`. Narrowing it needs a real guard, which means writing the
-        // one-entry registry out (see the fixtures above) -- the helper has no
-        // asserted-narrowing option, deliberately.
+        // Without `validateId` the sole type accepts every id, so the id space
+        // is exactly `string`.
         if (false as boolean) {
           const bare = "x" as string;
           void defaultName.get({ id: bare, params: {}, directives: {} });
@@ -433,6 +460,70 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       } finally {
         await defaultName.close();
         await explicitName.close();
+      }
+    });
+
+    it("singleTypeCacheOptions: `validateId` narrows the id space through to the cache's request type", async () => {
+      const guarded = new Cache(
+        singleTypeCacheOptions<{ fields: string[] }>()({
+          // A narrowed cache must type its store for the narrowed id space.
+          // That is the narrowing being ENFORCED rather than friction: a store
+          // over the wider id space is rejected here instead of silently
+          // widening the cache.
+          store: new MemoryStore<
+            CacheSpec<`zendesk-ticket-schema:${string}`, { fields: string[] }>
+          >(),
+          name: "typing-single-guarded",
+          validateId: idStartsWith("zendesk-ticket-schema:"),
+        }),
+      );
+      try {
+        // `Id` came from the guard, not from the store (which is
+        // and it reaches the cache's own request type.
+        expectType<
+          Equal<
+            SpecOf<typeof guarded.resourceTypes>["id"],
+            `zendesk-ticket-schema:${string}`
+          >
+        >();
+
+        if (false as boolean) {
+          const bare = "x" as string;
+          // prettier-ignore
+          // @ts-expect-error the guard narrowed the id space below `string`
+          void guarded.get({ id: bare, params: {}, directives: {} });
+          void guarded.get({
+            id: "zendesk-ticket-schema:b1:abc",
+            params: {},
+            directives: {},
+          });
+        }
+      } finally {
+        await guarded.close();
+      }
+    });
+
+    it("singleTypeCacheOptions: a guard with an untyped store widens the id space rather than lying about it", async () => {
+      // `Id` is inferred from the store as well as from the guard, so an
+      // untyped store contributes a `string` candidate and the id space widens.
+      // The guard still runs at runtime (the runtime half is pinned in
+      // resourceTypeClassification.test.ts), so this is the safe direction:
+      // types wider than runtime, never narrower.
+      const widened = new Cache(
+        singleTypeCacheOptions<{ fields: string[] }>()({
+          store: new MemoryStore(),
+          name: "typing-single-guarded-untyped-store",
+          validateId: idStartsWith("zendesk-ticket-schema:"),
+        }),
+      );
+      try {
+        expectType<Equal<SpecOf<typeof widened.resourceTypes>["id"], string>>();
+        if (false as boolean) {
+          const bare = "x" as string;
+          void widened.get({ id: bare, params: {}, directives: {} });
+        }
+      } finally {
+        await widened.close();
       }
     });
 

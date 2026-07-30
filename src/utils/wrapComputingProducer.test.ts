@@ -9,7 +9,6 @@ import {
   idStartsWith,
   MemoryStore,
   resourceType,
-  soleResourceType,
   UnclassifiableIdError,
   type ResourceTypes,
   type SpecOf,
@@ -27,7 +26,9 @@ import {
 // pass explicit type arguments: `Input` inference degrades to `unknown` when
 // branch functions are pre-typed references (see the acceptance report).
 const testRegistry = {
-  computed: soleResourceType<string>(),
+  computed: resourceType<string>()({
+    matches: (id): id is string => typeof id === "string",
+  }),
 } satisfies ResourceTypes;
 const testCacheOptions = {
   name: "wrap-computing-producer-test",
