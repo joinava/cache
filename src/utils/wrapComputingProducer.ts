@@ -879,7 +879,7 @@ export function wrapComputingProducer(
           cache,
           producerOptions,
           producerByIdType(
-            cache,
+            cache.resourceTypes,
             Object.fromEntries(
               branchEntries.map(([name, branch]) => [
                 name,
@@ -1067,7 +1067,7 @@ export function wrapBulkComputingProducer(
           cache,
           producerOptions,
           bulkProducerByIdType(
-            cache,
+            cache.resourceTypes,
             Object.fromEntries(
               branchEntries.map(([name, branch]) => [
                 name,

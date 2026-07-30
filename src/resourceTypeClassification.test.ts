@@ -388,7 +388,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         const thrown = await expectRejection(() =>
@@ -542,7 +542,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         // The producer result still reaches the caller; whether the wrapped

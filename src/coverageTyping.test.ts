@@ -161,7 +161,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         const fetchSite = wrapProducer(
           cache,
           {},
-          producerByIdType(cache, {
+          producerByIdType(cache.resourceTypes, {
             site_day: async (req) => {
               // Contextually typed per key -- narrowed, and NOT any.
               expectType<Equal<typeof req.id, SiteId>>();
@@ -213,7 +213,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         const fetchTwo = wrapProducer(
           cache,
           {},
-          producerByIdType(cache, {
+          producerByIdType(cache.resourceTypes, {
             site_day: async (req) => {
               expectType<Equal<typeof req.id, SiteId>>();
               return { content: { visits: [1, 2] }, directives: freshFor1 };
@@ -256,19 +256,19 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         if (false as boolean) {
           // prettier-ignore
           // @ts-expect-error 'sight_day' is not a registry resource-type name
-          void producerByIdType(cache, { sight_day: siteProducerStub });
+          void producerByIdType(cache.resourceTypes, { sight_day: siteProducerStub });
 
           // prettier-ignore
           // @ts-expect-error extra_blob's content shape is not assignable under site_day
-          void producerByIdType(cache, { site_day: async () => ({ content: { blob: "x" }, directives: freshFor1 }) });
+          void producerByIdType(cache.resourceTypes, { site_day: async () => ({ content: { blob: "x" }, directives: freshFor1 }) });
 
           // prettier-ignore
           // @ts-expect-error `cacheName` was deleted from WrapProducerOptions (names come from the cache + registry now)
-          void wrapProducer(cache, { cacheName: "legacy" }, producerByIdType(cache, { site_day: siteProducerStub }));
+          void wrapProducer(cache, { cacheName: "legacy" }, producerByIdType(cache.resourceTypes, { site_day: siteProducerStub }));
 
           // prettier-ignore
           // @ts-expect-error `isCacheable` was deleted (the producer purity contract, §6.3)
-          void wrapProducer(cache, { isCacheable: () => false }, producerByIdType(cache, { site_day: siteProducerStub }));
+          void wrapProducer(cache, { isCacheable: () => false }, producerByIdType(cache.resourceTypes, { site_day: siteProducerStub }));
         }
       } finally {
         await cache.close();
@@ -337,7 +337,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         const bulk = wrapBulkProducer(
           cache,
           {},
-          bulkProducerByIdType(cache, {
+          bulkProducerByIdType(cache.resourceTypes, {
             site_day: async (reqs) => {
               expectType<Equal<(typeof reqs)[number]["id"], SiteId>>();
               return reqs.map(() => ({

@@ -41,9 +41,11 @@ export {
   default as wrapProducer,
   NoProducerForResourceTypeError,
   producerByIdType,
+  UnroutableIdError,
   type CoveringProducer,
   type ProducersFor,
   type ResourceTypeProducer,
+  type UnroutableIdReason,
   type WrapProducerOptions,
 } from "./utils/wrapProducer.js";
 export {

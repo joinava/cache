@@ -169,7 +169,7 @@ describe("single producer function + by-id-type sugar", () => {
       const getBulk = wrapBulkProducer(
         cache,
         {},
-        bulkProducerByIdType(cache, {
+        bulkProducerByIdType(cache.resourceTypes, {
           story: storyBulk,
           collection: collectionBulk,
         }),
@@ -224,7 +224,7 @@ describe("single producer function + by-id-type sugar", () => {
       const getBulk = wrapBulkProducer(
         cache,
         {},
-        bulkProducerByIdType(cache, {
+        bulkProducerByIdType(cache.resourceTypes, {
           story: storyBulk,
           collection: collectionBulk,
         }),
@@ -267,7 +267,7 @@ describe("single producer function + by-id-type sugar", () => {
       const getBulk = wrapBulkProducer(
         cache,
         {},
-        bulkProducerByIdType(cache, {
+        bulkProducerByIdType(cache.resourceTypes, {
           story: storyBulk,
           collection: collectionBulk,
         }),
@@ -341,7 +341,7 @@ describe("single producer function + by-id-type sugar", () => {
       const getBulk = wrapBulkProducer(
         cache,
         {},
-        bulkProducerByIdType(cache, {
+        bulkProducerByIdType(cache.resourceTypes, {
           story: storyBulk,
           collection: collectionBulk,
         }),
@@ -460,7 +460,7 @@ describe("single producer function + by-id-type sugar", () => {
       const getBulk = wrapBulkProducer(
         cache,
         {},
-        bulkProducerByIdType(cache, {
+        bulkProducerByIdType(cache.resourceTypes, {
           story: storyBulk,
           collection: collectionBulk,
         }),
@@ -506,7 +506,7 @@ describe("single producer function + by-id-type sugar", () => {
       const getStory = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { story: storyProducer }),
+        producerByIdType(cache.resourceTypes, { story: storyProducer }),
       );
       const capture = captureChannels(name);
       try {
@@ -568,7 +568,7 @@ describe("single producer function + by-id-type sugar", () => {
       const getBulk = wrapBulkProducer(
         cache,
         {},
-        bulkProducerByIdType(cache, { story: storyBulk }),
+        bulkProducerByIdType(cache.resourceTypes, { story: storyBulk }),
       );
       try {
         const thrown = await expectRejection(() =>
@@ -691,7 +691,7 @@ describe("single producer function + by-id-type sugar", () => {
       const getRecord = wrapProducer(
         record.cache,
         {},
-        producerByIdType(record.cache, { visits: recordProducer }),
+        producerByIdType(record.cache.resourceTypes, { visits: recordProducer }),
       );
       const bareCapture = captureChannels(bare.name);
       const recordCapture = captureChannels(record.name);

@@ -199,8 +199,9 @@ wrapProducer(cache, opts, async (req) => ({ content, directives }));
 // Multi-type, full mixed batch. The capability this design exists for.
 wrapBulkProducer(cache, opts, async (reqs) => { /* reqs spans all types */ });
 
-// Multi-type, per-type dispatch.
-wrapBulkProducer(cache, opts, bulkProducerByIdType(cache, {
+// Multi-type, per-type dispatch. Takes the REGISTRY, not the cache
+// (§11 of this doc).
+wrapBulkProducer(cache, opts, bulkProducerByIdType(storiesResourceTypes, {
   story: async (reqs) => [...],
   collection: async (reqs) => [...],
 }));
@@ -419,7 +420,8 @@ Mechanical, and favourable in the common case:
 - Sole-type caches — the majority of the monorepo's 53 cache constructions —
   drop the wrapper record: `{ visits: fn }` → `fn`.
 - Multi-type sites wrap once: `{ a: f, b: g }` →
-  `bulkProducerByIdType(cache, { a: f, b: g })`.
+  `bulkProducerByIdType(cache.resourceTypes, { a: f, b: g })` (§11 of this doc;
+  the first argument was `cache` as originally specified).
 
 The monorepo migration staged on `claude/cache-upgrade-validators-e76cd6` must
 be re-run over its 42 wrapper sites. Because the change is to the third
@@ -498,3 +500,103 @@ flipped from a positive assertion to `@ts-expect-error` — `wrapProducer<RT,
 rejection is the missing carrier rather than the function's signature (attaching
 `[coveredTypes]` makes the identical function compile). No runtime code changed;
 both helpers already set the property. The 336-test suite was unaffected.
+
+## 11. Post-implementation amendment: the helpers take the registry, not the cache
+
+**Date:** 2026-07-30, after §10.1. **Supersedes** the first parameter of
+`producerByIdType`/`bulkProducerByIdType` as specified in §3.2 and shown in §3.3
+and §7.
+
+```ts
+producerByIdType(cache.resourceTypes, { story: f, collection: g })
+```
+
+Motivation is the same one that made the hashing producer cache-free
+(`2026-07-30-hashing-producer-builder.md`): it is backwards for the thing that
+*feeds* a cache to need the cache in order to exist. Routing by id type needs
+the registry's `matches` guards and nothing else, so a by-id-type producer is now
+a value in its own right — buildable, drivable and unit-testable before any cache
+exists, and reusable across caches over the same registry.
+
+### 11.1 Why not `Pick<RT, Covered>`
+
+The obvious purer signature — hand the helper only the slice it covers — does
+not work, and the failure is silent:
+
+```ts
+producerByIdType<RT, Covered, …>(covered: Pick<RT, Covered>, producers: ProducersFor<…>)
+```
+
+`Pick<RT, K>` is `{ [P in K]: RT[P] }`: a mapped type keyed by `K` rather than by
+`keyof RT`, so it is not homomorphic and TS's reverse-mapped-type inference does
+not apply. `RT` then has no inference site at all (a constraint like
+`Covered extends ResourceTypeName<RT>` is never one) and silently falls back to
+`ResourceTypes` — whose index signature makes content `unknown`. Probed: `RT`
+came back as `ResourceTypes`, and a `site_day` producer returning `content: 12345`
+was **accepted**. `Covered` still infers from the producers' keys, so the shape
+looks right while every per-type check — content, id narrowing, key-in-registry —
+is vacuous.
+
+Two shapes do work; both were probed with negative controls:
+
+| | arg 1 = the full registry (**chosen**) | arg 1 = the covered slice, as its own registry |
+| --- | --- | --- |
+| `RT` / `Covered` inferred | ✅ / ✅ from the keys | ✅ / all of the slice |
+| content + `req.id` narrowing | ✅ | ✅ |
+| bad content / non-registry key rejected | ✅ | ✅ (at the wrapper) |
+| cross-type supplementals | ✅ retained | ❌ lost — `SpecOf<slice>` is smaller |
+| classification totality | ✅ whole registry | ❌ slice only: an uncovered-type id becomes *unclassifiable* rather than *uncovered*, and an overlap with an uncovered type is invisible |
+| extra machinery | none | the return type must force `[coveredTypes]` **required** (probed: at whole-slice coverage the carrier goes optional, and an optional carrier is not assignable) |
+
+The slice is the more appealing signature and it is the one that loses things, so
+the registry won. A registry is not a cache — it is the literal the caller
+already declared, inert data — so it satisfies the motivation without the
+tradeoffs. It is a parameter rather than a type argument because it is the
+inference site (see `Cache.resourceTypes`' docs for why a bare-`RT` member is
+needed for that at all).
+
+### 11.2 Classification moved to the registry; a cache-free error
+
+`Cache.classify`'s loop moved to `classifyIdAgainst(registryEntries(rt), id)` in
+the registry module, which **returns** an `IdClassification` outcome instead of
+throwing: the registry has no identity to name in an error. `Cache.classify` is
+now a thin renderer of that outcome into its existing cache-named errors — same
+behaviour, one implementation, and the `Object.entries` cast that widened a
+generic mapped type's values now lives in `registryEntries` alone. Both are
+exported, because a hand-written multi-type producer needs exactly this and
+should not have to reach for a cache either.
+
+The helpers throw a new cache-free `UnroutableIdError` carrying `id`,
+`coveredResourceTypes`, and a `detail` discriminated on `reason`
+(`"uncovered" | "unclassifiable" | "ambiguous"`). Each wrapper catches it around
+its producer call and re-throws the equivalent **cache-named** error, so a
+wrapped producer's observable errors are exactly what §5.2 specified;
+`UnroutableIdError` surfaces only on the direct-drive path, which is where the
+cache name genuinely isn't available.
+
+Rejected alternative: moving dispatch into the wrapper (it already classifies
+once, so this would have removed the second classification pass and kept the
+cache name naturally). Declined as premature optimization that would also
+privilege our record shape over a hand-written multi-type producer. The
+double classification §3.4 documents therefore stands.
+
+### 11.3 Reachability of the re-throw
+
+Through a wrapper the re-throw is reachable **only** when the registry the helper
+was built from disagrees with the cache's own — the wrapper classifies first,
+against the cache's registry, and rejects uncovered types before dispatching.
+Structural divergence is a compile error (the producer's `RT` won't match the
+cache's), so what remains is same-shape registries with different guard
+*implementations*. Passing `cache.resourceTypes` rules it out entirely. A runtime
+test builds exactly that divergence to pin the mapping.
+
+### 11.4 Scope
+
+`resolveCoveredSubProducer` (shared by both helpers; returns the sub-producer
+rather than its name, so the membership test and the lookup are one own-property
+read) and `rethrowUnroutableWithCacheName`. Both wrappers' `callProducerAndLog`
+gained the catch. 57 call sites in the tests took `cache.resourceTypes`, as did
+the computing wrappers' two internal uses. Four new runtime tests: cache-free
+single routing plus reuse against a later cache, cache-free bulk batch splitting,
+direct-drive `UnroutableIdError` for the uncovered and unclassifiable reasons, and
+the divergent-registry re-throw. No other contract changed.

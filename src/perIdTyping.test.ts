@@ -252,7 +252,7 @@ describe("Per-id content typing", () => {
         const fetcher = wrapProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          producerByIdType(cache, {
+          producerByIdType(cache.resourceTypes, {
             story: async (req) => ({
               content: {
                 id: req.id,
@@ -299,7 +299,7 @@ describe("Per-id content typing", () => {
         const fetcher = wrapProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          producerByIdType(cache, {
+          producerByIdType(cache.resourceTypes, {
             collection: async (_req) => ({
               content: [story1, story2] satisfies Story[],
               directives: { freshUntilAge: 100 },
@@ -477,7 +477,7 @@ describe("Per-id content typing", () => {
         const fetcher = wrapProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          producerByIdType(cache, {
+          producerByIdType(cache.resourceTypes, {
             story: async (req) => {
               expectType<Equal<typeof req.id, StoryKey>>();
               const parsed = JSON.parse(req.id) as { story: string };

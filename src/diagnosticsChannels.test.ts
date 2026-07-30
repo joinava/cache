@@ -138,7 +138,7 @@ describe("diagnostics channels (§6.5)", () => {
         const getSite = wrapProducer(
           cache,
           {},
-          producerByIdType(cache, { site_day: producer }),
+          producerByIdType(cache.resourceTypes, { site_day: producer }),
         );
         await getSite({ id: "site:typed" });
         await waitUntil(
@@ -512,7 +512,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         const res = await getSite({ id: "site:a" });
@@ -554,7 +554,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         const pending = getSite({ id: "site:a" });
@@ -607,7 +607,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         const pending = getSite({ id: "site:a" });
@@ -664,7 +664,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         const res = await getSite({ id: "site:a" });
@@ -746,7 +746,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         const res = await getSite({ id: "site:a" });
@@ -797,7 +797,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         const res = await getSite({ id: "site:a" });
@@ -842,7 +842,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       const controller = new AbortController();
       try {
@@ -915,7 +915,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       const controller = new AbortController();
       try {
@@ -961,7 +961,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       const controller = new AbortController();
       controller.abort(new Error("pre-aborted"));
@@ -1011,7 +1011,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         const first = getSite({ id: "site:a" });
@@ -1113,7 +1113,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         // Both calls are served stale immediately; the first starts a
@@ -1174,7 +1174,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         const res = await getSite({ id: "site:a" });
@@ -1221,7 +1221,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         { onCacheReadFailure: "throw" },
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         const thrown = await expectRejection(() => getSite({ id: "site:a" }));
@@ -1264,7 +1264,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getBulk = wrapBulkProducer(
         cache,
         { onCacheReadFailure: "throw" },
-        bulkProducerByIdType(cache, { site_day: producer }),
+        bulkProducerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         // The bypass element's invocation launches before (and independently
@@ -1357,7 +1357,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         await getSite({ id: "site:a" });
@@ -1392,7 +1392,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getBulk = wrapBulkProducer(
         cache,
         {},
-        bulkProducerByIdType(cache, {
+        bulkProducerByIdType(cache.resourceTypes, {
           site_day: siteBulk,
           business_slice: bizBulk,
         }),
@@ -1489,7 +1489,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getBulk = wrapBulkProducer(
         cache,
         {},
-        bulkProducerByIdType(cache, { site_day: siteBulk }),
+        bulkProducerByIdType(cache.resourceTypes, { site_day: siteBulk }),
       );
       try {
         const results = await getBulk([{ id: "site:ok" }, { id: "site:bad" }]);
@@ -1561,7 +1561,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getBulk = wrapBulkProducer(
         cache,
         {},
-        bulkProducerByIdType(cache, { site_day: siteBulk }),
+        bulkProducerByIdType(cache.resourceTypes, { site_day: siteBulk }),
       );
       try {
         const thrown = await expectRejection(() =>
@@ -1880,7 +1880,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getSite = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, { site_day: producer }),
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
         await getSite({ id: "site:a" });
@@ -1974,7 +1974,7 @@ describe("diagnostics channels (§6.5)", () => {
       const getVisits = wrapProducer(
         cache,
         {},
-        producerByIdType(cache, {
+        producerByIdType(cache.resourceTypes, {
           site_day: siteProducer,
           business_slice: bizProducer,
         }),

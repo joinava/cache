@@ -19,9 +19,12 @@ import {
   type AnyParamValue,
   type AnyValidators,
   type CacheSpec,
+  classifyIdAgainst,
   type ConsumerDirectives,
   type Logger,
   type ProducerResultResource,
+  type RegistryEntries,
+  registryEntries,
   resourceType,
   type ResourceTypeName,
   type ResourceTypes,
@@ -40,7 +43,7 @@ import {
   normalizeVary,
 } from "./utils/normalization.js";
 import * as entryUtils from "./utils/normalizedProducerResultResourceHelpers.js";
-import { defaultLoggersByComponent } from "./utils/utils.js";
+import { assertUnreachable, defaultLoggersByComponent } from "./utils/utils.js";
 
 /**
  * Thrown when an id matches zero resource types in the cache's registry.
@@ -247,10 +250,7 @@ export default class Cache<
   #closed = false;
   readonly #onGetAfterClose: "throw" | "act-empty";
   readonly #onStoreAfterClose: "throw" | "no-op";
-  readonly #resourceTypeEntries: readonly (readonly [
-    ResourceTypeName<RT>,
-    RT[ResourceTypeName<RT>],
-  ])[];
+  readonly #resourceTypeEntries: RegistryEntries<RT>;
 
   /**
    * Names this cache instance (≈ the backing table) in every diagnostics
@@ -287,12 +287,7 @@ export default class Cache<
     this.#onStoreAfterClose = options.onStoreAfterClose ?? "throw";
     this.name = options.name;
     this.resourceTypes = options.resourceTypes;
-    this.#resourceTypeEntries = Object.entries(
-      options.resourceTypes,
-      // SAFETY: Object.entries widens a generic mapped type's values to
-      // `unknown` (its keys to `string`); the registry's own enumerable
-      // entries are exactly the `[name, spec]` pairs this asserts.
-    ) as [ResourceTypeName<RT>, RT[ResourceTypeName<RT>]][];
+    this.#resourceTypeEntries = registryEntries(options.resourceTypes);
     this.normalizeParamName = options.normalizeParamName ?? ((it) => it);
     this.normalizeParamValue =
       options.normalizeParamValue ??
@@ -341,56 +336,29 @@ export default class Cache<
    * parse error with no cache/id attribution.
    */
   public classify(id: string): ResourceTypeName<RT> {
-    // One pass, allocating nothing on the (overwhelmingly common) single-match
-    // path: `extraMatches` is only built once a SECOND type matches, and
-    // `guardErrors` only once a guard throws. Every guard is still evaluated
-    // before any decision, which is what makes overlap detection total.
-    let firstMatch: ResourceTypeName<RT> | undefined;
-    let extraMatches: ResourceTypeName<RT>[] | undefined;
-    let guardErrors: unknown[] | undefined;
-
-    for (const [name, spec] of this.#resourceTypeEntries) {
-      let matched: boolean;
-      try {
-        matched = spec.matches(id);
-      } catch (error) {
-        (guardErrors ??= []).push(error);
-        continue;
+    const classification = classifyIdAgainst(this.#resourceTypeEntries, id);
+    switch (classification.matched) {
+      case "one": {
+        return classification.name;
       }
-      if (matched) {
-        if (firstMatch === undefined) {
-          firstMatch = name;
-        } else {
-          (extraMatches ??= []).push(name);
-        }
+      case "none": {
+        throw new UnclassifiableIdError({
+          cacheName: this.name,
+          id,
+          cause: classification.cause,
+        });
+      }
+      case "many": {
+        throw new AmbiguousResourceTypeError({
+          cacheName: this.name,
+          id,
+          matchedResourceTypes: classification.names,
+        });
+      }
+      default: {
+        return assertUnreachable(classification);
       }
     }
-
-    if (firstMatch === undefined) {
-      throw new UnclassifiableIdError({
-        cacheName: this.name,
-        id,
-        cause:
-          guardErrors === undefined
-            ? undefined
-            : guardErrors.length === 1
-              ? guardErrors[0]
-              : new AggregateError(
-                  guardErrors,
-                  "one or more registry guards threw while classifying",
-                ),
-      });
-    }
-
-    if (extraMatches !== undefined) {
-      throw new AmbiguousResourceTypeError({
-        cacheName: this.name,
-        id,
-        matchedResourceTypes: [firstMatch, ...extraMatches],
-      });
-    }
-
-    return firstMatch;
   }
 
   /**

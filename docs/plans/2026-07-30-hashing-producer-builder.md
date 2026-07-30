@@ -74,6 +74,11 @@ silently claimed coverage of a variant nothing produced.
 reusable before any cache exists — and the variant map's declared `output` is
 what lets a branch be validated where it is written.
 
+(The same treatment was then applied to `producerByIdType`/`bulkProducerByIdType`,
+which now take the resource-type registry rather than a cache — see §11 of
+[the by-id-type plan](./2026-07-30-single-producer-fn-and-by-id-type-sugar.md),
+including why the tempting `Pick<RT, Covered>` signature is silently vacuous.)
+
 ## Where each check lives
 
 | Check | Where |

@@ -107,3 +107,111 @@ export function idStartsWith<Prefix extends string>(
 ): (id: string) => id is `${Prefix}${string}` {
   return (id): id is `${Prefix}${string}` => id.startsWith(prefix);
 }
+
+/** A registry's enumerable `[name, spec]` pairs; see {@link registryEntries}. */
+export type RegistryEntries<RT extends ResourceTypes> = readonly (readonly [
+  ResourceTypeName<RT>,
+  RT[ResourceTypeName<RT>],
+])[];
+
+/**
+ * The registry's entries, typed. Computed ONCE per holder (a cache, a
+ * by-id-type producer) rather than per classified id.
+ */
+export function registryEntries<RT extends ResourceTypes>(
+  resourceTypes: RT,
+): RegistryEntries<RT> {
+  // SAFETY: Object.entries widens a generic mapped type's values to `unknown`
+  // (its keys to `string`); the registry's own enumerable entries are exactly
+  // the `[name, spec]` pairs this asserts.
+  return Object.entries(resourceTypes) as [
+    ResourceTypeName<RT>,
+    RT[ResourceTypeName<RT>],
+  ][];
+}
+
+/**
+ * The outcome of classifying an id against a registry (see the classification
+ * contract above): exactly one match, or one of the two contract violations.
+ *
+ * Returned rather than thrown because the registry has no identity to put in an
+ * error message. Each holder renders its own: `Cache` throws its cache-named
+ * `UnclassifiableIdError`/`AmbiguousResourceTypeError`, while the by-id-type
+ * producer helpers -- built from a registry, with no cache to name -- throw an
+ * `UnroutableIdError` that the wrappers re-throw with their cache's name.
+ */
+export type IdClassification<RT extends ResourceTypes> =
+  | { readonly matched: "one"; readonly name: ResourceTypeName<RT> }
+  | {
+      readonly matched: "none";
+      /**
+       * The failure(s) of any guards that THREW on this id rather than
+       * returning false (an `AggregateError` when more than one threw),
+       * `undefined` when none did. A throw is a "no" -- guards routinely
+       * reject foreign ids by failing to parse them -- but keeping the cause
+       * is what stops a parse failure from vanishing behind "matched nothing".
+       */
+      readonly cause: unknown;
+    }
+  | {
+      readonly matched: "many";
+      readonly names: readonly ResourceTypeName<RT>[];
+    };
+
+/**
+ * Total classification of an id against a registry: evaluates EVERY entry's
+ * `matches` guard, so an overlap is detected the first time an id hits it
+ * rather than silently resolved by object-key order.
+ *
+ * Exported because a multi-resource-type producer written by hand -- rather
+ * than built with `producerByIdType` -- needs exactly this to route, and needs
+ * it without a `Cache` in scope.
+ */
+export function classifyIdAgainst<RT extends ResourceTypes>(
+  entries: RegistryEntries<RT>,
+  id: string,
+): IdClassification<RT> {
+  // One pass, allocating nothing on the (overwhelmingly common) single-match
+  // path: `extraMatches` is only built once a SECOND type matches, and
+  // `guardErrors` only once a guard throws. Every guard is still evaluated
+  // before any decision, which is what makes overlap detection total.
+  let firstMatch: ResourceTypeName<RT> | undefined;
+  let extraMatches: ResourceTypeName<RT>[] | undefined;
+  let guardErrors: unknown[] | undefined;
+
+  for (const [name, spec] of entries) {
+    let matched: boolean;
+    try {
+      matched = spec.matches(id);
+    } catch (error) {
+      (guardErrors ??= []).push(error);
+      continue;
+    }
+    if (matched) {
+      if (firstMatch === undefined) {
+        firstMatch = name;
+      } else {
+        (extraMatches ??= []).push(name);
+      }
+    }
+  }
+
+  if (firstMatch === undefined) {
+    return {
+      matched: "none",
+      cause:
+        guardErrors === undefined
+          ? undefined
+          : guardErrors.length === 1
+            ? guardErrors[0]
+            : new AggregateError(
+                guardErrors,
+                "one or more registry guards threw while classifying",
+              ),
+    };
+  }
+
+  return extraMatches === undefined
+    ? { matched: "one", name: firstMatch }
+    : { matched: "many", names: [firstMatch, ...extraMatches] };
+}

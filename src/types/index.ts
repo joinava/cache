@@ -4,10 +4,14 @@
 // Those that are meant to be public are re-exported below.
 export type { CacheSpec, ContentForId, SpecForId } from "./00_CacheSpec.js";
 export {
+  classifyIdAgainst,
   idStartsWith,
+  registryEntries,
   resourceType,
   type ContentOfResourceType,
+  type IdClassification,
   type IdOfResourceType,
+  type RegistryEntries,
   type ResourceTypeName,
   type ResourceTypes,
   type ResourceTypeSpec,
