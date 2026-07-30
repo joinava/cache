@@ -3,6 +3,7 @@ import { EventEmitter } from "events";
 import type { InvariantOf, ReadonlyDeep } from "type-fest";
 import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
 import {
+  cacheStoreEntryChannel,
   publishCacheRead,
   publishCacheStoreEntry,
   type CacheReadFound,
@@ -183,12 +184,7 @@ export type CacheOptions<
    * support at least this cache's own resource types, but may support more --
    * see {@link CoveringStore}.
    */
-  store: CoveringStore<
-    SpecOf<RT>,
-    StoreSupportedTypes,
-    Validators,
-    Params
-  >;
+  store: CoveringStore<SpecOf<RT>, StoreSupportedTypes, Validators, Params>;
   /**
    * REQUIRED. Names this cache instance (≈ the backing table) in every
    * diagnostics message. Instance-unique per process by convention;
@@ -730,19 +726,25 @@ export default class Cache<
     );
 
     // The results array is parallel to the input entries (see Store.store).
-    results.forEach(({ relationshipToExistingStoredData }, i) => {
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      const { entry } = entriesWithTimes[i]!;
-      publishCacheStoreEntry({
-        cache: this.name,
+    // One message PER ENTRY -- primary plus every supplemental -- so this is
+    // the package's other O(entries) diagnostics payload, and `publish` would
+    // discard each message without preventing its construction. Hence the
+    // subscriber test around the whole loop rather than inside it.
+    if (cacheStoreEntryChannel.hasSubscribers) {
+      results.forEach(({ relationshipToExistingStoredData }, i) => {
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        resourceType: resourceTypes[i]!,
-        resourceId: entry.id,
-        vary: entry.vary,
-        validators: entry.validators,
-        relationshipToExistingStoredData,
+        const { entry } = entriesWithTimes[i]!;
+        publishCacheStoreEntry({
+          cache: this.name,
+          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+          resourceType: resourceTypes[i]!,
+          resourceId: entry.id,
+          vary: entry.vary,
+          validators: entry.validators,
+          relationshipToExistingStoredData,
+        });
       });
-    });
+    }
 
     return results;
   }

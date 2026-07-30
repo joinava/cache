@@ -174,7 +174,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
   });
 
   describe("a partially-typed function is rejected where a bare producer is expected", () => {
-    it("rejects a subset-typed producer, and rejects the per-resource-type record the wrappers used to take", async () => {
+    it("rejects a subset-typed producer, and rejects a per-resource-type record in the producer position", async () => {
       const cache = makeCache("sp-typing-rejections");
       try {
         if (false as boolean) {
@@ -190,9 +190,9 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
           // @ts-expect-error same for the bulk wrapper
           void wrapBulkProducer(cache, {}, storyOnlyBulkProducer);
 
-          // The record form is no longer a producer: it is the *helper's*
-          // parameter now. (A surviving record overload would be exactly the
-          // compatibility layer this change exists to avoid.)
+          // A record is the *helper's* parameter, not a producer. (A record
+          // overload here would be exactly the compatibility layer this
+          // design avoids.)
           // prettier-ignore
           // @ts-expect-error a per-resource-type record is not a function; records go through producerByIdType
           void wrapProducer(cache, {}, { story: storyOnlyProducer });

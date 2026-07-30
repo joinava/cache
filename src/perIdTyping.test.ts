@@ -19,7 +19,6 @@ import {
 import type { CacheSpec } from "./types/00_CacheSpec.js";
 import wrapProducer from "./utils/wrapProducer.js";
 
-
 /**
  * Sample domain for per-id-typing tests:
  *

@@ -47,6 +47,15 @@ describe("Cache", { concurrency: true }, () => {
     await Promise.all([memoryStore[Symbol.asyncDispose](), postgresCleanup()]);
   });
 
+  /**
+   * Every cache in this suite is the same cache over a different store, so the
+   * store is the only thing worth reading at a construction site. (The registry
+   * is concrete here, so this needs no cast -- see the note in
+   * test/v2AcceptanceHelpers.ts on why a registry-generic factory would.)
+   */
+  const cacheOver = (store: typeof memoryStore | typeof postgresStore) =>
+    new Cache({ store, ...cacheOptions });
+
   // The value returned when there's no cached response at all for the resource
   // (or id + params pair in the event of a cached response with a varyKeys),
   // or if there are some cached responses but they aren't usable in any way
@@ -82,10 +91,7 @@ describe("Cache", { concurrency: true }, () => {
               throw new Error(`Unknown store: ${storeName}`);
           }
           return {
-            cache: new Cache({
-              store: store,
-              ...cacheOptions,
-            }),
+            cache: cacheOver(store),
           };
         });
 
@@ -428,10 +434,7 @@ describe("Cache", { concurrency: true }, () => {
       // acquire locks in one global order and merely wait on each other. This
       // property drives concurrent same-slot batches in forward and reversed
       // input orders; without deterministic ordering it deadlocks reliably.
-      const cache = new Cache({
-        store: postgresStore,
-        ...cacheOptions,
-      });
+      const cache = cacheOver(postgresStore);
 
       await fc.assert(
         fc.asyncProperty(
@@ -479,10 +482,7 @@ describe("Cache", { concurrency: true }, () => {
     });
 
     it("should only keep the entry with the newest birth date when storing multiple entries with same id and vary", async () => {
-      const cache = new Cache({
-        store: postgresStore,
-        ...cacheOptions,
-      });
+      const cache = cacheOver(postgresStore);
       const id = randomURI();
       const vary = emptyVary;
 
@@ -543,10 +543,7 @@ describe("Cache", { concurrency: true }, () => {
 
   describe("events", () => {
     it("should emit an event for each stored entry", async () => {
-      const cache = new Cache({
-        store: memoryStore,
-        ...cacheOptions,
-      });
+      const cache = cacheOver(memoryStore);
       const listener = mock.fn();
       const results = [
         {
@@ -580,10 +577,7 @@ describe("Cache", { concurrency: true }, () => {
   describe("AbortSignal support", () => {
     describe("Cache.get", () => {
       it("should reject immediately with an already-aborted signal", async () => {
-        const cache = new Cache({
-          store: memoryStore,
-          ...cacheOptions,
-        });
+        const cache = cacheOver(memoryStore);
         const controller = new AbortController();
         controller.abort(new Error("pre-aborted"));
 
@@ -611,10 +605,7 @@ describe("Cache", { concurrency: true }, () => {
           return origGet(id, params);
         }) as typeof store.get;
 
-        const cache = new Cache({
-          store: store,
-          ...cacheOptions,
-        });
+        const cache = cacheOver(store);
         const controller = new AbortController();
 
         try {
@@ -631,10 +622,7 @@ describe("Cache", { concurrency: true }, () => {
       });
 
       it("should still return results normally when signal is not aborted", async () => {
-        const cache = new Cache({
-          store: memoryStore,
-          ...cacheOptions,
-        });
+        const cache = cacheOver(memoryStore);
         const id = randomURI();
         await cache.store([
           {
@@ -656,10 +644,7 @@ describe("Cache", { concurrency: true }, () => {
 
     describe("Cache.getMany", () => {
       it("should reject immediately with an already-aborted signal", async () => {
-        const cache = new Cache({
-          store: memoryStore,
-          ...cacheOptions,
-        });
+        const cache = cacheOver(memoryStore);
         const controller = new AbortController();
         controller.abort(new Error("pre-aborted-many"));
 
@@ -685,10 +670,7 @@ describe("Cache", { concurrency: true }, () => {
           return origGetMany(requests);
         }) as typeof store.getMany;
 
-        const cache = new Cache({
-          store: store,
-          ...cacheOptions,
-        });
+        const cache = cacheOver(store);
         const controller = new AbortController();
 
         try {
@@ -705,10 +687,7 @@ describe("Cache", { concurrency: true }, () => {
       });
 
       it("should still return results normally when signal is not aborted", async () => {
-        const cache = new Cache({
-          store: memoryStore,
-          ...cacheOptions,
-        });
+        const cache = cacheOver(memoryStore);
         const ids = [randomURI(), randomURI()];
         await cache.store(
           ids.map((id, i) => ({

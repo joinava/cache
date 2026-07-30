@@ -50,7 +50,6 @@ import wrapProducer from "./utils/wrapProducer.js";
  * running.
  */
 
-
 type SiteId = `site:${string}`;
 type BizId = `biz:${string}`;
 type ExtraId = `extra:${string}`;
@@ -639,7 +638,9 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           // A conforming hashInput compiles...
           void wrapComputingProducer({
             cache: zendeskCache,
-            hashInput: (input: { b: string }): `zendesk-ticket-schema:${string}` =>
+            hashInput: (input: {
+              b: string;
+            }): `zendesk-ticket-schema:${string}` =>
               `zendesk-ticket-schema:${input.b}`,
             produce: async () => ({
               content: { fields: [] as string[] },
@@ -708,7 +709,10 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         name: uniqueCacheName("typing-computing-built"),
         resourceTypes: registry,
       });
-      const compute = wrapComputingProducer({ cache, hashingProducer: producer });
+      const compute = wrapComputingProducer({
+        cache,
+        hashingProducer: producer,
+      });
 
       // The wrapped function accepts the union of the covered branches' inputs,
       // and returns the union of their contents.

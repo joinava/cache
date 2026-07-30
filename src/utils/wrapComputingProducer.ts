@@ -284,10 +284,12 @@ const builtBranches = Symbol("hashingProducer.branches");
  * its per-branch types in `Meta` so the wrapper can verify each branch against
  * the registry it will actually run over.
  *
- * The `Meta` phantoms are OPTIONAL and never written at runtime: `build()` only
- * has real branches to hand over, and making them required would force a cast
- * there. The types are still fully present, because `build()`'s declared return
- * type is what carries them.
+ * `meta` is a phantom: it appears only in the type and is never written at
+ * runtime (`build()` has only real branches to hand over). It has to appear
+ * somewhere, though -- without it `Meta` would be an unused parameter, and any
+ * two `HashingProducer`s would be mutually assignable, which is what would let
+ * a bulk producer satisfy the single wrapper's parameter. The types are fully
+ * present regardless, because `build()`'s declared return type carries them.
  */
 export type HashingProducer<Meta extends HashingProducerMeta> = {
   readonly [builtBranches]: {
@@ -402,14 +404,27 @@ function makeBuilderChain(
     when: (
       matchesInput: (input: never) => boolean,
       branch: { name: string; hashInput: unknown; produce: unknown },
-    ) =>
-      makeBuilderChain(builderName, [
+    ) => {
+      if (entries.some(([name]) => name === branch.name)) {
+        // `Name extends Exclude<keyof V & string, Covered>` already rejects a
+        // repeat name, so reaching here took a cast -- and the duplicate would
+        // not merely be shadowed: dispatch takes the FIRST matching branch
+        // while the per-resource-type producer table keeps the LAST, so the
+        // second branch's content would be stored under the first branch's
+        // minted id.
+        throw new Error(
+          `${builderName}: \`.when\` was called twice for branch ` +
+            `"${branch.name}"; each variant may be covered only once.`,
+        );
+      }
+      return makeBuilderChain(builderName, [
         ...entries,
         [
           branch.name,
           { ...branch, matchesInput } as unknown as LooseBranch<never>,
         ],
-      ]),
+      ]);
+    },
     build: () => {
       if (entries.length === 0) {
         throw new Error(
@@ -545,11 +560,15 @@ export function bulkHashingProducerByInputType<
 /**
  * The internal, type-erased branch shape all wrapper plumbing dispatches
  * through. SAFETY: a branch is only invoked for inputs its own `matchesInput`
- * accepted (or, single-coverage, any input — matching the declared `Input`),
- * and each minted id is classified against the branch's own resource type
- * before use.
+ * accepted, and each minted id is classified against the branch's own resource
+ * type before use.
  */
 type LooseBranch<Input> = {
+  /**
+   * Absent only for the single-producer form's sole entry, which has no guard to
+   * dispatch on and so matches every input (see {@link findBranch}). Every
+   * `.when` branch carries one.
+   */
   matchesInput?: (input: unknown) => boolean;
   hashInput: (input: Input) => string | Promise<string>;
   produce: (
@@ -560,26 +579,61 @@ type LooseBranch<Input> = {
 };
 
 /**
- * Picks the branch for an input: with one covered type, that branch; with
- * several, the first (in record key order) whose `matchesInput` accepts the
- * input. Throws if no covered branch matches.
+ * Picks the branch for an input: the first (in `.when` order) whose
+ * `matchesInput` accepts it. Throws if none does.
+ *
+ * A branch with NO guard matches unconditionally, which is exactly -- and only
+ * -- the single-producer form's one nameless entry (see
+ * {@link branchEntriesFor}; every `.when` branch has a guard). Selecting on the
+ * guard's ABSENCE rather than on `branchEntries.length === 1` is load-bearing:
+ * a hashing producer built from a single `.when` is also one entry, and its
+ * guard must still be consulted, or an input that guard rejects would be
+ * produced and stored anyway under that branch's minted id.
+ *
+ * A guard that THROWS counts as a non-match, exactly as a registry guard does
+ * in {@link Cache.classify}: guards routinely reject foreign inputs by failing
+ * to read them (a property access on the wrong shape, a parse that throws), so
+ * one branch's failure to recognize an input must not stop a later branch from
+ * claiming it. When nothing matches, the guard error(s) surface as the routing
+ * error's `cause` rather than leaking with no wrapper/input attribution. Unlike
+ * `classify` this stays first-match-wins -- `.when` order is the documented
+ * tie-break, since two variants may accept the same input type -- so guards
+ * after the match are never evaluated and cannot contribute an error.
  */
 function findBranch<B extends { matchesInput?: (input: unknown) => boolean }>(
   wrapperName: string,
   branchEntries: readonly (readonly [string | undefined, B])[],
   input: unknown,
 ): readonly [string | undefined, B] {
-  if (branchEntries.length === 1) {
-    // Non-null assertion is safe: length was just checked.
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    return branchEntries[0]!;
-  }
-  const entry = branchEntries.find(([, branch]) =>
-    branch.matchesInput?.(input),
-  );
+  // Allocates nothing unless a guard actually throws (as in `classify`).
+  let guardErrors: unknown[] | undefined;
+
+  const entry = branchEntries.find(([, branch]) => {
+    if (branch.matchesInput === undefined) {
+      return true;
+    }
+    try {
+      return branch.matchesInput(input);
+    } catch (error) {
+      (guardErrors ??= []).push(error);
+      return false;
+    }
+  });
+
   if (entry === undefined) {
     throw new Error(
       `${wrapperName}: no branch matched the input ${JSON.stringify(input)}`,
+      guardErrors === undefined
+        ? undefined
+        : {
+            cause:
+              guardErrors.length === 1
+                ? guardErrors[0]
+                : new AggregateError(
+                    guardErrors,
+                    "one or more branch guards threw while routing an input",
+                  ),
+          },
     );
   }
   return entry;
@@ -692,6 +746,9 @@ function checkMintedId(
   branchName: string | undefined,
   id: string,
 ): void {
+  const forBranch =
+    branchName === undefined ? "" : ` for branch "${branchName}"`;
+
   let classified: string;
   try {
     classified = cache.classify(id);
@@ -704,7 +761,7 @@ function checkMintedId(
       throw new UnclassifiableIdError({
         cacheName: cache.name,
         id,
-        message: `Cache "${cache.name}": \`hashInput\`${branchName === undefined ? "" : ` for branch "${branchName}"`} minted id ${JSON.stringify(id)}, which matches no resource type in the registry`,
+        message: `Cache "${cache.name}": \`hashInput\`${forBranch} minted id ${JSON.stringify(id)}, which matches no resource type in the registry`,
         cause: e.cause,
       });
     }
@@ -713,7 +770,7 @@ function checkMintedId(
         cacheName: cache.name,
         id,
         matchedResourceTypes: e.matchedResourceTypes,
-        message: `Cache "${cache.name}": \`hashInput\`${branchName === undefined ? "" : ` for branch "${branchName}"`} minted id ${JSON.stringify(id)}, which matches more than one resource type in the registry (${e.matchedResourceTypes.join(", ")})`,
+        message: `Cache "${cache.name}": \`hashInput\`${forBranch} minted id ${JSON.stringify(id)}, which matches more than one resource type in the registry (${e.matchedResourceTypes.join(", ")})`,
       });
     }
     throw e;
@@ -754,9 +811,7 @@ function branchEntriesFor(
         "`hashingProducerByInputType`), or both `hashInput` and `produce`.",
     );
   }
-  return [
-    [undefined, { hashInput, produce } as unknown as LooseBranch<never>],
-  ];
+  return [[undefined, { hashInput, produce } as unknown as LooseBranch<never>]];
 }
 
 /**
@@ -1035,8 +1090,7 @@ export function wrapBulkComputingProducer(
   // Each branch's internal bulk producer recovers its inputs from the registry
   // (synchronously, while still registered) and hands the batch to `produce`.
   const internalProducerFor =
-    (branch: LooseBulkBranch) =>
-    (reqs: readonly { readonly id: string }[]) => {
+    (branch: LooseBulkBranch) => (reqs: readonly { readonly id: string }[]) => {
       const inputs = reqs.map((req) =>
         registry.get(req.id),
       ) as readonly ReadonlyDeep<never>[];

@@ -57,6 +57,12 @@ export const ACCEPT_ANY_REGISTRY = {
 } satisfies ResourceTypes;
 
 /**
+ * Producer directives that keep an entry fresh for the whole of a test run, so
+ * a fixture's freshness is never the thing that makes it flake.
+ */
+export const freshFor100 = { freshUntilAge: 100 };
+
+/**
  * Compile-time type equality. The two-function-wrapper form is what makes it
  * INVARIANT, so `Equal<string, any>` and `Equal<{a: string}, {a?: string}>`
  * are both `false` -- a mutually-assignable check would pass those and make
@@ -234,15 +240,13 @@ export async function waitUntil(
   }
 }
 
-export const byResourceId = (
-  a: { resourceId: string },
-  b: { resourceId: string },
-): number => (a.resourceId < b.resourceId ? -1 : a.resourceId > b.resourceId ? 1 : 0);
-
 /** Copies then sorts by `resourceId`, for order-insensitive message asserts. */
 export const sortByResourceId = <T extends { resourceId: string }>(
   messages: readonly T[],
-): T[] => [...messages].sort(byResourceId);
+): T[] =>
+  [...messages].sort((a, b) =>
+    a.resourceId < b.resourceId ? -1 : a.resourceId > b.resourceId ? 1 : 0,
+  );
 
 /**
  * Asserts a fetch message on the producer-path branch of the discriminated

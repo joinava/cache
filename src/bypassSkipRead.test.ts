@@ -9,43 +9,34 @@ import {
   memoryStoreFor,
   uniqueCacheName,
   waitUntil,
+  TWO_TYPE_REGISTRY,
+  freshFor100,
 } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
   bulkProducerByIdType,
-  idStartsWith,
   producerByIdType,
-  resourceType,
   wrapBulkProducer,
-  type ResourceTypes,
 } from "./index.js";
 import wrapProducer from "./utils/wrapProducer.js";
 
 /**
- * §6.3's bypass-skip-read behavior change: when the consumer's directives
- * request a cache bypass (`maxAge: 0`), the wrappers no longer read the cache
- * at all. `maxAge: 0` structurally guarantees producer contact (closing the
+ * §6.3's bypass-skip-read contract: when the consumer's directives request a
+ * cache bypass (`maxAge: 0`), the wrappers do not read the cache at all. `maxAge: 0` structurally guarantees producer contact (closing the
  * age<=0 / skewed-clock hole), bypass requests never appear on the read
  * channel, the result is still stored, and bypass requests collapse only
  * with identical-directive peers.
  */
 
-const registry = {
-  site_day: resourceType<string>()({ matches: idStartsWith("site:") }),
-  business_slice: resourceType<string>()({ matches: idStartsWith("biz:") }),
-} satisfies ResourceTypes;
-
-const freshFor100 = { freshUntilAge: 100 };
-
 const makeHarness = (label: string) => {
   const name = uniqueCacheName(label);
-  const store = memoryStoreFor(registry);
+  const store = memoryStoreFor(TWO_TYPE_REGISTRY);
   const getSpy = mock.method(store, "get");
   const getManySpy = mock.method(store, "getMany");
   const cache = new Cache({
     store: store,
     name,
-    resourceTypes: registry,
+    resourceTypes: TWO_TYPE_REGISTRY,
   });
   return { name, store, getSpy, getManySpy, cache };
 };
@@ -165,9 +156,10 @@ describe("bypass requests skip the cache read (§6.3)", () => {
     const { name, cache } = makeHarness("bypass-clock-skew");
     // A pod whose clock runs ahead stamped this entry's `date` 60s in the
     // reader's future, so its age here is NEGATIVE. Age is compared to the
-    // maxAge ceiling with strict `>`, so in 1.6.0 (which read the cache
-    // before honoring the bypass) this entry satisfied `maxAge: 0` and was
-    // served as a "hit" against the consumer's evident intent.
+    // maxAge ceiling with strict `>`, so any code path that reads the cache
+    // before honoring the bypass would count this entry as satisfying
+    // `maxAge: 0` and serve it as a "hit" against the consumer's evident
+    // intent. Skipping the read is what makes that unrepresentable.
     await cache.store([
       {
         id: "site:skewed",

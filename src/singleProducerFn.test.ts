@@ -6,16 +6,16 @@ import {
   captureChannels,
   expectProduceMessage,
   expectProducerPathFetch,
-  expectRejection,
   memoryStoreFor,
   uniqueCacheName,
   waitUntil,
+  ACCEPT_ANY_REGISTRY,
+  freshFor100,
 } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
   bulkProducerByIdType,
   idStartsWith,
-  NoProducerForResourceTypeError,
   producerByIdType,
   resourceType,
   wrapBulkProducer,
@@ -46,15 +46,6 @@ const registry = {
     matches: idStartsWith("collection:"),
   }),
 } satisfies ResourceTypes;
-
-/** The sole-type shape the majority of the monorepo's caches use (§7). */
-const soleRegistry = {
-  visits: resourceType<string>()({
-    matches: (id): id is string => typeof id === "string",
-  }),
-} satisfies ResourceTypes;
-
-const freshFor100 = { freshUntilAge: 100 };
 
 /**
  * The parameter type every bulk producer below is written against: wider than
@@ -94,9 +85,9 @@ const makeHarness = (label: string) => {
 const makeSoleHarness = (label: string) => {
   const name = uniqueCacheName(label);
   const cache = new Cache({
-    store: memoryStoreFor(soleRegistry),
+    store: memoryStoreFor(ACCEPT_ANY_REGISTRY),
     name,
-    resourceTypes: soleRegistry,
+    resourceTypes: ACCEPT_ANY_REGISTRY,
   });
   return { name, cache };
 };
@@ -320,62 +311,12 @@ describe("single producer function + by-id-type sugar", () => {
       }
     });
 
-    it("an UNDER-RETURNING sub-producer is not padded: the wrapper's under-return check fails the whole invocation", async () => {
-      const { name, cache } = makeHarness("sp-sugar-under-return");
-      const capture = captureChannels(name);
-      // Returns one result for its two requests. §3.4 forbids the sugar from
-      // substituting an Error for the missing slot: that would turn a producer
-      // contract violation into a per-request failure and hide the bug.
-      const storyBulk = mock.fn(async (reqs: BulkReqs) =>
-        reqs.slice(0, 1).map((req) => ({
-          content: `story-${req.id}`,
-          directives: freshFor100,
-        })),
-      );
-      const collectionBulk = mock.fn(async (reqs: BulkReqs) =>
-        reqs.map((req) => ({
-          content: `collection-${req.id}`,
-          directives: freshFor100,
-        })),
-      );
-      const getBulk = wrapBulkProducer(
-        cache,
-        {},
-        bulkProducerByIdType(cache, {
-          story: storyBulk,
-          collection: collectionBulk,
-        }),
-      );
-      try {
-        const thrown = await expectRejection(() =>
-          getBulk([
-            { id: "story:1" },
-            { id: "collection:1" },
-            { id: "story:2" },
-          ]),
-        );
-        expect(thrown).to.be.instanceOf(Error);
-        // Not a coverage failure -- both types are covered here.
-        expect(thrown).to.not.be.instanceOf(NoProducerForResourceTypeError);
-
-        // The collection sub-producer still ran; the failure is the story
-        // slice's contract violation, and it poisons the WHOLE invocation.
-        expect(collectionBulk.mock.callCount()).to.equal(1);
-        expect(capture.produce).to.have.lengthOf(1);
-        expect(capture.produce[0]?.outcome).to.equal("error");
-        expect(capture.storeEntry).to.deep.equal([]);
-
-        // Every element settles producer-error exactly once, including the
-        // healthy collection element: nothing was delivered.
-        expect(capture.fetch).to.have.lengthOf(3);
-        capture.fetch.forEach((message) => {
-          expect(message.disposition).to.equal("producer-error");
-        });
-      } finally {
-        capture.stop();
-        await cache.close();
-      }
-    });
+    // The contrasting case -- an UNDER-RETURNING sub-producer, which the sugar
+    // must leave absent rather than padding with Errors, failing the whole
+    // invocation including its healthy sibling type's element -- is pinned in
+    // diagnosticsChannels.test.ts, where the full channel consequences
+    // (produce outcome, nothing stored, per-element dispositions) are asserted
+    // alongside it.
   });
 
   describe("4. diagnostics: one produce message per invocation, spanning types (§5.3)", () => {
@@ -442,234 +383,10 @@ describe("single producer function + by-id-type sugar", () => {
       }
     });
 
-    it("bulkProducerByIdType's split is invisible to the produce channel: still ONE message spanning both types", async () => {
-      const { name, cache } = makeHarness("sp-produce-sugar");
-      const capture = captureChannels(name);
-      const storyBulk = mock.fn(async (reqs: BulkReqs) =>
-        reqs.map((req) => ({
-          content: `story-${req.id}`,
-          directives: freshFor100,
-        })),
-      );
-      const collectionBulk = mock.fn(async (reqs: BulkReqs) =>
-        reqs.map((req) => ({
-          content: `collection-${req.id}`,
-          directives: freshFor100,
-        })),
-      );
-      const getBulk = wrapBulkProducer(
-        cache,
-        {},
-        bulkProducerByIdType(cache, {
-          story: storyBulk,
-          collection: collectionBulk,
-        }),
-      );
-      try {
-        await getBulk([{ id: "story:1" }, { id: "collection:1" }]);
-
-        // §5.1: one invocation per trigger group, not per (group x type). Two
-        // messages here would mean the split moved back into the wrapper.
-        expect(capture.produce).to.have.lengthOf(1);
-        expectProduceMessage(capture.produce[0], {
-          cache: name,
-          trigger: "miss",
-          requests: [
-            { resourceType: "story", resourceId: "story:1" },
-            { resourceType: "collection", resourceId: "collection:1" },
-          ],
-          collapsedCallerCount: 1,
-          outcome: "success",
-        });
-      } finally {
-        capture.stop();
-        await cache.close();
-      }
-    });
-  });
-
-  describe("5. runtime coverage and its timing (§5.2)", () => {
-    it("wrapProducer + producerByIdType over a strict subset: an uncovered id throws NoProducerForResourceTypeError BEFORE any store read", async () => {
-      const name = uniqueCacheName("sp-coverage-single");
-      const store = memoryStoreFor(registry);
-      const getSpy = mock.method(store, "get");
-      const getManySpy = mock.method(store, "getMany");
-      const cache = new Cache({
-        store: store,
-        name,
-        resourceTypes: registry,
-      });
-      const storyProducer = mock.fn(async (req: { readonly id: string }) => ({
-        content: `story-${req.id}`,
-        directives: freshFor100,
-      }));
-      const getStory = wrapProducer(
-        cache,
-        {},
-        producerByIdType(cache, { story: storyProducer }),
-      );
-      const capture = captureChannels(name);
-      try {
-        // Reachable only via a cast: the wrapped function's request type bans
-        // uncovered ids (see singleProducerTyping.test.ts).
-        const thrown = await expectRejection(() =>
-          getStory({ id: "collection:1" as string as `story:${string}` }),
-        );
-        if (!(thrown instanceof NoProducerForResourceTypeError)) {
-          throw new Error(
-            `expected NoProducerForResourceTypeError, got: ${String(thrown)}`,
-          );
-        }
-        expect(thrown.cacheName).to.equal(name);
-        expect(thrown.resourceType).to.equal("collection");
-        // The covered set now comes from the producer's coverage carrier
-        // instead of a record's keys; it must still name the covered types.
-        expect([...thrown.coveredResourceTypes]).to.deep.equal(["story"]);
-        expect(thrown.id).to.equal("collection:1");
-
-        // ...and the TIMING must be preserved: nothing may touch the store,
-        // because serving a hit for an uncovered type would smuggle the
-        // serve-if-present contract back in through the cast.
-        expect(getSpy.mock.callCount()).to.equal(0);
-        expect(getManySpy.mock.callCount()).to.equal(0);
-        expect(storyProducer.mock.callCount()).to.equal(0);
-        // A pre-dispatch validation failure emits no channel messages.
-        expect(capture.read).to.deep.equal([]);
-        expect(capture.fetch).to.deep.equal([]);
-        expect(capture.produce).to.deep.equal([]);
-
-        // Positive control for the spies: a covered request DOES read.
-        await getStory({ id: "story:1" });
-        expect(
-          getSpy.mock.callCount() + getManySpy.mock.callCount(),
-        ).to.be.at.least(1);
-      } finally {
-        capture.stop();
-        await cache.close();
-      }
-    });
-
-    it("wrapBulkProducer + bulkProducerByIdType over a strict subset: an uncovered element rejects the call before any store read", async () => {
-      const name = uniqueCacheName("sp-coverage-bulk");
-      const store = memoryStoreFor(registry);
-      const getSpy = mock.method(store, "get");
-      const getManySpy = mock.method(store, "getMany");
-      const cache = new Cache({
-        store: store,
-        name,
-        resourceTypes: registry,
-      });
-      const storyBulk = mock.fn(async (reqs: BulkReqs) =>
-        reqs.map((req) => ({
-          content: `story-${req.id}`,
-          directives: freshFor100,
-        })),
-      );
-      const getBulk = wrapBulkProducer(
-        cache,
-        {},
-        bulkProducerByIdType(cache, { story: storyBulk }),
-      );
-      try {
-        const thrown = await expectRejection(() =>
-          getBulk([
-            { id: "story:ok" },
-            { id: "collection:1" as string as `story:${string}` },
-          ]),
-        );
-        if (!(thrown instanceof NoProducerForResourceTypeError)) {
-          throw new Error(
-            `expected NoProducerForResourceTypeError, got: ${String(thrown)}`,
-          );
-        }
-        expect(thrown.cacheName).to.equal(name);
-        expect(thrown.resourceType).to.equal("collection");
-        expect([...thrown.coveredResourceTypes]).to.deep.equal(["story"]);
-        expect(thrown.id).to.equal("collection:1");
-
-        // The whole call is rejected before any read: the covered element is
-        // not quietly served either.
-        expect(getSpy.mock.callCount()).to.equal(0);
-        expect(getManySpy.mock.callCount()).to.equal(0);
-        expect(storyBulk.mock.callCount()).to.equal(0);
-
-        // Positive control.
-        await getBulk([{ id: "story:ok" }]);
-        expect(
-          getSpy.mock.callCount() + getManySpy.mock.callCount(),
-        ).to.be.at.least(1);
-      } finally {
-        await cache.close();
-      }
-    });
-
-    it("companion (wrapProducer): through a BARE function no id of any registry type can produce that error", async () => {
-      const { cache } = makeHarness("sp-coverage-bare-single");
-      // Keyed by resource-type name, and cross-checked against the registry
-      // below, so a registry that grows a type this fixture doesn't exercise
-      // fails rather than silently narrowing the claim.
-      const sampleIdByType = {
-        story: "story:1",
-        collection: "collection:1",
-      } as const satisfies Record<keyof typeof registry, string>;
-      const producer = mock.fn(async (req: { readonly id: string }) => ({
-        content: `produced-${req.id}`,
-        directives: freshFor100,
-      }));
-      const getAny = wrapProducer(cache, {}, producer);
-      try {
-        expect(Object.keys(sampleIdByType).toSorted()).to.deep.equal(
-          Object.keys(registry).toSorted(),
-        );
-        Object.entries(sampleIdByType).forEach(([typeName, id]) => {
-          expect(cache.classify(id)).to.equal(typeName);
-        });
-
-        // A bare function's coverage is the whole registry BY CONSTRUCTION
-        // (its parameter type must accept every registry id), so the error is
-        // unreachable -- these must all resolve.
-        const entries = await Promise.all(
-          Object.values(sampleIdByType).map((id) => getAny({ id })),
-        );
-        expect(entries.map((entry) => entry.content)).to.deep.equal([
-          "produced-story:1",
-          "produced-collection:1",
-        ]);
-        expect(producer.mock.callCount()).to.equal(2);
-      } finally {
-        await cache.close();
-      }
-    });
-
-    it("companion (wrapBulkProducer): a bare function covers every registry type in one mixed batch", async () => {
-      const { cache } = makeHarness("sp-coverage-bare-bulk");
-      const sampleIdByType = {
-        story: "story:bulk",
-        collection: "collection:bulk",
-      } as const satisfies Record<keyof typeof registry, string>;
-      const bulkProducer = mock.fn(async (reqs: BulkReqs) =>
-        reqs.map((req) => ({
-          content: `produced-${req.id}`,
-          directives: freshFor100,
-        })),
-      );
-      const getBulk = wrapBulkProducer(cache, {}, bulkProducer);
-      try {
-        expect(Object.keys(sampleIdByType).toSorted()).to.deep.equal(
-          Object.keys(registry).toSorted(),
-        );
-        const results = await getBulk([
-          { id: sampleIdByType.story },
-          { id: sampleIdByType.collection },
-        ]);
-        expect(contentsOf(results)).to.deep.equal([
-          "produced-story:bulk",
-          "produced-collection:bulk",
-        ]);
-      } finally {
-        await cache.close();
-      }
-    });
+    // The same claim for the by-id-type SUGAR -- that its split is invisible to
+    // the produce channel, still one message spanning both types -- is pinned in
+    // diagnosticsChannels.test.ts, together with the type-purity of each
+    // sub-producer's batch that makes the claim interesting.
   });
 
   describe("7. sole-type regression: the common case is unaffected (§7 migration)", () => {

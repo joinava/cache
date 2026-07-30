@@ -15,6 +15,7 @@ import {
 } from "../index.js";
 import type { AnyParams, AnyValidators, Entry } from "../types/index.js";
 import {
+  bulkHashingProducerByInputType,
   hashingProducerByInputType,
   wrapBulkComputingProducer,
   wrapComputingProducer,
@@ -23,11 +24,7 @@ import {
 
 // Computing wrappers take ONE options bag: `{ cache, hashInput, produce }` for a
 // single resource type, or `{ cache, hashingProducer }` for several. A hashing
-// producer is built by `hashingProducerByInputType` with no cache at all. with per-covered-type
-// { matchesInput, hashInput, produce } branches. All computing-wrapper calls
-// below pass explicit type arguments, because `Input` inference degrades to
-// `unknown` when branch functions are pre-typed references rather than inline
-// literals.
+// producer is built by `hashingProducerByInputType` with no cache at all.
 const testRegistry = {
   computed: resourceType<string>()({
     matches: (id): id is string => typeof id === "string",
@@ -72,7 +69,11 @@ describe("wrapComputingProducer", () => {
     const producer = mock.fn(async (input: Input) =>
       result(input.text.toUpperCase()),
     );
-    const compute = wrapComputingProducer({ cache, hashInput, produce: producer });
+    const compute = wrapComputingProducer({
+      cache,
+      hashInput,
+      produce: producer,
+    });
 
     const first = await compute({ text: "hello" });
     expect(first.content).to.eq("HELLO");
@@ -87,7 +88,11 @@ describe("wrapComputingProducer", () => {
     const producer = mock.fn(async (input: Input) =>
       result(input.text.toUpperCase()),
     );
-    const compute = wrapComputingProducer({ cache, hashInput, produce: producer });
+    const compute = wrapComputingProducer({
+      cache,
+      hashInput,
+      produce: producer,
+    });
 
     await compute({ text: "a" });
     await compute({ text: "b" });
@@ -144,7 +149,11 @@ describe("wrapComputingProducer", () => {
             ]
           : [],
     }));
-    const compute = wrapComputingProducer({ cache, hashInput, produce: producer });
+    const compute = wrapComputingProducer({
+      cache,
+      hashInput,
+      produce: producer,
+    });
 
     await compute({ text: "primary" });
     expect(producer.mock.callCount()).to.eq(1);
@@ -158,7 +167,11 @@ describe("wrapComputingProducer", () => {
     const producer = mock.fn(async (input: Input) =>
       result(input.text.toUpperCase()),
     );
-    const compute = wrapComputingProducer({ cache, hashInput, produce: producer });
+    const compute = wrapComputingProducer({
+      cache,
+      hashInput,
+      produce: producer,
+    });
 
     expect((await compute({ text: "hello" })).content).to.eq("HELLO");
     expect((await compute({ text: "hello" })).content).to.eq("HELLO");
@@ -195,7 +208,11 @@ describe("wrapBulkComputingProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text.toUpperCase())),
     );
-    const compute = wrapBulkComputingProducer({ cache, hashInput, produce: producer });
+    const compute = wrapBulkComputingProducer({
+      cache,
+      hashInput,
+      produce: producer,
+    });
 
     await compute([{ text: "b" }]);
     expect(producer.mock.callCount()).to.eq(1);
@@ -218,7 +235,11 @@ describe("wrapBulkComputingProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text)),
     );
-    const compute = wrapBulkComputingProducer({ cache, hashInput, produce: producer });
+    const compute = wrapBulkComputingProducer({
+      cache,
+      hashInput,
+      produce: producer,
+    });
 
     const results = await compute([]);
     expect(results).to.deep.eq([]);
@@ -229,7 +250,11 @@ describe("wrapBulkComputingProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text.toUpperCase())),
     );
-    const compute = wrapBulkComputingProducer({ cache, hashInput, produce: producer });
+    const compute = wrapBulkComputingProducer({
+      cache,
+      hashInput,
+      produce: producer,
+    });
 
     await compute([{ text: "a" }, { text: "b" }]);
     const results = await compute([{ text: "a" }, { text: "b" }]);
@@ -241,7 +266,11 @@ describe("wrapBulkComputingProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text.toUpperCase())),
     );
-    const compute = wrapBulkComputingProducer({ cache, hashInput, produce: producer });
+    const compute = wrapBulkComputingProducer({
+      cache,
+      hashInput,
+      produce: producer,
+    });
 
     expect(
       (await compute([{ text: "a" }, { text: "b" }])).map(contentOf),
@@ -287,6 +316,18 @@ const isCollection = (input: VInput): input is CollInput =>
 type StoryVariants = {
   story: ComputingVariant<StoryInput, Story>;
   collection: ComputingVariant<CollInput, Story[]>;
+};
+
+/** `contentOf` for the two-variant registry, whose content types differ. */
+const storyContentOf = (
+  entry:
+    | Entry<SpecOf<typeof storiesRegistry>, AnyValidators, AnyParams>
+    | Error,
+): Story | Story[] => {
+  if (entry instanceof Error) {
+    throw entry;
+  }
+  return entry.content;
 };
 
 describe("computing wrappers with heterogeneous branches", () => {
@@ -352,10 +393,12 @@ describe("computing wrappers with heterogeneous branches", () => {
         },
       ],
     }));
-    const collectionProduce = mock.fn(async (input: ReadonlyDeep<CollInput>) => ({
-      content: input.ids.map(makeStory),
-      directives: { freshUntilAge: 100 },
-    }));
+    const collectionProduce = mock.fn(
+      async (input: ReadonlyDeep<CollInput>) => ({
+        content: input.ids.map(makeStory),
+        directives: { freshUntilAge: 100 },
+      }),
+    );
 
     const compute = wrapComputingProducer({
       cache,
@@ -562,6 +605,390 @@ describe("computing wrappers with heterogeneous branches", () => {
     );
     expect(thrown).to.be.instanceOf(Error);
     expect((thrown as Error).message).to.match(/no branch matched/);
+  });
+
+  // --- the bulk wrapper over several branches, end to end ---
+  //
+  // The bulk path routes and hashes per ITEM and then delegates to one
+  // per-resource-type bulk producer each, so batch partitioning, result
+  // alignment, per-item errors, and cross-branch supplementals are all its own
+  // wiring rather than the single wrapper's.
+
+  it("bulk: partitions a mixed batch by matchesInput, aligns results to input order, and recomputes only misses", async () => {
+    const storyProduce = mock.fn(
+      async (inputs: readonly ReadonlyDeep<StoryInput>[]) =>
+        inputs.map((input) => ({
+          content: makeStory(input.id),
+          directives: { freshUntilAge: 100 },
+        })),
+    );
+    const collectionProduce = mock.fn(
+      async (inputs: readonly ReadonlyDeep<CollInput>[]) =>
+        inputs.map((input) => ({
+          content: input.ids.map(makeStory),
+          directives: { freshUntilAge: 100 },
+        })),
+    );
+    const computeAll = wrapBulkComputingProducer({
+      cache,
+      hashingProducer: bulkHashingProducerByInputType<StoryVariants>()
+        .when(isStory, {
+          name: "story",
+          hashInput: (input) => `extract:story:${input.id}` as const,
+          produce: storyProduce,
+        })
+        .when(isCollection, {
+          name: "collection",
+          hashInput: (input) =>
+            `extract:collection:${input.ids.join(",")}` as const,
+          produce: collectionProduce,
+        })
+        .build(),
+    });
+
+    const first = await computeAll([
+      { kind: "story", id: "1" },
+      { kind: "collection", ids: ["1", "2"] },
+      { kind: "story", id: "2" },
+    ]);
+    expect(first.map(storyContentOf)).to.deep.eq([
+      makeStory("1"),
+      [makeStory("1"), makeStory("2")],
+      makeStory("2"),
+    ]);
+    // Each branch's producer saw ONLY its own inputs, in batch.
+    expect(storyProduce.mock.calls[0]?.arguments[0]).to.deep.eq([
+      { kind: "story", id: "1" },
+      { kind: "story", id: "2" },
+    ]);
+    expect(collectionProduce.mock.calls[0]?.arguments[0]).to.deep.eq([
+      { kind: "collection", ids: ["1", "2"] },
+    ]);
+
+    // Only the new story is a miss: the story branch is re-invoked with just
+    // it, and the collection branch is not invoked at all.
+    const second = await computeAll([
+      { kind: "collection", ids: ["1", "2"] },
+      { kind: "story", id: "3" },
+      { kind: "story", id: "1" },
+    ]);
+    expect(second.map(storyContentOf)).to.deep.eq([
+      [makeStory("1"), makeStory("2")],
+      makeStory("3"),
+      makeStory("1"),
+    ]);
+    expect(storyProduce.mock.calls[1]?.arguments[0]).to.deep.eq([
+      { kind: "story", id: "3" },
+    ]);
+    expect(storyProduce.mock.callCount()).to.eq(2);
+    expect(collectionProduce.mock.callCount()).to.eq(1);
+  });
+
+  it("bulk: one branch's per-input error is returned in place, leaving the batch's other items served", async () => {
+    const boom = new Error("story 2 could not be extracted");
+    const computeAll = wrapBulkComputingProducer({
+      cache,
+      hashingProducer: bulkHashingProducerByInputType<StoryVariants>()
+        .when(isStory, {
+          name: "story",
+          hashInput: (input) => `extract:story:${input.id}` as const,
+          produce: async (inputs) =>
+            inputs.map((input) =>
+              input.id === "2"
+                ? boom
+                : {
+                    content: makeStory(input.id),
+                    directives: { freshUntilAge: 100 },
+                  },
+            ),
+        })
+        .when(isCollection, {
+          name: "collection",
+          hashInput: (input) =>
+            `extract:collection:${input.ids.join(",")}` as const,
+          produce: async (inputs) =>
+            inputs.map((input) => ({
+              content: input.ids.map(makeStory),
+              directives: { freshUntilAge: 100 },
+            })),
+        })
+        .build(),
+    });
+
+    const results = await computeAll([
+      { kind: "story", id: "1" },
+      { kind: "story", id: "2" },
+      { kind: "collection", ids: ["5"] },
+    ]);
+    expect(results[1]).to.eq(boom);
+    expect(storyContentOf(results[0]!)).to.deep.eq(makeStory("1"));
+    expect(storyContentOf(results[2]!)).to.deep.eq([makeStory("5")]);
+  });
+
+  it("bulk: input-keyed supplementals route across branches and hash with the routed branch's hashInput", async () => {
+    const collectionProduce = mock.fn(
+      async (inputs: readonly ReadonlyDeep<CollInput>[]) =>
+        inputs.map((input) => ({
+          content: input.ids.map(makeStory),
+          directives: { freshUntilAge: 100 },
+        })),
+    );
+    const computeAll = wrapBulkComputingProducer({
+      cache,
+      hashingProducer: bulkHashingProducerByInputType<StoryVariants>()
+        .when(isStory, {
+          name: "story",
+          hashInput: (input) => `extract:story:${input.id}` as const,
+          produce: async (inputs) =>
+            inputs.map((input) => ({
+              content: makeStory(input.id),
+              directives: { freshUntilAge: 100 },
+              supplementalResources: [
+                {
+                  input: {
+                    kind: "collection",
+                    ids: [input.id],
+                  } satisfies CollInput,
+                  content: [makeStory(input.id)],
+                  directives: { freshUntilAge: 100 },
+                },
+              ],
+            })),
+        })
+        .when(isCollection, {
+          name: "collection",
+          hashInput: (input) =>
+            `extract:collection:${input.ids.join(",")}` as const,
+          produce: collectionProduce,
+        })
+        .build(),
+    });
+
+    await computeAll([{ kind: "story", id: "7" }]);
+
+    const coll = await computeAll([{ kind: "collection", ids: ["7"] }]);
+    expect(coll.map(storyContentOf)).to.deep.eq([[makeStory("7")]]);
+    expect(collectionProduce.mock.callCount()).to.eq(0);
+  });
+
+  // --- a SOLE `.when` branch is still guarded ---
+  //
+  // A guard may prove a subtype of its variant's declared input, so `compute`
+  // accepts every `StoryInput` while this guard accepts only some of them --
+  // no cast needed to reach an input the sole branch rejects.
+  const isIdentifiedStory = (input: VInput): input is StoryInput =>
+    input.kind === "story" && input.id !== "";
+
+  const soleStoryBranch = (
+    produce: (input: ReadonlyDeep<StoryInput>) => Promise<{
+      content: Story;
+      directives: { freshUntilAge: number };
+    }>,
+  ) =>
+    hashingProducerByInputType<StoryVariants>()
+      .when(isIdentifiedStory, {
+        name: "story",
+        hashInput: (input) => `extract:story:${input.id}` as const,
+        produce,
+      })
+      .build();
+
+  it("a sole `.when` branch still consults its guard: a rejected input is never produced", async () => {
+    const produce = mock.fn(async (input: ReadonlyDeep<StoryInput>) => ({
+      content: makeStory(input.id),
+      directives: { freshUntilAge: 100 },
+    }));
+    const compute = wrapComputingProducer({
+      cache,
+      hashingProducer: soleStoryBranch(produce),
+    });
+
+    expect((await compute({ kind: "story", id: "1" })).content).to.deep.eq(
+      makeStory("1"),
+    );
+
+    const thrown = await expectRejection(() =>
+      compute({ kind: "story", id: "" }),
+    );
+    expect(thrown).to.be.instanceOf(Error);
+    expect((thrown as Error).message).to.match(/no branch matched/);
+    // Still 1: the rejected input was not produced, so nothing was stored
+    // under the id its `hashInput` would have minted.
+    expect(produce.mock.callCount()).to.eq(1);
+  });
+
+  it("a sole `.when` branch is guarded in the bulk wrapper too", async () => {
+    const produce = mock.fn(
+      async (inputs: readonly ReadonlyDeep<StoryInput>[]) =>
+        inputs.map((input) => ({
+          content: makeStory(input.id),
+          directives: { freshUntilAge: 100 },
+        })),
+    );
+    const computeAll = wrapBulkComputingProducer({
+      cache,
+      hashingProducer: bulkHashingProducerByInputType<StoryVariants>()
+        .when(isIdentifiedStory, {
+          name: "story",
+          hashInput: (input) => `extract:story:${input.id}` as const,
+          produce,
+        })
+        .build(),
+    });
+
+    const thrown = await expectRejection(() =>
+      computeAll([
+        { kind: "story", id: "1" },
+        { kind: "story", id: "" },
+      ]),
+    );
+    expect(thrown).to.be.instanceOf(Error);
+    expect((thrown as Error).message).to.match(/no branch matched/);
+    // The whole batch is rejected during routing, before any production.
+    expect(produce.mock.callCount()).to.eq(0);
+  });
+
+  it("a supplemental the sole `.when` branch's guard rejects also rejects the invocation", async () => {
+    const compute = wrapComputingProducer({
+      cache,
+      hashingProducer: soleStoryBranch(async (input) => ({
+        content: makeStory(input.id),
+        directives: { freshUntilAge: 100 },
+        supplementalResources: [
+          {
+            // Its own branch's guard rejects this, so there is no branch whose
+            // `hashInput` may mint its id -- the sole branch's must not be
+            // borrowed for it.
+            input: { kind: "story", id: "" } satisfies StoryInput,
+            content: makeStory("x"),
+            directives: { freshUntilAge: 100 },
+          },
+        ],
+      })),
+    });
+
+    const thrown = await expectRejection(() =>
+      compute({ kind: "story", id: "9" }),
+    );
+    expect(thrown).to.be.instanceOf(Error);
+    expect((thrown as Error).message).to.match(/no branch matched/);
+  });
+
+  it("a guard that THROWS counts as a non-match, so a later branch still claims the input", async () => {
+    const collectionProduce = mock.fn(
+      async (input: ReadonlyDeep<CollInput>) => ({
+        content: input.ids.map(makeStory),
+        directives: { freshUntilAge: 100 },
+      }),
+    );
+    const compute = wrapComputingProducer({
+      cache,
+      hashingProducer: hashingProducerByInputType<StoryVariants>()
+        // Reads a field only story inputs have, the way a guard that parses or
+        // dereferences its input does; on a collection input that throws.
+        .when(
+          (input): input is StoryInput =>
+            (input as StoryInput).id.startsWith("s"),
+          {
+            name: "story",
+            hashInput: (input) => `extract:story:${input.id}` as const,
+            produce: async (input) => ({
+              content: makeStory(input.id),
+              directives: { freshUntilAge: 100 },
+            }),
+          },
+        )
+        .when(isCollection, {
+          name: "collection",
+          hashInput: (input) =>
+            `extract:collection:${input.ids.join(",")}` as const,
+          produce: collectionProduce,
+        })
+        .build(),
+    });
+
+    const coll = await compute({ kind: "collection", ids: ["1"] });
+    expect(coll.content).to.deep.eq([makeStory("1")]);
+    expect(collectionProduce.mock.callCount()).to.eq(1);
+  });
+
+  it("when NO branch matches, a guard's throw surfaces as the routing error's cause", async () => {
+    const guardError = new Error("could not read the input");
+    const compute = wrapComputingProducer({
+      cache,
+      hashingProducer: hashingProducerByInputType<StoryVariants>()
+        .when(
+          (input): input is StoryInput => {
+            void input;
+            throw guardError;
+          },
+          {
+            name: "story",
+            hashInput: (input) => `extract:story:${input.id}` as const,
+            produce: async (input) => ({
+              content: makeStory(input.id),
+              directives: { freshUntilAge: 100 },
+            }),
+          },
+        )
+        .build(),
+    });
+
+    const thrown = await expectRejection(() =>
+      compute({ kind: "story", id: "1" }),
+    );
+    expect((thrown as Error).message).to.match(/no branch matched/);
+    // Without this the guard's own failure is the one thing a caller cannot
+    // recover from the routing error.
+    expect((thrown as Error).cause).to.eq(guardError);
+  });
+
+  it("several throwing guards aggregate into the routing error's cause", async () => {
+    const storyGuardError = new Error("story guard could not read the input");
+    const collectionGuardError = new Error("collection guard likewise");
+    const compute = wrapComputingProducer({
+      cache,
+      hashingProducer: hashingProducerByInputType<StoryVariants>()
+        .when(
+          (input): input is StoryInput => {
+            void input;
+            throw storyGuardError;
+          },
+          {
+            name: "story",
+            hashInput: (input) => `extract:story:${input.id}` as const,
+            produce: async (input) => ({
+              content: makeStory(input.id),
+              directives: { freshUntilAge: 100 },
+            }),
+          },
+        )
+        .when(
+          (input): input is CollInput => {
+            void input;
+            throw collectionGuardError;
+          },
+          {
+            name: "collection",
+            hashInput: (input) =>
+              `extract:collection:${input.ids.join(",")}` as const,
+            produce: async (input) => ({
+              content: input.ids.map(makeStory),
+              directives: { freshUntilAge: 100 },
+            }),
+          },
+        )
+        .build(),
+    });
+
+    const thrown = await expectRejection(() =>
+      compute({ kind: "story", id: "1" }),
+    );
+    expect((thrown as Error).cause).to.be.instanceOf(AggregateError);
+    expect(((thrown as Error).cause as AggregateError).errors).to.deep.eq([
+      storyGuardError,
+      collectionGuardError,
+    ]);
   });
 
   it("a supplemental whose routed branch mints a misclassified id rejects loudly, naming that branch", async () => {

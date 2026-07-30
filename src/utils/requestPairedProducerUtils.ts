@@ -109,15 +109,12 @@ export function primaryNormalizedResultResourceFromRequestPairedProducerResult<
     SpecForId<Spec, Id>,
     Validators,
     Params
-  >(
-    normalizeVaryBound,
-    {
-      ...primaryResource,
-      id: reqId,
-    } as unknown as ProducerResultResource<
-      SpecForId<Spec, Id>,
-      Validators,
-      Params
-    >,
-  );
+  >(normalizeVaryBound, {
+    ...primaryResource,
+    id: reqId,
+  } as unknown as ProducerResultResource<
+    SpecForId<Spec, Id>,
+    Validators,
+    Params
+  >);
 }

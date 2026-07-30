@@ -66,6 +66,21 @@ export type TypedChannel<T, Name extends string> = Omit<
 };
 
 /**
+ * Opens a channel under a typed view of its messages. Curried so the message
+ * type is explicit while `Name` is inferred from the argument -- the same shape
+ * as `resourceType<Content>()({ … })` elsewhere in the package.
+ *
+ * The one place the package asserts a message type onto `diagnostics_channel`'s
+ * untyped {@link Channel}: `channel()` is the only way to obtain one, so the
+ * assertion is unavoidable, and having it here once means adding a channel
+ * cannot add another.
+ */
+const typedChannel =
+  <T>() =>
+  <Name extends string>(name: Name): TypedChannel<T, Name> =>
+    diagnosticsChannel.channel(name) as TypedChannel<T, Name>;
+
+/**
  * Name of the diagnostics channel that fires once per cache lookup --
  * i.e., once per `Cache.get()` call and once per request in a
  * `Cache.getMany()` call -- reporting what the lookup found.
@@ -133,9 +148,9 @@ export type CacheReadMessage = Attribution & { resourceId: string } & (
  * `cacheReadChannel.subscribe((message) => …)` for an inferred
  * `CacheReadMessage`, or by name via `CACHE_READ_CHANNEL_NAME`.
  */
-export const cacheReadChannel = diagnosticsChannel.channel(
+export const cacheReadChannel = typedChannel<CacheReadMessage>()(
   CACHE_READ_CHANNEL_NAME,
-) as TypedChannel<CacheReadMessage, typeof CACHE_READ_CHANNEL_NAME>;
+);
 
 /**
  * Publishes a read event to the diagnostics channel.
@@ -224,9 +239,9 @@ export type CacheFetchMessage = Attribution & {
  * `cacheFetchChannel.subscribe((message) => …)` for an inferred
  * `CacheFetchMessage`, or by name via `CACHE_FETCH_CHANNEL_NAME`.
  */
-export const cacheFetchChannel = diagnosticsChannel.channel(
+export const cacheFetchChannel = typedChannel<CacheFetchMessage>()(
   CACHE_FETCH_CHANNEL_NAME,
-) as TypedChannel<CacheFetchMessage, typeof CACHE_FETCH_CHANNEL_NAME>;
+);
 
 /**
  * Publishes a fetch event to the diagnostics channel.
@@ -287,9 +302,9 @@ export type CacheProduceMessage = {
  * `cacheProduceChannel.subscribe((message) => …)` for an inferred
  * `CacheProduceMessage`, or by name via `CACHE_PRODUCE_CHANNEL_NAME`.
  */
-export const cacheProduceChannel = diagnosticsChannel.channel(
+export const cacheProduceChannel = typedChannel<CacheProduceMessage>()(
   CACHE_PRODUCE_CHANNEL_NAME,
-) as TypedChannel<CacheProduceMessage, typeof CACHE_PRODUCE_CHANNEL_NAME>;
+);
 
 /**
  * Publishes a produce event to the diagnostics channel.
@@ -341,9 +356,9 @@ export type CacheStoreEntryMessage = Attribution & {
  * `cacheStoreEntryChannel.subscribe((message) => …)` for an inferred
  * `CacheStoreEntryMessage`, or by name via `CACHE_STORE_ENTRY_CHANNEL_NAME`.
  */
-export const cacheStoreEntryChannel = diagnosticsChannel.channel(
+export const cacheStoreEntryChannel = typedChannel<CacheStoreEntryMessage>()(
   CACHE_STORE_ENTRY_CHANNEL_NAME,
-) as TypedChannel<CacheStoreEntryMessage, typeof CACHE_STORE_ENTRY_CHANNEL_NAME>;
+);
 
 /**
  * Publishes a store-entry event to the diagnostics channel.

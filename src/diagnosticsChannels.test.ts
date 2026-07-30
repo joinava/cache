@@ -25,6 +25,7 @@ import {
   cacheStoreEntryChannel,
   bulkProducerByIdType,
   idStartsWith,
+  NoProducerForResourceTypeError,
   producerByIdType,
   resourceType,
   wrapBulkProducer,
@@ -1550,7 +1551,9 @@ describe("diagnostics channels (§6.5)", () => {
       // under-returning sub-producer's slots ABSENT rather than substituting
       // Errors, so the wrapper's check below fires exactly as it does for a
       // bare producer instead of the violation degrading into per-request
-      // failures.
+      // failures. A second, HEALTHY sub-producer is wired up alongside to pin
+      // the blast radius: one slice's contract violation fails the whole
+      // invocation, so the other type's element is not delivered either.
       const siteBulk = mock.fn(
         async (reqs: readonly { readonly id: string }[]) =>
           reqs.slice(0, 1).map((req) => ({
@@ -1558,27 +1561,42 @@ describe("diagnostics channels (§6.5)", () => {
             directives: freshFor100,
           })),
       );
+      const bizBulk = mock.fn(
+        async (reqs: readonly { readonly id: string }[]) =>
+          reqs.map((req) => ({
+            content: `ok-${req.id}`,
+            directives: freshFor100,
+          })),
+      );
       const getBulk = wrapBulkProducer(
         cache,
         {},
-        bulkProducerByIdType(cache, { site_day: siteBulk }),
+        bulkProducerByIdType(cache, {
+          site_day: siteBulk,
+          business_slice: bizBulk,
+        }),
       );
       try {
         const thrown = await expectRejection(() =>
-          getBulk([{ id: "site:a" }, { id: "site:b" }, { id: "site:c" }]),
+          getBulk([{ id: "site:a" }, { id: "biz:b" }, { id: "site:c" }]),
         );
         expect(thrown).to.be.instanceOf(Error);
         expect((thrown as Error).message).to.match(
-          /returned results for only 1 of 3 requests/,
+          /returned results for only 2 of 3 requests/,
         );
+        // Not a coverage failure: both types have a producer here.
+        expect(thrown).to.not.be.instanceOf(NoProducerForResourceTypeError);
+        // The healthy slice still ran; it just doesn't get to deliver.
+        expect(bizBulk.mock.callCount()).to.equal(1);
 
-        // One fetch per request element, every one producer-error.
+        // One fetch per request element, every one producer-error -- including
+        // the healthy type's.
         expect(capture.fetch).to.have.lengthOf(3);
         sortByResourceId(capture.fetch).forEach((message, i) => {
           expectProducerPathFetch(message, {
             cache: name,
-            resourceType: "site_day",
-            resourceId: ["site:a", "site:b", "site:c"][i] ?? "",
+            resourceType: ["business_slice", "site_day", "site_day"][i] ?? "",
+            resourceId: ["biz:b", "site:a", "site:c"][i] ?? "",
             disposition: "producer-error",
             directivesImpliedBypass: false,
             collapsed: false,

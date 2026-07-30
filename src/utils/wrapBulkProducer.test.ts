@@ -40,17 +40,22 @@ const testCacheOptions = {
   resourceTypes: testRegistry,
 };
 
+// Every test needs the store as well as the cache (to seed entries and to spy
+// on writes), so the factory hands back both. Instantiated at a concrete
+// registry, which is why it needs no cast -- see the note in
+// test/v2AcceptanceHelpers.ts.
+const makeTestStoreAndCache = () => {
+  const store = new MemoryStore<SpecOf<typeof testRegistry>>();
+  return { store, cache: new Cache({ store, ...testCacheOptions }) };
+};
+
 describe("wrapBulkProducer", () => {
   describe("one request given", () => {
     describe("the requested id is usable in the cache", () => {
       it("should return the result from the cache, mimicking wrapProducer", async () => {
         await fc.assert(
           fc.asyncProperty(UsableEntryArb, async ({ entry, consumerDirs }) => {
-            const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-            const cache = new Cache({
-              store: store,
-              ...testCacheOptions,
-            });
+            const { store, cache } = makeTestStoreAndCache();
             try {
               await store.store([{ entry, maxStoreForSeconds: 100 }]);
 
@@ -99,13 +104,8 @@ describe("wrapBulkProducer", () => {
           fc.asyncProperty(
             UsableWhileRevalidateEntryArb,
             async ({ entry, consumerDirs }) => {
-              const store = new MemoryStore<SpecOf<typeof testRegistry>>();
+              const { store, cache } = makeTestStoreAndCache();
               const storeMock = mock.method(store, "store");
-
-              const cache = new Cache({
-                store: store,
-                ...testCacheOptions,
-              });
               try {
                 await store.store([{ entry, maxStoreForSeconds: 100 }]);
                 storeMock.mock.resetCalls();
@@ -152,13 +152,8 @@ describe("wrapBulkProducer", () => {
           fc.asyncProperty(
             UsableIfErrorEntryArb,
             async ({ entry, consumerDirs }) => {
-              const store = new MemoryStore<SpecOf<typeof testRegistry>>();
+              const { store, cache } = makeTestStoreAndCache();
               const storeMock = mock.method(store, "store");
-
-              const cache = new Cache({
-                store,
-                ...testCacheOptions,
-              });
               try {
                 await store.store([{ entry, maxStoreForSeconds: 100 }]);
                 storeMock.mock.resetCalls();
@@ -213,11 +208,7 @@ describe("wrapBulkProducer", () => {
             UnusableEntryArb,
             fc.boolean(),
             async ({ entry, consumerDirs }, shouldStoreEntry) => {
-              const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-              const cache = new Cache({
-                store: store,
-                ...testCacheOptions,
-              });
+              const { store, cache } = makeTestStoreAndCache();
               try {
                 if (shouldStoreEntry) {
                   await store.store([{ entry, maxStoreForSeconds: 100 }]);
@@ -311,11 +302,7 @@ describe("wrapBulkProducer", () => {
             Unusable,
             Unstored,
           }) => {
-            const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-            const cache = new Cache({
-              store: store,
-              ...testCacheOptions,
-            });
+            const { store, cache } = makeTestStoreAndCache();
             try {
               const unstoredIds = Unstored.map(({ entry }) => entry.id);
 
@@ -492,11 +479,7 @@ describe("wrapBulkProducer", () => {
           ),
           async (cachedRequests, uncachedRequests) => {
             // Create fresh cache and pre-populate with some entries
-            const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-            const cache = new Cache({
-              store: store,
-              ...testCacheOptions,
-            });
+            const { cache } = makeTestStoreAndCache();
 
             const genericError = new Error("test");
 
@@ -558,11 +541,7 @@ describe("wrapBulkProducer", () => {
 
     describe("onCacheReadFailure option", () => {
       it("should throw when cache read fails and onCacheReadFailure is 'throw'", async () => {
-        const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-        const cache = new Cache({
-          store: store,
-          ...testCacheOptions,
-        });
+        const { cache } = makeTestStoreAndCache();
 
         // Mock cache.getMany to simulate a cache read failure
         const originalGetMany = cache.getMany.bind(cache);
@@ -598,11 +577,7 @@ describe("wrapBulkProducer", () => {
       });
 
       it("should fall back to producer when cache read fails and onCacheReadFailure is 'call-producer'", async () => {
-        const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-        const cache = new Cache({
-          store: store,
-          ...testCacheOptions,
-        });
+        const { cache } = makeTestStoreAndCache();
 
         // Mock cache.getMany to simulate a cache read failure
         const originalGetMany = cache.getMany.bind(cache);
@@ -649,11 +624,7 @@ describe("wrapBulkProducer", () => {
 
     describe("collapseOverlappingRequestsTime option", () => {
       it("should collapse identical overlapping requests within time window", async () => {
-        const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-        const cache = new Cache({
-          store: store,
-          ...testCacheOptions,
-        });
+        const { cache } = makeTestStoreAndCache();
 
         try {
           let callCount = 0;
@@ -702,11 +673,7 @@ describe("wrapBulkProducer", () => {
       });
 
       it("should not collapse requests outside the time window", async () => {
-        const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-        const cache = new Cache({
-          store: store,
-          ...testCacheOptions,
-        });
+        const { cache } = makeTestStoreAndCache();
 
         try {
           let callCount = 0;
@@ -749,11 +716,7 @@ describe("wrapBulkProducer", () => {
 
     describe("supplemental resources", () => {
       it("should cache supplemental resources returned by the bulk producer", async () => {
-        const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-        const cache = new Cache({
-          store: store,
-          ...testCacheOptions,
-        });
+        const { cache } = makeTestStoreAndCache();
 
         try {
           const bulkProducer = mock.fn(
@@ -816,11 +779,7 @@ describe("wrapBulkProducer", () => {
 
   describe("AbortSignal support", () => {
     it("should reject immediately with an already-aborted signal", async () => {
-      const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-      const cache = new Cache({
-        store: store,
-        ...testCacheOptions,
-      });
+      const { cache } = makeTestStoreAndCache();
 
       try {
         const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
@@ -850,11 +809,7 @@ describe("wrapBulkProducer", () => {
     });
 
     it("should reject if signal fires before the cache read completes (i.e., before producer is called)", async () => {
-      const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-      const cache = new Cache({
-        store: store,
-        ...testCacheOptions,
-      });
+      const { cache } = makeTestStoreAndCache();
 
       let cacheGetManyResolve: (v: any) => void;
       const originalGetMany = cache.getMany.bind(cache);
@@ -901,11 +856,7 @@ describe("wrapBulkProducer", () => {
     });
 
     it("should reject when signal is aborted mid-producer, but still store the producer's result", async () => {
-      const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-      const cache = new Cache({
-        store: store,
-        ...testCacheOptions,
-      });
+      const { cache } = makeTestStoreAndCache();
 
       try {
         const controller = new AbortController();
@@ -958,11 +909,7 @@ describe("wrapBulkProducer", () => {
     });
 
     it("should still return cache hits even when signal is provided", async () => {
-      const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-      const cache = new Cache({
-        store: store,
-        ...testCacheOptions,
-      });
+      const { cache } = makeTestStoreAndCache();
 
       try {
         const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
@@ -998,11 +945,7 @@ describe("wrapBulkProducer", () => {
     });
 
     it("should not treat abort errors as cache read failures eligible for fallback", async () => {
-      const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-      const cache = new Cache({
-        store: store,
-        ...testCacheOptions,
-      });
+      const { cache } = makeTestStoreAndCache();
 
       // Make cache.getMany throw an abort error
       const originalGetMany = cache.getMany.bind(cache);

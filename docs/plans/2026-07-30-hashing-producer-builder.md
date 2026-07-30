@@ -128,7 +128,15 @@ cache, keeps it with no ceremony.
 - Two runtime throws that became structural: a matcher-less branch in a
   multi-branch producer is unconstructible (`.when` takes the guard
   positionally), and "matchesInput is ignored on a single-coverage wrapper" has
-  no subject (the two-function form has no guard).
+  no subject (the two-function form has no guard, and a one-`.when` builder's
+  guard is consulted like any other).
+
+One runtime throw was ADDED, for the same reason the minted-id check exists —
+the type-level rejection is bypassable by a cast: a duplicate `.when` for one
+variant throws at build time. Silently keeping one would not merely shadow the
+other, since dispatch takes the first matching branch while the
+per-resource-type producer table keeps the last: the second branch's content
+would be stored under the first branch's minted id.
 - 30 `input as StoryInput`-style casts across the tests, and the explicit type
   arguments at ~16 call sites.
 
@@ -153,7 +161,7 @@ cache, keeps it with no ceremony.
 
 ## Verification
 
-`tsc -b`, `oxlint`, and the full suite: 347 tests, 346 passing, 1 pre-existing
+`tsc -b`, `oxlint`, and the full suite: 351 tests, 350 passing, 1 pre-existing
 docker-dependent skip. New compile fixtures cover per-branch input narrowing,
 wrong output for a variant, a duplicate `.when`, a guard for an undeclared
 input, minting outside the variant's resource type, a variant name outside the
@@ -161,3 +169,13 @@ registry, correlated input-keyed supplementals, and the id-keyed spec
 requirement. Runtime pins carried over unchanged, including the branch-named
 mint-check errors, which now come from a one-`.when` builder rather than a
 one-key record.
+
+Routing has its own runtime pins, since each is reachable only by a cast or by a
+guard the compiler cannot check: a sole `.when` branch's guard is consulted (in
+both wrappers, and for supplementals) rather than being skipped because it is
+the only branch; a guard that throws counts as a non-match so a later branch can
+still claim the input, with the guard error(s) surfacing as the routing error's
+`cause` when nothing matches; and a duplicate `.when` throws at build time. The
+multi-branch BULK path is covered end to end too -- batch partitioning by
+`matchesInput`, result alignment to the caller's order, per-item errors, and
+cross-branch input-keyed supplementals.

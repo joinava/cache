@@ -135,10 +135,7 @@ export type CollapsedInvocation = {
  * the general-purpose utility.
  * @internal
  */
-export function collapsedInvocationTaskCreator<
-  Args extends unknown[],
-  Result,
->(
+export function collapsedInvocationTaskCreator<Args extends unknown[], Result>(
   taskCreator: (
     invocation: CollapsedInvocation,
     ...args: Args

@@ -4,6 +4,8 @@ import { describe, it, mock } from "node:test";
 import {
   captureChannels,
   expectRejection,
+  expectSyncThrow,
+  freshFor100,
   memoryStoreFor,
   uniqueCacheName,
 } from "../test/v2AcceptanceHelpers.js";
@@ -46,8 +48,6 @@ const threeTypeRegistry = {
   extra_blob: resourceType<string>()({ matches: idStartsWith("extra:") }),
 } satisfies ResourceTypes;
 
-const freshFor100 = { freshUntilAge: 100 };
-
 describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
   describe("construction throws on a keyless producers/branches record", () => {
     it("producerByIdType: an empty record throws at construction time, while a bare producer function is a legal whole-registry producer", async () => {
@@ -60,8 +60,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         // The keyless-record check moved out of the wrapper and into the
         // helper, which is now its only meaningful home.
         expect(() => producerByIdType(cache, {})).to.throw();
-        // ...and the form that used to throw here is the primitive now: a bare
-        // function covers the whole registry, and its wrapper is callable.
+        // ...while a bare function is the primitive: it covers the whole
+        // registry, so its wrapper is callable rather than throwing.
         const bare = wrapProducer(cache, {}, async () => ({
           content: "x",
           directives: freshFor100,
@@ -119,6 +119,65 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       } finally {
         await cache.close();
       }
+    });
+
+    it("hashing producer builders: a duplicate `.when` for one variant throws, rather than splitting dispatch from storage", () => {
+      type Variants = { site_day: ComputingVariant<{ key: string }, string> };
+      const isSiteDay = (input: { key: string }): input is { key: string } =>
+        typeof input.key === "string";
+      const hashInput = (input: { key: string }) => `site:${input.key}`;
+      const singleBranch = {
+        name: "site_day" as const,
+        hashInput,
+        produce: async (input: { readonly key: string }) => ({
+          content: `computed-${input.key}`,
+          directives: freshFor100,
+        }),
+      };
+      const bulkBranch = {
+        name: "site_day" as const,
+        hashInput,
+        produce: async (inputs: readonly { readonly key: string }[]) =>
+          inputs.map((input) => ({
+            content: `computed-${input.key}`,
+            directives: freshFor100,
+          })),
+      };
+
+      // `Name extends Exclude<keyof V & string, Covered>` rejects the repeat
+      // where it is written (a compile fixture pins that), so re-typing the
+      // builder as a fresh one is what lets the duplicate be reached at all.
+      // Without the runtime guard it would not merely be shadowed: dispatch
+      // takes the first matching branch while the per-resource-type producer
+      // table keeps the last, storing the second branch's content under the
+      // first branch's minted id.
+      const duplicated = expectSyncThrow(() =>
+        (
+          hashingProducerByInputType<Variants>().when(
+            isSiteDay,
+            singleBranch,
+          ) as unknown as ReturnType<
+            typeof hashingProducerByInputType<Variants>
+          >
+        ).when(isSiteDay, singleBranch),
+      );
+      expect((duplicated as Error).message).to.match(
+        /hashingProducerByInputType: `\.when` was called twice for branch "site_day"/,
+      );
+
+      const bulkDuplicated = expectSyncThrow(() =>
+        (
+          bulkHashingProducerByInputType<Variants>().when(
+            isSiteDay,
+            bulkBranch,
+          ) as unknown as ReturnType<
+            typeof bulkHashingProducerByInputType<Variants>
+          >
+        ).when(isSiteDay, bulkBranch),
+      );
+      expect((bulkDuplicated as Error).message).to.match(
+        /bulkHashingProducerByInputType: `\.when` was called twice for branch "site_day"/,
+      );
     });
   });
 
@@ -229,9 +288,17 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         expect(thrown.resourceType).to.equal("business_slice");
         expect([...thrown.coveredResourceTypes]).to.deep.equal(["site_day"]);
         expect(thrown.id).to.equal("biz:1");
+        // The whole call is rejected before any read: the covered element is
+        // not quietly served either.
         expect(getSpy.mock.callCount()).to.equal(0);
         expect(getManySpy.mock.callCount()).to.equal(0);
         expect(siteBulk.mock.callCount()).to.equal(0);
+
+        // Positive control for the spies: an all-covered batch does read.
+        await getBulk([{ id: "site:ok" }]);
+        expect(
+          getSpy.mock.callCount() + getManySpy.mock.callCount(),
+        ).to.be.at.least(1);
       } finally {
         await cache.close();
       }
@@ -414,10 +481,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       }
     });
 
-    // A multi-branch producer with a matcher-less branch is no longer
-    // constructible in any form: `.when(matchesInput, branch)` takes the guard
-    // positionally, so there is nothing left for a runtime throw to catch. The
-    // rule moved from a construction-time throw to the shape of the API.
+    // (A matcher-less branch has no test because it is unconstructible:
+    // `.when(matchesInput, branch)` takes the guard positionally.)
 
     it("an input that no covered branch's matchesInput accepts rejects", async () => {
       const cache = new Cache({
@@ -528,7 +593,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     // Likewise, "matchesInput is ignored on a single-coverage wrapper" no
     // longer has a subject: the two-function form has no guard at all, and a
-    // one-branch builder's guard is never consulted (one branch always wins).
-
+    // one-`.when` builder's guard IS consulted like any other (pinned in
+    // wrapComputingProducer.test.ts).
   });
 });
