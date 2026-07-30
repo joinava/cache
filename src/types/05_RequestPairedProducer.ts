@@ -15,32 +15,21 @@ import type {
  *
  * Generic over the request's specific id, so the return type's content is
  * required to match the spec variant that id selects. Implementing this shape
- * directly is awkward (TypeScript can't narrow the function's free type
- * parameter based on runtime checks on `req.id`) -- which is why the wrappers
- * take a record of per-resource-type producers (`ResourceTypeProducer` /
- * `BulkResourceTypeProducer`) and dispatch by classified resource type
- * instead. This form survives as the internal erased shape those records
- * bridge to, and is what internal code (`wrapProducer`,
- * `requestPairedProducerResultToResources`, etc.) operates against.
+ * directly is awkward -- TypeScript can't narrow the function's free type
+ * parameter based on runtime checks on `req.id` -- so a producer that must
+ * handle several resource types is better written as a per-resource-type record
+ * handed to `producerByIdType` / `bulkProducerByIdType`, whose sub-producers
+ * each see one branch's ids.
  *
- * Through 1.6.0 this name was a conditional type that resolved to a
- * non-generic `SingleIdTypeRequestPairedProducer` when `Spec` had one variant
- * and a `MultiIdTypeRequestPairedProducer` when it was a union. Now that
- * dispatch is owned by the per-type producer records, that distinction had no
- * consumer -- nothing in the implementation referenced any of the three forms
- * -- so both halves and the conditional were deleted; this is the former
- * multi-id form under the plain name.
+ * This type describes that shape for callers who want to name it; the wrappers
+ * themselves take a `CoveringProducer` and dispatch through their own erased
+ * internal shape, so nothing in the package consumes this type.
  *
- * Takes no `AbortSignal`: through 1.6.0 this and the other producer types
- * declared an `options?: { signal?: AbortSignal }` parameter, but every
- * producer invocation in 2.0 goes through the wrappers' collapsed-invocation
- * task, which is shared between logical callers and so has no single signal it
- * could forward without letting one caller cancel another's work. (1.6.0's one
- * non-collapsed producer call was the `isCacheable` pass-through, deleted in
- * §6.3.) Callers' aborts are honored one level up, where each caller's *wait*
- * is raced against its own signal. The parameter was therefore unreachable
- * surface -- a producer written against it got cancellation code that could
- * never run -- so it was removed.
+ * Takes no `AbortSignal`. Every producer invocation goes through the wrappers'
+ * collapsed-invocation task, which is shared between logical callers, so there
+ * is no single signal it could forward without letting one caller cancel
+ * another's work. Callers' aborts are honored one level up, where each caller's
+ * *wait* is raced against its own signal.
  *
  * Implementations of this type MUST NOT be `instanceof Error`, as instanceof
  * Error is used elsewhere to detect if the result could not be returned.

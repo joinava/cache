@@ -18,14 +18,12 @@ import type {
 } from "../types/index.js";
 import wrapProducer from "./wrapProducer.js";
 
-// 2.0: the wrapper takes ONE producer function over a required registry, and a
-// bare function covers the whole registry. This suite's behavior is
+// The wrapper takes ONE producer function over a required registry, and a bare
+// function covers the whole registry. This suite's behavior is
 // id-structure-agnostic, so it uses a sole-type registry and passes its
 // producers bare; per-type dispatch (`producerByIdType`) and
 // coverage/classification behavior live in coverageRuntime.test.ts and
-// resourceTypeClassification.test.ts. (The 1.6.0 `isCacheable` pass-through
-// test that lived here was removed with the option itself -- §6.3's producer
-// purity contract.)
+// resourceTypeClassification.test.ts.
 const testRegistry = {
   resources: resourceType<unknown>()({
     matches: (id): id is string => typeof id === "string",

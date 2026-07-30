@@ -153,7 +153,12 @@ export function collapsedInvocationTaskCreator<
   type PendingInvocation = {
     promise: Promise<Result>;
     taskStartTimestamp: number;
-    attachedCallerCount: number;
+    /**
+     * Its own cell so the task function can read a LIVE count: the
+     * `CollapsedInvocation` handle has to exist before `taskCreator` runs, but
+     * riders increment the count afterwards.
+     */
+    callers: { count: number };
   };
   const pendingTasks = new Map<string, PendingInvocation>();
   const logTrace = logger.bind(null, "collapsed-task-creator", "trace");
@@ -168,7 +173,7 @@ export function collapsedInvocationTaskCreator<
         "reusing result from prior, still-in-progress run of task for args/taskKey",
         { args, taskKey },
       );
-      existing.attachedCallerCount += 1;
+      existing.callers.count += 1;
       return { promise: existing.promise, rode: true };
     }
 
@@ -179,35 +184,28 @@ export function collapsedInvocationTaskCreator<
       args,
     );
 
-    // The record is created before the task runs so the task function can
-    // read a live attached-caller count off it.
-    const record: PendingInvocation = {
-      // Assigned synchronously below, before anything can read it.
-      promise: undefined as unknown as Promise<Result>,
-      taskStartTimestamp: now,
-      attachedCallerCount: 1,
-    };
-
+    // The caller count lives in its own cell so the handle below can be built
+    // (and read live) before the pending record exists.
+    const callers = { count: 1 };
     const invocation: CollapsedInvocation = {
       trigger,
-      attachedCallerCount: () => record.attachedCallerCount,
+      attachedCallerCount: () => callers.count,
     };
 
-    const taskRes = taskCreator(invocation, ...args).finally(() => {
+    const promise = taskCreator(invocation, ...args).finally(() => {
       // Only remove this task from pendingTasks if pendingTasks[taskKey]
       // is still the same task. (It could be a new one if the old one was
-      // overwritten for taking longer than collapseTasksMs.)
-      const pendingValueNow = pendingTasks.get(taskKey);
-      if (pendingValueNow === record) {
+      // overwritten for taking longer than collapseTasksMs.) Identified by its
+      // promise, since that is unique per invocation.
+      if (pendingTasks.get(taskKey)?.promise === promise) {
         logTrace("completed = new state for taskKey/args", { args, taskKey });
         pendingTasks.delete(taskKey);
       }
     });
-    record.promise = taskRes;
 
     // Save the new task as a pending task. This will be _replacing_
     // an existing pending task for this key if the other was too old.
-    pendingTasks.set(taskKey, record);
-    return { promise: taskRes, rode: false };
+    pendingTasks.set(taskKey, { promise, taskStartTimestamp: now, callers });
+    return { promise, rode: false };
   };
 }

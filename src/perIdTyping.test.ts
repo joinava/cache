@@ -3,7 +3,11 @@ import { describe, it } from "node:test";
 import type { JsonOf } from "type-party";
 import { jsonStringify } from "type-party/runtime/json.js";
 
-import { memoryStoreFor } from "../test/v2AcceptanceHelpers.js";
+import {
+  expectType,
+  memoryStoreFor,
+  type Equal,
+} from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
   idStartsWith,
@@ -15,16 +19,6 @@ import {
 import type { CacheSpec } from "./types/00_CacheSpec.js";
 import wrapProducer from "./utils/wrapProducer.js";
 
-/**
- * Compile-time assertion utilities. These never run -- they're consumed only
- * by `tsc -b --noEmit` -- but writing them inline keeps the per-id typing
- * tests legible alongside the runtime behavior tests.
- */
-type Equal<X, Y> =
-  (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2
-    ? true
-    : false;
-const expectType = <_T extends true>(): void => {};
 
 /**
  * Sample domain for per-id-typing tests:
@@ -32,10 +26,10 @@ const expectType = <_T extends true>(): void => {};
  * - id `story:${string}` returns a single `Story`,
  * - id `collection:${string}` returns a `Story[]` (a collection of stories).
  *
- * Both kinds of resources live in the same cache. 2.0 derives the cache's
- * `Spec` union from the resource-type registry rather than a hand-declared
- * union (§6.1); the `Equal` bridge below pins that the derivation produces
- * exactly the union 1.6.0 declared by hand.
+ * Both kinds of resources live in the same cache. The cache's `Spec` union is
+ * derived from the resource-type registry rather than hand-declared; the
+ * `Equal` bridge below pins that the derivation produces exactly the union you
+ * would otherwise have written out.
  */
 type Story = { readonly id: string; readonly title: string };
 
@@ -72,15 +66,6 @@ describe("Per-id content typing", () => {
     it("compiles", () => {});
   });
 
-  // (1.6.0's `RequestPairedProducer` was a conditional that resolved to a
-  // non-generic single-id form or a generic multi-id form depending on whether
-  // `Spec` was a union, selected by an `IsSingleType<Spec>` helper. All of that
-  // was deleted in 2.0 -- dispatch is owned by the request's classified
-  // resource type, so nothing in the implementation ever referenced the three
-  // forms, and the type-level assertions here were a test of the conditional by
-  // the conditional. What still matters behaviorally is the case below: a
-  // sole-type cache's producer stays writable as a vanilla lambda.)
-
   describe("Producer shape for a sole-type cache", () => {
     it("accepts a plain async lambda producer for a sole-type cache", () => {
       // A sole-type cache's one producer covers the whole registry, so it goes
@@ -108,12 +93,9 @@ describe("Per-id content typing", () => {
     });
   });
 
-  // (1.6.0's producerByIdType builder -- Covered-union accumulation, the
-  // non-exhaustive-build error tuple, and per-`.when()` narrowing -- was
-  // deleted in 2.0. The name is back as a plain record -> function helper, but
-  // coverage is now inferred from the record's keys and may be any non-empty
-  // subset of the registry. That machinery's typing is covered in
-  // coverageTyping.test.ts, and its runtime in coverageRuntime.test.ts.)
+  // `producerByIdType` turns a per-resource-type record into one covering
+  // function, inferring coverage from the record's keys. Its typing is covered
+  // in coverageTyping.test.ts and its runtime in coverageRuntime.test.ts.
 
   describe("Type-level: idStartsWith", () => {
     type AllIds = `story:${string}` | `collection:${string}`;

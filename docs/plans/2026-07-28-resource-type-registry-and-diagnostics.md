@@ -1583,10 +1583,17 @@ takes a position on.
    annotations or split store calls (which would break in-call same-slot
    dedup).
 2. **Strict ambiguity check cost.** `classify` runs every guard per id (to
-   detect overlap) rather than first-match-wins. For JSON-parsing guards
-   (axis-care today) that's ~2 `jsonParse`s per event. Acceptable, or should
-   strictness be a dev-mode/`validateRegistry()` concern with first-match at
-   runtime?
+   detect overlap) rather than first-match-wins. Note the cost is per
+   classification PASS, and one logical request makes several: the wrapper's own
+   pass, `Cache.get`, and `Cache.store` on a miss, plus one more for
+   `producerByIdType` (§10 deviation 1) and another for a computing wrapper's
+   `checkMintedId` — 2 passes for a bare-producer cache hit, up to 5 for a
+   computing-wrapper miss, and 5×N for a bulk computing call. So for a
+   2-guard JSON-parsing registry (axis-care today) that is ~4–10 `jsonParse`s
+   per request, not ~2; and where a guard rejects foreign ids by *throwing*,
+   each pass also constructs an error with a stack capture. Acceptable, or
+   should strictness be a dev-mode/`validateRegistry()` concern with
+   first-match at runtime (or `classify` memoize per id)?
 3. **`read` channel volume.** Wrapped paths emit both `read` and `fetch` for
    the same request (different questions, same lookup). Keep both, or make
    `read` emission opt-in per cache for high-QPS callers?

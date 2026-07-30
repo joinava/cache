@@ -326,7 +326,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       // First call: the bypass element must reach the producer WITHOUT any
       // cache read; the plain elements read (miss) and then produce. The
       // collapse key includes directives, so bypass and plain elements never
-      // share a batch -- and (contract adjudication) the bypass batch
+      // share a batch -- and the bypass batch
       // dispatches BEFORE the plain elements' cache read, so it is the first
       // producer call.
       const results = await getBulk(requests);

@@ -4,7 +4,11 @@ import type { PublicInterface } from "type-party";
 
 import type Cache from "../Cache.js";
 import type { CacheLookupResult } from "../Cache.js";
-import { publishCacheFetch, publishCacheProduce } from "../diagnostics.js";
+import {
+  publishCacheFetch,
+  publishCacheProduce,
+  type CacheFetchDisposition,
+} from "../diagnostics.js";
 import type { SpecForId } from "../types/00_CacheSpec.js";
 import type {
   IdOfResourceType,
@@ -20,6 +24,7 @@ import type {
   Entry,
   EntryForId,
   Logger,
+  ReadonlyConsumerRequest,
   RequestPairedProducerResult,
   Vary,
 } from "../types/index.js";
@@ -80,10 +85,7 @@ export class NoProducerForResourceTypeError extends Error {
   }
 }
 
-// The unused `Params` is part of the public 2.0 contract's declared shape;
-// it's kept so params-dependent options can be added without a breaking change.
-// oxlint-disable-next-line no-unused-vars
-export type WrapProducerOptions<Params extends AnyParams> = {
+export type WrapProducerOptions = {
   /**
    * Controls whether the function returned by `wrapProducer`/`wrapBulkProducer`
    * will fall back to calling the produer if its attempt to read from the cache
@@ -179,9 +181,8 @@ export const coveredTypes: unique symbol = Symbol("@zingage/cache.coveredTypes")
  * covers. The property carries a real runtime value -- the covered type names
  * -- so it serves double duty: `Covered` is inferred from it at compile time,
  * and the wrapper reads it at runtime to enforce coverage before touching the
- * store. It is deliberately NOT a value-less phantom, which would leave the
- * wrapper with no runtime source for the covered set now that there are no
- * record keys to read.
+ * store. A value-less phantom would leave the wrapper with no runtime source for
+ * the covered set, since there are no record keys to read.
  *
  * ## Why the property is conditionally required
  *
@@ -192,19 +193,19 @@ export const coveredTypes: unique symbol = Symbol("@zingage/cache.coveredTypes")
  * "narrowed coverage implies runtime proof of that narrowing" an invariant the
  * type system enforces rather than a convention.
  *
- * Without that, coverage had two sources that could silently disagree: an
- * explicit `Covered` type argument (`wrapProducer<RT, "story">(...)`) narrowed
- * the types while leaving the runtime covered set absent -- which the wrapper
- * reads as "the whole registry". The types still banned uncovered ids at the
- * call site, so this was only reachable by defeating them (a cast or a
- * loosely-typed id -- see {@link NoProducerForResourceTypeError}), but that is
- * precisely the case that error exists to catch: instead of throwing, the
- * wrapper would hand the id to a producer written for a different resource
- * type and then store its content under the incoming id. Requiring the
- * property under narrowing routes partial coverage through
- * {@link producerByIdType}, which always supplies the runtime value, so the
- * single-source property the per-type record had via `Object.keys` is restored
- * by construction.
+ * That requirement is what keeps coverage from having two sources that can
+ * disagree. You might expect an explicit `Covered` type argument
+ * (`wrapProducer<RT, "story">(...)`) to be enough to narrow coverage; it is
+ * rejected precisely because it would narrow the TYPES while leaving the runtime
+ * covered set absent, which the wrapper reads as "the whole registry". The types
+ * still ban uncovered ids at the call site, so the gap is only reachable by
+ * defeating them (a cast or a loosely-typed id -- see
+ * {@link NoProducerForResourceTypeError}), but that is exactly the case that
+ * error exists to catch: instead of throwing, the wrapper would hand the id to a
+ * producer written for a different resource type and then store its content
+ * under the incoming id. Routing partial coverage through
+ * {@link producerByIdType}, which always supplies the runtime value, makes the
+ * declared set and the reachable producers one and the same by construction.
  *
  * `Covered` still infers from the property even though it also appears in the
  * condition (probed, along with the deferred case where `Covered` is an
@@ -230,13 +231,50 @@ export type CoveringProducer<
     IdOfResourceType<RT[Covered]>
   >
 >) &
-  // The tuple brackets make this a whole-set comparison rather than a
-  // distributive, member-by-member one.
-  ([ResourceTypeName<RT>] extends [Covered]
-    ? { readonly [coveredTypes]?: readonly Covered[] }
-    : { readonly [coveredTypes]: readonly Covered[] });
+  CoveredTypesCarrier<RT, Covered>;
 
 export type { PartialConsumerRequest };
+
+/**
+ * The conditionally-required {@link coveredTypes} carrier: optional when
+ * `Covered` is the whole registry, REQUIRED when it is a strict subset. Shared
+ * by {@link CoveringProducer} and its bulk counterpart so the two cannot drift
+ * -- relaxing one to always-optional would reopen the hole described on
+ * `CoveringProducer` for that wrapper alone.
+ *
+ * The tuple brackets make this a whole-set comparison rather than a
+ * distributive, member-by-member one.
+ */
+export type CoveredTypesCarrier<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+> = [ResourceTypeName<RT>] extends [Covered]
+  ? { readonly [coveredTypes]?: readonly Covered[] }
+  : { readonly [coveredTypes]: readonly Covered[] };
+
+/**
+ * A request as the wrappers' id-erased internals see it: every id the wrapper
+ * could be handed, with `id` still usable as that type (see
+ * {@link ReadonlyConsumerRequest}).
+ */
+export type LooseRequestFor<
+  RT extends ResourceTypes,
+  Params extends AnyParams,
+> = ReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>;
+
+/** An entry as the wrappers' id-erased internals see it. */
+export type LooseEntryFor<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = Entry<SpecForId<SpecOf<RT>, SpecOf<RT>["id"]>, Validators, Params>;
+
+/** A request-paired producer result over the whole registry. */
+export type LooseResultFor<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = RequestPairedProducerResult<SpecOf<RT>, Validators, Params>;
 
 /**
  * The internal, id-erased shape all wrapper plumbing dispatches through.
@@ -251,8 +289,78 @@ type LooseProducer<
   Validators extends AnyValidators,
   Params extends AnyParams,
 > = (
-  req: ReadonlyDeep<ConsumerRequest<Params, SpecOf<RT>["id"]>>,
-) => Promise<RequestPairedProducerResult<SpecOf<RT>, Validators, Params>>;
+  req: LooseRequestFor<RT, Params>,
+) => Promise<LooseResultFor<RT, Validators, Params>>;
+
+/**
+ * Snapshots a producer's declared covered set, so a post-wrap mutation of the
+ * caller's array can't widen (or otherwise change) coverage later. `undefined`
+ * means the producer declared nothing, which (see {@link CoveringProducer})
+ * means it covers the whole registry: there is no covered set to enumerate and
+ * nothing to check.
+ */
+export function snapshotCoveredTypes(producer: {
+  readonly [coveredTypes]?: readonly string[];
+}): readonly string[] | undefined {
+  const declared = producer[coveredTypes];
+  return declared === undefined ? undefined : [...declared];
+}
+
+/**
+ * Throws {@link NoProducerForResourceTypeError} if `resourceType` is outside a
+ * DECLARED covered set. `covered === undefined` (a whole-registry producer)
+ * checks nothing.
+ */
+export function assertResourceTypeCovered(
+  cacheName: string,
+  covered: { names: readonly string[]; lookup: ReadonlySet<string> } | undefined,
+  resourceType: string,
+  id: string,
+): void {
+  if (covered !== undefined && !covered.lookup.has(resourceType)) {
+    throw new NoProducerForResourceTypeError({
+      cacheName,
+      resourceType,
+      coveredResourceTypes: covered.names,
+      id,
+    });
+  }
+}
+
+/**
+ * Pairs the snapshotted covered names with a Set for membership testing (the
+ * names are still needed in order for the error message). `undefined` in,
+ * `undefined` out -- meaning whole-registry coverage.
+ */
+export function coverageLookup(
+  names: readonly string[] | undefined,
+): { names: readonly string[]; lookup: ReadonlySet<string> } | undefined {
+  return names === undefined ? undefined : { names, lookup: new Set(names) };
+}
+
+/**
+ * What {@link wrapProducer} returns. Named because it is spelled both in the
+ * signature and in the closing cast, ~250 lines apart, and the cast is the only
+ * thing that would notice them disagreeing.
+ */
+export type WrappedProducerFn<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = <Id extends IdOfResourceType<RT[Covered]>>(
+  req: PartialConsumerRequest<Params, Id>,
+  options?: { signal?: AbortSignal },
+) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>>;
+
+/** The always-unreachable tail of a wrapper's abort path. */
+export function throwUnreachableAbort(signal: AbortSignal | undefined): never {
+  signal?.throwIfAborted();
+  // Unreachable: only called after observing `signal.aborted`.
+  throw new Error(
+    "unreachable: throwAborted called without an aborted signal",
+  );
+}
 
 /**
  * Fundamentally, this function takes producers that return values (likely
@@ -326,12 +434,12 @@ type LooseProducer<
  * producer must be called, no signal reaches the producer -- because that call
  * may be sharing one underlying producer invocation with other callers who have
  * not aborted. Producers accordingly take **no** `options` parameter at all
- * (see {@link CoveringProducer}): through 1.6.0 the type declared one, but
- * with the `isCacheable` pass-through gone there is no longer any
- * non-collapsed producer call for a signal to be forwarded on, so the
- * parameter was unreachable surface and has been removed. The caller's wait for
- * the producer result is instead **raced** against the signal, so the caller
- * can bail out immediately without waiting for the producer to finish.
+ * (see {@link CoveringProducer}): every producer call goes through the
+ * collapsed-invocation task, so there is never a single caller's signal that
+ * could be forwarded without letting one caller cancel another's work. The
+ * caller's wait for the producer result is instead **raced** against the signal,
+ * so the caller can bail out immediately without waiting for the producer to
+ * finish.
  *
  * Critically, bailing out does NOT prevent the producer's result from being
  * stored: the collapsed invocation always fires a (non-awaited)
@@ -364,12 +472,9 @@ export default function wrapProducer<
   Params extends AnyParams = AnyParams,
 >(
   cache: PublicInterface<Cache<RT, Validators, Params>>,
-  options: WrapProducerOptions<Params> | undefined,
+  options: WrapProducerOptions | undefined,
   producer: CoveringProducer<RT, Covered, Validators, Params>,
-): <Id extends IdOfResourceType<RT[Covered]>>(
-  req: PartialConsumerRequest<Params, Id>,
-  options?: { signal?: AbortSignal },
-) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>> {
+): WrappedProducerFn<RT, Covered, Validators, Params> {
   const {
     collapseOverlappingRequestsTime = 3,
     onCacheReadFailure = "call-producer",
@@ -383,30 +488,13 @@ export default function wrapProducer<
     Params
   >;
 
-  // The declared covered set is snapshotted here, before any request runs, so
-  // a post-wrap mutation of the caller's array can't widen (or otherwise
-  // change) coverage later -- the coverage check consults the snapshot.
-  // `undefined` means the producer declared nothing, which (see
-  // CoveringProducer) means it covers the whole registry: there is no covered
-  // set to enumerate and nothing to check.
-  const declaredCoveredTypes = producer[coveredTypes];
-  const coveredResourceTypes: readonly string[] | undefined =
-    declaredCoveredTypes === undefined ? undefined : [...declaredCoveredTypes];
+  const covered = coverageLookup(snapshotCoveredTypes(producer));
 
   const logTrace = logger.bind(null, "wrap-producer", "trace");
   const logWarning = logger.bind(null, "wrap-producer", "warn");
 
-  // The id is re-narrowed past its ReadonlyDeep wrapper, which cannot
-  // *reduce* to the (string) id type while `RT` is an unresolved generic,
-  // even though it's the id value itself at runtime.
-  type LooseRequest = ReadonlyDeep<
-    ConsumerRequest<Params, SpecOf<RT>["id"]>
-  > & { readonly id: SpecOf<RT>["id"] };
-  type LooseEntry = Entry<
-    SpecForId<SpecOf<RT>, SpecOf<RT>["id"]>,
-    Validators,
-    Params
-  >;
+  type LooseRequest = LooseRequestFor<RT, Params>;
+  type LooseEntry = LooseEntryFor<RT, Validators, Params>;
 
   const callProducerAndLog = async (req: LooseRequest) => {
     logTrace("contacting producer", req);
@@ -558,27 +646,11 @@ export default function wrapProducer<
     // any cache read (see NoProducerForResourceTypeError's docs). Skipped
     // entirely for a bare producer, which declares no covered set because it
     // covers the whole registry.
-    if (
-      coveredResourceTypes !== undefined &&
-      !coveredResourceTypes.includes(resourceType)
-    ) {
-      throw new NoProducerForResourceTypeError({
-        cacheName: cache.name,
-        resourceType,
-        coveredResourceTypes,
-        id,
-      });
-    }
+    assertResourceTypeCovered(cache.name, covered, resourceType, id);
 
-    type FetchDisposition =
-      | { disposition: "served-from-cache" | "served-stale-while-revalidating" | "served-stale-after-error" }
-      | {
-          disposition: "served-from-producer" | "producer-error" | "aborted";
-          directivesImpliedBypass: boolean;
-        };
     const publishFetch = (
       collapsed: boolean,
-      disposition: FetchDisposition,
+      disposition: CacheFetchDisposition,
     ) => {
       publishCacheFetch({
         cache: cache.name,
@@ -597,11 +669,7 @@ export default function wrapProducer<
         disposition: "aborted",
         directivesImpliedBypass,
       });
-      signal?.throwIfAborted();
-      // Unreachable: only called after observing `signal.aborted`.
-      throw new Error(
-        "unreachable: throwAborted called without an aborted signal",
-      );
+      throwUnreachableAbort(signal);
     };
 
     if (signal?.aborted) {
@@ -775,10 +843,12 @@ export default function wrapProducer<
   // but every path upholds the per-id contract the signature promises: the
   // cache read narrows by id, and the producer's request-paired result is
   // stamped with the request's own id.
-  return wrappedProducer as unknown as <Id extends IdOfResourceType<RT[Covered]>>(
-    req: PartialConsumerRequest<Params, Id>,
-    options?: { signal?: AbortSignal },
-  ) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>>;
+  return wrappedProducer as unknown as WrappedProducerFn<
+    RT,
+    Covered,
+    Validators,
+    Params
+  >;
 }
 
 /**
@@ -792,8 +862,8 @@ export default function wrapProducer<
  * when each resource type has its own origin. A producer that covers the whole
  * registry needs no helper: pass it to `wrapProducer` directly.
  *
- * Throws at construction on an empty record -- the only place that check has a
- * meaningful home now that a producer's coverage is not read off record keys.
+ * Throws at construction on an empty record: a helper whose whole purpose is to
+ * declare a covered set has nothing to declare.
  *
  * Note that requests routed through this helper are classified TWICE (once
  * here to pick the sub-producer, once in the wrapper for dispatch/telemetry).
@@ -837,12 +907,7 @@ export function producerByIdType<
     );
   }
 
-  // The id is re-narrowed past its ReadonlyDeep wrapper, which cannot *reduce*
-  // to the (string) id type while `RT` is an unresolved generic, even though
-  // it's the id value itself at runtime.
-  type LooseRequest = ReadonlyDeep<
-    ConsumerRequest<Params, SpecOf<RT>["id"]>
-  > & { readonly id: SpecOf<RT>["id"] };
+  type LooseRequest = LooseRequestFor<RT, Params>;
 
   const dispatchingProducer = async (req: LooseRequest) => {
     const resourceType = cache.classify(req.id);

@@ -43,20 +43,19 @@ export function completeRequest<Params extends AnyParams, Id extends string>(
  * supplemental resources may correspond to any variant -- not just the one
  * matching the request's id.
  *
- * The strongest available user-facing (id, content) correlation backstop comes
- * from the per-type producer records the by-id-type helpers take
- * (`ResourceTypeProducer` / `BulkResourceTypeProducer`): there each
- * sub-producer's `req.id` is pinned to its own registry branch, so its result
- * can only pair that branch's content with that branch's ids. A single
- * whole-registry producer function gets a weaker guarantee -- its result type is
- * the union over its covered ids, so the compiler does not require the content
- * it returns to match the specific id it was handed (nothing checks content
- * shape at runtime either -- reach for the by-id-type helper when that
- * correlation matters). Either way this helper's job is just to build the
- * runtime store input: it never synthesizes id or content, only spreads what
- * the producer returned alongside the request's own id. TS can't see through
- * the conditional/distributive types involved here, so the construction needs
- * an unsafe cast; the cast is sound in that same sense.
+ * The strongest available (id, content) correlation check comes from the
+ * per-type producer records the by-id-type helpers take: each sub-producer's
+ * `req.id` is pinned to its own registry branch, so its result can only pair
+ * that branch's content with that branch's ids. A single whole-registry producer
+ * function gets a weaker guarantee -- its result type is the union over its
+ * covered ids, so the compiler does not require the content it returns to match
+ * the specific id it was handed, and nothing checks content shape at runtime
+ * either. Reach for the by-id-type helper when that correlation matters.
+ *
+ * This helper's own job is just to build the runtime store input: it never
+ * synthesizes id or content, only spreads what the producer returned alongside
+ * the request's own id. TS can't see through the conditional/distributive types
+ * involved, so the construction needs an unsafe cast.
  */
 export function requestPairedProducerResultToResources<
   Spec extends CacheSpec,

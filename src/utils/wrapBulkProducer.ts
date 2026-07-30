@@ -4,7 +4,12 @@ import type { ReadonlyDeep } from "type-fest";
 import type { PublicInterface } from "type-party";
 import type Cache from "../Cache.js";
 import type { CacheLookupResult } from "../Cache.js";
-import { publishCacheFetch, publishCacheProduce } from "../diagnostics.js";
+import {
+  cacheProduceChannel,
+  publishCacheFetch,
+  publishCacheProduce,
+  type CacheFetchDisposition,
+} from "../diagnostics.js";
 import type { SpecForId } from "../types/00_CacheSpec.js";
 import type {
   IdOfResourceType,
@@ -16,7 +21,6 @@ import type {
   AnyParams,
   AnyValidators,
   ConsumerRequest,
-  Entry,
   EntryForId,
   RequestPairedProducerResult,
   Vary,
@@ -39,9 +43,17 @@ import {
   zip2,
 } from "./utils.js";
 import {
+  assertResourceTypeCovered,
+  coverageLookup,
   coveredTypes,
   isRequestingCacheBypass,
   NoProducerForResourceTypeError,
+  snapshotCoveredTypes,
+  throwUnreachableAbort,
+  type CoveredTypesCarrier,
+  type LooseEntryFor,
+  type LooseRequestFor,
+  type LooseResultFor,
   type WrapProducerOptions,
 } from "./wrapProducer.js";
 
@@ -136,9 +148,7 @@ export type CoveringBulkProducer<
     | ErrorType
   )[]
 >) &
-  ([ResourceTypeName<RT>] extends [Covered]
-    ? { readonly [coveredTypes]?: readonly Covered[] }
-    : { readonly [coveredTypes]: readonly Covered[] });
+  CoveredTypesCarrier<RT, Covered>;
 
 /** The internal, id-erased dispatch shape; see `LooseProducer` in wrapProducer.ts. */
 type LooseBulkProducer<
@@ -147,10 +157,38 @@ type LooseBulkProducer<
   Params extends AnyParams,
   ErrorType extends Error,
 > = (
-  reqs: readonly ReadonlyDeep<ConsumerRequest<Params, SpecOf<RT>["id"]>>[],
-) => Promise<
-  (RequestPairedProducerResult<SpecOf<RT>, Validators, Params> | ErrorType)[]
->;
+  reqs: readonly LooseRequestFor<RT, Params>[],
+) => Promise<(LooseResultFor<RT, Validators, Params> | ErrorType)[]>;
+
+/**
+ * What {@link wrapBulkProducer} returns. Named because it is spelled both in the
+ * signature and in the closing cast, ~570 lines apart, and the cast is the only
+ * thing that would notice them disagreeing.
+ */
+type WrappedBulkProducerFn<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  ErrorType extends Error,
+> = <
+  const Reqs extends readonly PartialConsumerRequest<
+    Params,
+    IdOfResourceType<RT[Covered]>
+  >[],
+>(
+  reqs: Reqs,
+  options?: { signal?: AbortSignal },
+) => Promise<{
+  -readonly [K in keyof Reqs]:
+    | EntryForId<
+        SpecOf<RT>,
+        Validators,
+        Params,
+        Extract<Reqs[K]["id"], SpecOf<RT>["id"]>
+      >
+    | ErrorType;
+}>;
 
 /**
  * Fundamentally, this function takes bulk producers that return values for
@@ -165,7 +203,7 @@ type LooseBulkProducer<
  * contract, and bypass requests skipping the cache read), exactly ONE producer
  * function is passed.
  *
- * That is what restores this wrapper's defining bulk capability: a bare
+ * That is what gives this wrapper its defining bulk capability: a bare
  * function covers the whole registry and is handed the **full** set of
  * requests it must produce, mixed resource types and all, in ONE call -- so it
  * can optimize across them (a single upstream call covering several types,
@@ -233,21 +271,9 @@ export function wrapBulkProducer<
   ErrorType extends Error = Error,
 >(
   cache: PublicInterface<Cache<RT, Validators, Params>>,
-  options: WrapProducerOptions<Params> | undefined,
+  options: WrapProducerOptions | undefined,
   producer: CoveringBulkProducer<RT, Covered, Validators, Params, ErrorType>,
-): <
-  const Reqs extends readonly PartialConsumerRequest<
-    Params,
-    IdOfResourceType<RT[Covered]>
-  >[],
->(
-  reqs: Reqs,
-  options?: { signal?: AbortSignal },
-) => Promise<{
-  -readonly [K in keyof Reqs]:
-    | EntryForId<SpecOf<RT>, Validators, Params, Extract<Reqs[K]["id"], SpecOf<RT>["id"]>>
-    | ErrorType;
-}> {
+): WrappedBulkProducerFn<RT, Covered, Validators, Params, ErrorType> {
   const {
     collapseOverlappingRequestsTime = 3,
     onCacheReadFailure = "call-producer",
@@ -262,30 +288,14 @@ export function wrapBulkProducer<
     ErrorType
   >;
 
-  // The declared covered set is snapshotted here, before any request runs, so
-  // a post-wrap mutation of the caller's array can't widen (or otherwise
-  // change) coverage later. `undefined` means the producer declared nothing,
-  // which (see CoveringBulkProducer) means it covers the whole registry: there
-  // is no covered set to enumerate and nothing to check.
-  const declaredCoveredTypes = producer[coveredTypes];
-  const coveredResourceTypes: readonly string[] | undefined =
-    declaredCoveredTypes === undefined ? undefined : [...declaredCoveredTypes];
+  const covered = coverageLookup(snapshotCoveredTypes(producer));
 
   const logTrace = logger.bind(null, "wrap-producer", "trace");
   const logWarning = logger.bind(null, "wrap-producer", "warn");
 
-  // The id is re-narrowed past its ReadonlyDeep wrapper, which cannot
-  // *reduce* to the (string) id type while `RT` is an unresolved generic,
-  // even though it's the id value itself at runtime.
-  type LooseRequest = ReadonlyDeep<
-    ConsumerRequest<Params, SpecOf<RT>["id"]>
-  > & { readonly id: SpecOf<RT>["id"] };
-  type LooseResult = RequestPairedProducerResult<SpecOf<RT>, Validators, Params>;
-  type LooseEntry = Entry<
-    SpecForId<SpecOf<RT>, SpecOf<RT>["id"]>,
-    Validators,
-    Params
-  >;
+  type LooseRequest = LooseRequestFor<RT, Params>;
+  type LooseResult = LooseResultFor<RT, Validators, Params>;
+  type LooseEntry = LooseEntryFor<RT, Validators, Params>;
 
   const callProducerAndLog = async (
     reqs: readonly LooseRequest[],
@@ -308,20 +318,17 @@ export function wrapBulkProducer<
   //
   // COLLAPSE GRANULARITY. The key is the batch's full requests (ids, params,
   // directives) -- the parallel `resourceTypes` argument is derived from the
-  // ids and is deliberately excluded. With one producer that means ONE
-  // invocation per trigger group, where before there was one per (trigger
-  // group x resource type). Bypass, miss, and revalidation groups still stay
-  // separate -- not because `trigger` is in the key (it is not), but because
-  // their request arrays differ, bypass carrying `maxAge: 0` directives.
+  // ids and is deliberately excluded. That means ONE invocation per trigger
+  // group. Bypass, miss, and revalidation groups still stay separate -- not
+  // because `trigger` is in the key (it is not), but because their request
+  // arrays differ, bypass carrying `maxAge: 0` directives.
   //
-  // The cost is real: two callers whose `story` sub-batches are identical used
-  // to share that invocation even when their `collection` parts differed, and
-  // now one key spans the whole mixed batch, so they share nothing. This is
-  // 1.6.0's behaviour, and it is recoverable later INSIDE
-  // `bulkProducerByIdType` via the already-exported `collapsedTaskCreator` --
-  // deliberately not done here, since that would relocate the complexity one
-  // layer down rather than remove it. (`wrapProducer` is unaffected: it
-  // handles one request, so there is no merge and its keying is unchanged.)
+  // The granularity is whole-batch, so two callers sharing a `story` sub-batch
+  // but differing on their `collection` parts share nothing. Finer, per-type
+  // collapsing is recoverable inside `bulkProducerByIdType` via the
+  // already-exported `collapsedTaskCreator`; it lives here at batch
+  // granularity because splitting it would relocate the complexity one layer
+  // down rather than remove it.
   const collapsedCallProducerAndStore = collapsedInvocationTaskCreator(
     async (
       invocation: CollapsedInvocation,
@@ -334,11 +341,18 @@ export function wrapBulkProducer<
       const start = performance.now();
 
       const publishProduce = (outcome: "success" | "error") => {
+        // The only O(batch-size) diagnostics payload in the package, so it is
+        // worth not building it when nobody is listening (`publish` would
+        // discard it, but the argument is evaluated regardless).
+        if (!cacheProduceChannel.hasSubscribers) {
+          return;
+        }
         publishCacheProduce({
           cache: cache.name,
           trigger: invocation.trigger,
-          requests: zip2(resourceTypes, reqs).map(([resourceType, req]) => ({
-            resourceType,
+          requests: reqs.map((req, i) => ({
+            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- index-aligned with `reqs`
+            resourceType: resourceTypes[i]!,
             resourceId: req.id,
           })),
           collapsedCallerCount: invocation.attachedCallerCount(),
@@ -432,9 +446,16 @@ export function wrapBulkProducer<
     // read or producer contact. Classification/coverage errors propagate
     // (contract violations, not dispositions -- no fetch messages).
     type RequestItem = {
+      /**
+       * This element's position in the caller's `reqs`, carried so results can
+       * be written straight into their output slot.
+       */
+      index: number;
       req: LooseRequest;
       resourceType: string;
       directivesImpliedBypass: boolean;
+      /** This element's own if-error fallback, once the cache read has run. */
+      usableIfError?: LooseEntry;
       /**
        * Set to true when this element's fetch message has been published, so
        * each logical request settles on the fetch channel exactly once (its
@@ -442,9 +463,10 @@ export function wrapBulkProducer<
        */
       settled: boolean;
     };
-    const items: RequestItem[] = reqs.map((req) => {
+    const items: RequestItem[] = reqs.map((req, index) => {
       const finalRequest = completeRequest(req) as LooseRequest;
       return {
+        index,
         req: finalRequest,
         resourceType: cache.classify(finalRequest.id),
         directivesImpliedBypass: isRequestingCacheBypass(
@@ -456,35 +478,19 @@ export function wrapBulkProducer<
 
     // Skipped entirely for a bare producer, which declares no covered set
     // because it covers the whole registry (see wrapProducer's docs).
-    if (coveredResourceTypes !== undefined) {
-      const uncovered = items.find(
-        (item) => !coveredResourceTypes.includes(item.resourceType),
+    items.forEach((item) => {
+      assertResourceTypeCovered(
+        cache.name,
+        covered,
+        item.resourceType,
+        item.req.id,
       );
-      if (uncovered) {
-        throw new NoProducerForResourceTypeError({
-          cacheName: cache.name,
-          resourceType: uncovered.resourceType,
-          coveredResourceTypes,
-          id: uncovered.req.id,
-        });
-      }
-    }
+    });
 
-    type FetchDisposition =
-      | {
-          disposition:
-            | "served-from-cache"
-            | "served-stale-while-revalidating"
-            | "served-stale-after-error";
-        }
-      | {
-          disposition: "served-from-producer" | "producer-error" | "aborted";
-          directivesImpliedBypass: boolean;
-        };
     const settleFetch = (
       item: RequestItem,
       collapsed: boolean,
-      disposition: FetchDisposition,
+      disposition: CacheFetchDisposition,
     ) => {
       if (item.settled) {
         return;
@@ -511,21 +517,12 @@ export function wrapBulkProducer<
           directivesImpliedBypass: item.directivesImpliedBypass,
         });
       });
-      signal?.throwIfAborted();
-      // Unreachable: only called after observing `signal.aborted`.
-      throw new Error(
-        "unreachable: throwAborted called without an aborted signal",
-      );
+      throwUnreachableAbort(signal);
     };
 
     if (signal?.aborted) {
       throwAborted(items.map((item) => ({ item, rode: false })));
     }
-
-    // Make a map from request items to their original indices, so that we can
-    // reorder things at the end without tracking indices all along the way.
-    // Slightly inefficient, but easier to follow.
-    const itemsToOriginalIndices = new Map(items.map((it, i) => [it, i]));
 
     // Separate bypass requests (which skip the cache read entirely; see
     // wrapProducer's docs) from the rest.
@@ -549,14 +546,12 @@ export function wrapBulkProducer<
     // Attaches a set of request items to a collapsed producer invocation:
     // `handled` settles each element's fetch message when the invocation
     // settles (unless an abort settled it first) and yields the per-item
-    // results. With a single producer there is at most ONE invocation per call
-    // to this helper -- the resource-type partition is gone (see the COLLAPSE
-    // GRANULARITY note above); it still returns a list so its callers can
+    // results. One invocation per call at batch collapse granularity (see the
+    // COLLAPSE GRANULARITY note above); it returns a list so its callers can
     // concatenate their trigger classes, and so an empty set attaches nothing.
     const attachGroups = (
       groupItems: readonly RequestItem[],
       trigger: CollapsedInvocation["trigger"],
-      usableIfErrorByItem?: ReadonlyMap<RequestItem, LooseEntry>,
     ): AttachedGroup[] => {
       if (groupItems.length === 0) {
         return [];
@@ -581,7 +576,7 @@ export function wrapBulkProducer<
               const producerResult = producerResults[i]!;
 
               if (producerResult instanceof Error) {
-                const fallback = usableIfErrorByItem?.get(item);
+                const fallback = item.usableIfError;
                 if (fallback) {
                   logWarning(
                     "error calling producer; falling back to a cached value, as permitted",
@@ -637,6 +632,17 @@ export function wrapBulkProducer<
     // rejection here doesn't consume it for the real await.
     bypassGroups.forEach((group) => void group.handled.catch(() => {}));
 
+    // Everything this call could still deliver: the cache-read cohort, plus the
+    // bypass elements whose in-flight invocation this call will no longer wait
+    // for.
+    const throwAbortedForAllPending = (): never =>
+      throwAborted([
+        ...readItems.map((item) => ({ item, rode: false })),
+        ...bypassGroups.flatMap((group) =>
+          group.items.map((item) => ({ item, rode: group.rode })),
+        ),
+      ]);
+
     // Read the cache for everything else.
     const cacheResults =
       readItems.length > 0
@@ -651,12 +657,7 @@ export function wrapBulkProducer<
               // bypass elements are settled as aborted too: their answers
               // haven't arrived, and this call won't deliver them.
               if (signal?.aborted) {
-                throwAborted([
-                  ...readItems.map((item) => ({ item, rode: false })),
-                  ...bypassGroups.flatMap((group) =>
-                    group.items.map((item) => ({ item, rode: group.rode })),
-                  ),
-                ]);
+                throwAbortedForAllPending();
               }
 
               switch (onCacheReadFailure) {
@@ -693,41 +694,41 @@ export function wrapBulkProducer<
     // An abort that landed while the read was in flight (but didn't reject
     // it) settles everything as aborted before any miss reaches a producer.
     if (signal?.aborted) {
-      throwAborted([
-        ...readItems.map((item) => ({ item, rode: false })),
-        ...bypassGroups.flatMap((group) =>
-          group.items.map((item) => ({ item, rode: group.rode })),
-        ),
-      ]);
+      throwAbortedForAllPending();
     }
 
     const itemsWithCacheResults = zip2(readItems, cacheResults);
 
-    const results = new Map<RequestItem, LooseEntry | ErrorType>();
+    // Results are written straight into their caller-order slot via
+    // `item.index`, so there is no identity map to keep consistent. Sparse by
+    // design until every item has settled.
+    // oxlint-disable-next-line unicorn/no-new-array -- intentional sparse preallocation; filled by index below
+    const orderedResults: (LooseEntry | ErrorType)[] = new Array(items.length);
 
     // Cache-served dispositions are final the moment the read resolves; they
     // settle immediately (matching wrapProducer, where each such request
     // returns without ever touching a producer).
-    const itemsWithUsableResults = itemsWithCacheResults
-      .filter(([, res]) => res.usable)
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      .map(([item, res]) => [item, res.usable!] as const);
+    const itemsWithUsableResults = itemsWithCacheResults.flatMap(
+      ([item, res]) => (res.usable ? [[item, res.usable] as const] : []),
+    );
 
     for (const [item, usable] of itemsWithUsableResults) {
       settleFetch(item, false, { disposition: "served-from-cache" });
-      results.set(item, usable);
+      orderedResults[item.index] = usable;
     }
 
-    const itemsWithUsableWhileRevalidateResults = itemsWithCacheResults
-      .filter(([, res]) => res.usableWhileRevalidate)
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      .map(([item, res]) => [item, res.usableWhileRevalidate!] as const);
+    const itemsWithUsableWhileRevalidateResults = itemsWithCacheResults.flatMap(
+      ([item, res]) =>
+        res.usableWhileRevalidate
+          ? [[item, res.usableWhileRevalidate] as const]
+          : [],
+    );
 
     for (const [item, stale] of itemsWithUsableWhileRevalidateResults) {
       settleFetch(item, false, {
         disposition: "served-stale-while-revalidating",
       });
-      results.set(item, stale);
+      orderedResults[item.index] = stale;
     }
 
     // Call the producers immediately for requests that can't be satisfied
@@ -736,16 +737,17 @@ export function wrapBulkProducer<
       ([, res]) => !(res.usable ?? res.usableWhileRevalidate),
     );
 
-    const usableIfErrorByItem = new Map(
-      itemsNeedingProducerNow.flatMap(([item, res]) =>
-        res.usableIfError ? [[item, res.usableIfError] as const] : [],
-      ),
-    );
+    // Each element's own if-error fallback rides on the item, so the group
+    // machinery reads it without a parallel map.
+    itemsNeedingProducerNow.forEach(([item, res]) => {
+      if (res.usableIfError) {
+        item.usableIfError = res.usableIfError;
+      }
+    });
 
     const missGroups = attachGroups(
       itemsNeedingProducerNow.map(([item]) => item),
       "miss",
-      usableIfErrorByItem,
     );
 
     // Start background refreshes but don't await them; swallow any errors
@@ -789,16 +791,9 @@ export function wrapBulkProducer<
 
     zip2(foregroundGroups, groupResults).forEach(([group, groupResult]) => {
       zip2(group.items, groupResult).forEach(([item, result]) => {
-        results.set(item, result);
+        orderedResults[item.index] = result;
       });
     });
-
-    // oxlint-disable-next-line unicorn/no-new-array -- intentional sparse preallocation; filled by index below
-    const orderedResults: (LooseEntry | ErrorType)[] = new Array(items.length);
-    for (const [item, result] of results) {
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      orderedResults[itemsToOriginalIndices.get(item)!] = result;
-    }
 
     return orderedResults;
   };
@@ -807,19 +802,13 @@ export function wrapBulkProducer<
   // in wrapProducer.ts), but every path upholds the per-id contract the
   // signature promises: cache reads narrow by id, and each producer's
   // request-paired results are stamped with their own requests' ids.
-  return wrappedBulkProducer as unknown as <
-    const Reqs extends readonly PartialConsumerRequest<
-      Params,
-      IdOfResourceType<RT[Covered]>
-    >[],
-  >(
-    reqs: Reqs,
-    options?: { signal?: AbortSignal },
-  ) => Promise<{
-    -readonly [K in keyof Reqs]:
-      | EntryForId<SpecOf<RT>, Validators, Params, Extract<Reqs[K]["id"], SpecOf<RT>["id"]>>
-      | ErrorType;
-  }>;
+  return wrappedBulkProducer as unknown as WrappedBulkProducerFn<
+    RT,
+    Covered,
+    Validators,
+    Params,
+    ErrorType
+  >;
 }
 
 /**
@@ -897,17 +886,8 @@ export function bulkProducerByIdType<
     );
   }
 
-  // The id is re-narrowed past its ReadonlyDeep wrapper, which cannot *reduce*
-  // to the (string) id type while `RT` is an unresolved generic, even though
-  // it's the id value itself at runtime.
-  type LooseRequest = ReadonlyDeep<
-    ConsumerRequest<Params, SpecOf<RT>["id"]>
-  > & { readonly id: SpecOf<RT>["id"] };
-  type LooseResult = RequestPairedProducerResult<
-    SpecOf<RT>,
-    Validators,
-    Params
-  >;
+  type LooseRequest = LooseRequestFor<RT, Params>;
+  type LooseResult = LooseResultFor<RT, Validators, Params>;
 
   const dispatchingProducer = async (reqs: readonly LooseRequest[]) => {
     const classified = reqs.map((req, index) => ({

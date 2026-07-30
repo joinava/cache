@@ -156,6 +156,48 @@ export function publishCacheRead(message: CacheReadMessage): void {
 export const CACHE_FETCH_CHANNEL_NAME = "@zingage/cache:fetch";
 
 /**
+ * How a logical request was answered, and -- on the producer-path branch --
+ * whether the consumer's directives forced the producer trip.
+ *
+ * Exported because the producer wrappers publish these: they take a value of
+ * this type and spread it into the message, so the disposition vocabulary and
+ * the "which branch carries the bypass flag" rule live here only. A wrapper
+ * re-spelling the union locally would stay assignable while silently lacking
+ * any disposition added here.
+ *
+ * Note that publishers OMIT `directivesImpliedBypass` on the cache-read branch
+ * rather than publishing it as `false`; it is typed `?: false` so subscribers
+ * can still read the property uniformly across the union.
+ */
+export type CacheFetchDisposition =
+  | {
+      // Dispositions reachable only via a cache read -- which bypass
+      // requests skip entirely, making this branch sound by construction
+      // rather than statistically. (Without skip-read, `maxAge: 0` can be
+      // satisfied: age is a ms-resolution float compared with strict `>`,
+      // so a same-millisecond entry has age 0 ≤ 0, and cross-pod clock skew
+      // makes age *negative* -- the producer-stamped `date` is the birth
+      // basis.)
+      disposition:
+        | "served-from-cache"
+        | "served-stale-while-revalidating"
+        | "served-stale-after-error";
+      directivesImpliedBypass?: false;
+    }
+  | {
+      disposition: "served-from-producer" | "producer-error" | "aborted";
+      /**
+       * True iff the consumer's directives forced producer contact
+       * regardless of cache contents (`isRequestingCacheBypass`:
+       * `maxAge: 0`). A pure request property -- and any of these three
+       * dispositions can be bypass-triggered (the producer trip can fail
+       * or be abandoned). Lets hit-rate dashboards separate bypass traffic
+       * from real misses.
+       */
+      directivesImpliedBypass: boolean;
+    };
+
+/**
  * The message type published to the fetch diagnostics channel.
  */
 export type CacheFetchMessage = Attribution & {
@@ -175,37 +217,7 @@ export type CacheFetchMessage = Attribution & {
    * never bypassed.
    */
   collapsed: boolean;
-} & (
-    | {
-        // Dispositions reachable only via a cache read -- which bypass
-        // requests skip entirely, making this branch sound by construction
-        // rather than statistically. (Without skip-read, `maxAge: 0` can be
-        // satisfied: age is a ms-resolution float compared with strict `>`,
-        // so a same-millisecond entry has age 0 ≤ 0, and cross-pod clock skew
-        // makes age *negative* -- the producer-stamped `date` is the birth
-        // basis.)
-        disposition:
-          | "served-from-cache" // 1.6.0 "hit"
-          | "served-stale-while-revalidating" // 1.6.0 "stale_while_revalidate"
-          | "served-stale-after-error"; // NEW (stale-if-error; invisible in 1.6.0)
-        directivesImpliedBypass?: false;
-      }
-    | {
-        disposition:
-          | "served-from-producer" // 1.6.0 "miss" / "bypass"
-          | "producer-error" // NEW (nothing servable; error propagated)
-          | "aborted"; // NEW (caller's signal fired first)
-        /**
-         * True iff the consumer's directives forced producer contact
-         * regardless of cache contents (`isRequestingCacheBypass`:
-         * `maxAge: 0`). A pure request property -- and any of these three
-         * dispositions can be bypass-triggered (the producer trip can fail
-         * or be abandoned). Lets hit-rate dashboards separate bypass traffic
-         * from real misses.
-         */
-        directivesImpliedBypass: boolean;
-      }
-  );
+} & CacheFetchDisposition;
 
 /**
  * The diagnostics channel for fetch events. Subscribe with
@@ -315,7 +327,7 @@ export type CacheStoreEntryMessage = Attribution & {
   validators: Partial<AnyValidators>;
   /**
    * How the entry's value relates to what the slot previously held (see
-   * {@link StoreEntryRelationship}, unchanged), or `undefined` when the store
+   * {@link StoreEntryRelationship}), or `undefined` when the store
    * didn't report a relationship for this entry (it didn't perform the
    * check, the entry had empty validators so there was nothing to compare
    * on, or the entry was an in-call duplicate that lost to a newer entry for

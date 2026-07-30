@@ -1,3 +1,4 @@
+import type { ReadonlyDeep } from "type-fest";
 import type { AnyParams } from "./01_Params.js";
 
 /**
@@ -22,6 +23,26 @@ export type ConsumerRequest<
   id: Id;
   params: Partial<Params>;
   directives: ConsumerDirectives;
+};
+
+/**
+ * A read-only {@link ConsumerRequest} whose `id` is still usable as an `Id`.
+ *
+ * `ReadonlyDeep` cannot *reduce* `ReadonlyDeep<Id>` back to `Id` while `Id` is
+ * an unresolved generic -- even though a string id is its own value at runtime
+ * -- so code that is generic over the id would otherwise have to re-narrow
+ * past the wrapper at every read. Restoring `id` once here means `req.id` is
+ * simply `Id` for every such reader.
+ *
+ * Equivalent to `ReadonlyDeep<ConsumerRequest<Params, Id>>` at any concrete
+ * instantiation (where `ReadonlyDeep` does reduce); the difference shows up
+ * only under an unresolved generic, which is exactly where it is needed.
+ */
+export type ReadonlyConsumerRequest<
+  Params extends AnyParams,
+  Id extends string = string,
+> = ReadonlyDeep<Omit<ConsumerRequest<Params, Id>, "id">> & {
+  readonly id: Id;
 };
 
 /**

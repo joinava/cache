@@ -352,7 +352,7 @@ describe("diagnostics channels (§6.5)", () => {
     });
 
     it("after close with 'act-empty'/'no-op': reads still publish (found: 'none'), store() returns [], delete() no-ops", async () => {
-      // Contract adjudication #8: an act-empty read is still a lookup the
+      // An act-empty read is still a lookup the
       // channel reports, and a no-op store returns an empty results array.
       const name = uniqueCacheName("read-after-close");
       const store = memoryStoreFor(registry);
@@ -1036,7 +1036,7 @@ describe("diagnostics channels (§6.5)", () => {
         expect(res2.content).to.equal("shared");
         expect(producer.mock.callCount()).to.equal(1);
 
-        // §7 (as adjudicated): EVERY logical request performs and reports its
+        // EVERY logical request performs and reports its
         // own lookup -- the rider emits its own read -- while only the
         // producer invocation is shared (one produce message).
         expect(capture.read).to.deep.equal([
@@ -1517,7 +1517,7 @@ describe("diagnostics channels (§6.5)", () => {
           collapsed: false,
         });
 
-        // One invocation covered both requests. Per contract adjudication,
+        // One invocation covered both requests:
         // `outcome` reports invocation SETTLEMENT: a resolved batch is a
         // "success" even when elements are ErrorType (those settle as
         // per-element producer-error fetches above).

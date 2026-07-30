@@ -12,6 +12,7 @@ export {
   UnclassifiableIdError,
   type CacheLookupResult,
   type CacheOptions,
+  type SingleTypeCacheOptionsBuilder,
 } from "./Cache.js";
 export { default as MemoryStore } from "./stores/MemoryStore/MemoryStore.js";
 export { default as PostgresStore } from "./stores/PostgresStore/PostgresStore.js";
@@ -56,6 +57,7 @@ export {
 export {
   CACHE_FETCH_CHANNEL_NAME,
   cacheFetchChannel,
+  type CacheFetchDisposition,
   type CacheFetchMessage,
   CACHE_PRODUCE_CHANNEL_NAME,
   cacheProduceChannel,

@@ -7,6 +7,7 @@ import {
   publishCacheStoreEntry,
   type CacheReadFound,
 } from "./diagnostics.js";
+import type { ReadonlyConsumerRequest } from "./types/03_ConsumerRequest.js";
 import {
   type Entry,
   type NormalizeParamName,
@@ -19,7 +20,6 @@ import {
   type AnyValidators,
   type CacheSpec,
   type ConsumerDirectives,
-  type ConsumerRequest,
   type Logger,
   type ProducerResultResource,
   resourceType,
@@ -118,26 +118,46 @@ export type CacheLookupResult<
 };
 
 /**
- * Maps a lookup result to the `found` value published on the read channel.
- * The keys are mutually exclusive in the direction of this priority order
- * (see {@link Cache.get}'s docs), so the first present key is *the* answer.
- * (The parameter is a loose structural slice of {@link CacheLookupResult} so
- * every generic instantiation of the result type is accepted.)
+ * A backing store that supports `StoreSupportedTypes` and must cover
+ * `RequiredSpec` -- the spec whose ids the cache will actually ask for.
+ *
+ * The store only has to support *at least* the cache's own resource types. That
+ * matters because `Store` is invariant in its `Spec` -- `Spec` sits in both
+ * `store()`/`delete()`'s parameters and `get()`/`getMany()`'s return types --
+ * so a `Store<Wide>` is NOT assignable to a `Store<Narrow>` even though, for
+ * any id the narrow cache actually asks for, the wide store returns exactly the
+ * same thing. Rather than fight that variance, the store's own spec is captured
+ * in `StoreSupportedTypes` and merely *checked* for coverage, so a
+ * general-purpose store needs no artificially narrowed type arguments.
+ *
+ * The intersected guard is where coverage is enforced: TS has no lower-bound
+ * constraint (`StoreSupportedTypes super RequiredSpec` is not expressible), so a
+ * store that does NOT cover picks up an unsatisfiable requirement instead.
+ * Inference still comes from the plain `Store<...>` member.
+ *
+ * Note: the Store interface should _already_ be invariant in its Params, but
+ * TS's underlying handling of functions as always bivariant (which the compiler
+ * tries to hide/override in some cases under strictFunctionTypes, but this
+ * doesn't apply to class methods; see
+ * https://www.typescriptlang.org/tsconfig/#strictFunctionTypes) means that we
+ * have to use `InvariantOf<Params>` explicitly to get the type errors we want.
  */
-function foundForLookupResult(result: {
-  usable?: unknown;
-  usableWhileRevalidate?: unknown;
-  usableIfError?: unknown;
-  validatable?: unknown;
-}): CacheReadFound {
-  return result.usable
-    ? "usable"
-    : result.usableWhileRevalidate
-      ? "usable-while-revalidate"
-      : result.usableIfError
-        ? "usable-if-error"
-        : "none";
-}
+type CoveringStore<
+  RequiredSpec extends CacheSpec,
+  StoreSupportedTypes extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = Store<StoreSupportedTypes, Validators, InvariantOf<Params>> &
+  // The tuple brackets make this a whole-union comparison rather than a
+  // distributive, member-by-member one. Without them, a `RequiredSpec` union
+  // distributes and each covered member contributes `unknown`, which absorbs the
+  // other members' requirements -- so a store covering ANY one resource type
+  // would satisfy a registry of several.
+  ([RequiredSpec] extends [StoreSupportedTypes]
+    ? unknown
+    : {
+        readonly __storeMustSupportAtLeast: RequiredSpec;
+      });
 
 /**
  * Everything a {@link Cache} needs, as one bag. The store is a field rather
@@ -159,36 +179,16 @@ export type CacheOptions<
   StoreSupportedTypes extends CacheSpec = SpecOf<RT>,
 > = {
   /**
-   * REQUIRED. The backing store that will actually hold cache entries.
-   *
-   * The store only has to support *at least* this cache's resource types. That
-   * matters because `Store` is invariant in its `Spec` -- `Spec` sits in both
-   * `store()`/`delete()`'s parameters and `get()`/`getMany()`'s return types --
-   * so a `Store<Wide>` is NOT assignable to a `Store<Narrow>` even though, for
-   * any id the narrow cache actually asks for, the wide store returns exactly
-   * the same thing. Rather than fight that variance, the store's own spec is
-   * captured in `StoreSupportedTypes` and merely *checked* for coverage, so a
-   * general-purpose store needs no artificially narrowed type arguments.
-   *
-   * The intersected guard is where coverage is enforced: TS has no lower-bound
-   * constraint (`StoreSupportedTypes super SpecOf<RT>` is not expressible), so
-   * a store that does NOT cover this registry picks up an unsatisfiable
-   * requirement instead. Inference still comes from the plain `Store<...>`
-   * member.
-   *
-   * Note: the Store interface should _already_ be invariant in its Params, but
-   * TS's underlying handling of functions as always bivariant (which the
-   * compiler tries to hide/override in some cases under strictFunctionTypes,
-   * but this doesn't apply to class methods; see
-   * https://www.typescriptlang.org/tsconfig/#strictFunctionTypes) means that we
-   * have to use `InvariantOf<Params>` explicitly to get the type errors we want.
+   * REQUIRED. The backing store that will actually hold cache entries. It must
+   * support at least this cache's own resource types, but may support more --
+   * see {@link CoveringStore}.
    */
-  store: Store<StoreSupportedTypes, Validators, InvariantOf<Params>> &
-    (SpecOf<RT> extends StoreSupportedTypes
-      ? unknown
-      : {
-          readonly __storeMustSupportAtLeast: SpecOf<RT>;
-        });
+  store: CoveringStore<
+    SpecOf<RT>,
+    StoreSupportedTypes,
+    Validators,
+    Params
+  >;
   /**
    * REQUIRED. Names this cache instance (≈ the backing table) in every
    * diagnostics message. Instance-unique per process by convention;
@@ -267,9 +267,9 @@ export default class Cache<
    * value: the other RT-mentioning members (`classify`'s
    * `ResourceTypeName<RT>`, the `SpecOf<RT>`-derived method types) are
    * keyof-/conditional-shaped and unusable as inference sources, so without
-   * a bare-`RT` member, wrapping a cache built over a narrowed
-   * narrowed one-entry registry would collapse `RT` to its constraint
-   * (producer `req.id` would become plain `string`).
+   * a bare-`RT` member, wrapping a cache built over a narrowed one-entry
+   * registry would collapse `RT` to its constraint (producer `req.id` would
+   * become plain `string`).
    */
   public readonly resourceTypes: RT;
 
@@ -341,30 +341,37 @@ export default class Cache<
    * parse error with no cache/id attribution.
    */
   public classify(id: string): ResourceTypeName<RT> {
-    const evaluated = this.#resourceTypeEntries.map(([name, spec]) => {
-      try {
-        return { name, matched: spec.matches(id) };
-      } catch (error) {
-        return { name, matched: false, error };
-      }
-    });
-    const matched = evaluated.filter((it) => it.matched).map((it) => it.name);
+    // One pass, allocating nothing on the (overwhelmingly common) single-match
+    // path: `extraMatches` is only built once a SECOND type matches, and
+    // `guardErrors` only once a guard throws. Every guard is still evaluated
+    // before any decision, which is what makes overlap detection total.
+    let firstMatch: ResourceTypeName<RT> | undefined;
+    let extraMatches: ResourceTypeName<RT>[] | undefined;
+    let guardErrors: unknown[] | undefined;
 
-    if (matched.length === 1) {
-      // Non-null assertion is safe: length was just checked.
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      return matched[0]!;
+    for (const [name, spec] of this.#resourceTypeEntries) {
+      let matched: boolean;
+      try {
+        matched = spec.matches(id);
+      } catch (error) {
+        (guardErrors ??= []).push(error);
+        continue;
+      }
+      if (matched) {
+        if (firstMatch === undefined) {
+          firstMatch = name;
+        } else {
+          (extraMatches ??= []).push(name);
+        }
+      }
     }
 
-    if (matched.length === 0) {
-      const guardErrors = evaluated.flatMap((it) =>
-        "error" in it ? [it.error] : [],
-      );
+    if (firstMatch === undefined) {
       throw new UnclassifiableIdError({
         cacheName: this.name,
         id,
         cause:
-          guardErrors.length === 0
+          guardErrors === undefined
             ? undefined
             : guardErrors.length === 1
               ? guardErrors[0]
@@ -375,11 +382,15 @@ export default class Cache<
       });
     }
 
-    throw new AmbiguousResourceTypeError({
-      cacheName: this.name,
-      id,
-      matchedResourceTypes: matched,
-    });
+    if (extraMatches !== undefined) {
+      throw new AmbiguousResourceTypeError({
+        cacheName: this.name,
+        id,
+        matchedResourceTypes: [firstMatch, ...extraMatches],
+      });
+    }
+
+    return firstMatch;
   }
 
   /**
@@ -429,13 +440,13 @@ export default class Cache<
    * *aborted* read emits nothing, matching the `throwIfAborted` fast path.
    */
   public async get<Id extends SpecOf<RT>["id"]>(
-    req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
+    req: ReadonlyConsumerRequest<Params, Id>,
     options?: { signal?: AbortSignal },
   ): Promise<CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>> {
     options?.signal?.throwIfAborted();
 
     const { id, params, directives } = req;
-    const resourceType = this.classify(id satisfies ReadonlyDeep<Id> as Id);
+    const resourceType = this.classify(id);
 
     if (this.#closed) {
       if (this.#onGetAfterClose === "throw") {
@@ -446,14 +457,13 @@ export default class Cache<
         "trace",
         "received request when closed, so returning no entries",
       );
-      const res = { validatable: [] };
       publishCacheRead({
         cache: this.name,
         resourceType,
-        resourceId: id satisfies ReadonlyDeep<Id> as Id,
-        found: foundForLookupResult(res),
+        resourceId: id,
+        found: "none",
       });
-      return res;
+      return { validatable: [] };
     }
 
     const now = new Date();
@@ -462,25 +472,18 @@ export default class Cache<
     this.#logger("trace", "received request", { id, params, normalizedParams });
     this.#logger("trace", "requested entries from the store");
 
-    // Unlike producer invocations, store reads are NOT collapsed: N
-    // concurrent identical requests perform N row fetches. If hot-key read
-    // load ever warrants deduping them, the right shape is a PENDING-ONLY
-    // promise share right here, keyed by (id, normalizedParams) -- never a
-    // reuse window (a lookup RESULT is a freshness decision evaluated at a
-    // specific `now`, so sharing one across a window serves decisions
-    // computed against a stale clock; sharing only while the fetch is
-    // in-flight bounds the skew to the read's own duration, which callers
-    // already experience). Keying by (id, params) rather than the full
-    // request lets different-directive callers share the I/O, because
-    // classification (#processCacheEntries) stays per-caller -- which also
-    // keeps `read` messages one-per-logical-request. The wrappers would be
-    // the wrong layer for this: they'd miss direct get()/getMany() callers
-    // and could only collapse whole-request keys. Not built today because a
-    // point read is cheap next to the producer calls collapsing exists to
-    // protect; the read channel measures per-id read rates, so the evidence
-    // would be visible before the need is real.
+    // Unlike producer invocations, store reads are NOT collapsed: N concurrent
+    // identical requests perform N row fetches. A point read is cheap next to
+    // the producer calls collapsing exists to protect.
+    //
+    // Worth knowing if that ever changes: reads must not reuse results across
+    // a time window the way producer invocations do. A lookup result is a
+    // freshness decision evaluated at a specific `now`, so replaying one
+    // serves decisions computed against a stale clock. Only a PENDING-only
+    // promise share is sound, which bounds the skew to the read's own
+    // duration.
     const cacheEntries = await this.#dataStore
-      .get(id satisfies ReadonlyDeep<Id> as Id, normalizedParams, options)
+      .get(id, normalizedParams, options)
       .catch((error: unknown) => {
         // A read that FAILED is reported on the channel (one message, same as
         // a successful lookup) before the error propagates, so subscribers can
@@ -494,7 +497,7 @@ export default class Cache<
           publishCacheRead({
             cache: this.name,
             resourceType,
-            resourceId: id satisfies ReadonlyDeep<Id> as Id,
+            resourceId: id,
             found: "read-failed",
             error,
           });
@@ -502,7 +505,7 @@ export default class Cache<
         throw error;
       });
 
-    const res = this.#processCacheEntries(
+    const { result, found } = this.#processCacheEntries(
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
       cacheEntries as unknown as NormalizedProducerResultResource<
         SpecForId<SpecOf<RT>, Id>,
@@ -517,11 +520,11 @@ export default class Cache<
     publishCacheRead({
       cache: this.name,
       resourceType,
-      resourceId: id satisfies ReadonlyDeep<Id> as Id,
-      found: foundForLookupResult(res),
+      resourceId: id,
+      found,
     });
 
-    return res;
+    return result;
   }
 
   /**
@@ -547,51 +550,32 @@ export default class Cache<
    * the same order as the input requests
    */
   public async getMany<
-    const Reqs extends readonly ReadonlyDeep<
-      ConsumerRequest<Params, SpecOf<RT>["id"]>
+    const Reqs extends readonly ReadonlyConsumerRequest<
+      Params,
+      SpecOf<RT>["id"]
     >[],
   >(
     requests: Reqs,
     options?: { signal?: AbortSignal },
-  ): Promise<{
-    -readonly [K in keyof Reqs]: CacheLookupResult<
-      SpecForId<SpecOf<RT>, Extract<Reqs[K]["id"], SpecOf<RT>["id"]>>,
-      Validators,
-      Params
-    >;
-  }> {
+  ): Promise<GetManyResults<Reqs, RT, Validators, Params>> {
     options?.signal?.throwIfAborted();
 
     if (!isNonEmptyArray(requests)) {
-      return [] as {
-        -readonly [K in keyof Reqs]: CacheLookupResult<
-          SpecForId<SpecOf<RT>, Extract<Reqs[K]["id"], SpecOf<RT>["id"]>>,
-          Validators,
-          Params
-        >;
-      };
+      return [] as GetManyResults<Reqs, RT, Validators, Params>;
     }
 
     // Classify every request id up front: a classification failure rejects
     // the whole operation before we touch the store.
     const resourceTypes = mapNonEmpty(requests, (req) => this.classify(req.id));
 
-    const publishRead = (
-      requestIndex: number,
-      res: {
-        usable?: unknown;
-        usableWhileRevalidate?: unknown;
-        usableIfError?: unknown;
-        validatable?: unknown;
-      },
-    ) => {
+    const publishRead = (requestIndex: number, found: CacheReadFound) => {
       publishCacheRead({
         cache: this.name,
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         resourceType: resourceTypes[requestIndex]!,
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         resourceId: requests[requestIndex]!.id,
-        found: foundForLookupResult(res),
+        found,
       });
     };
 
@@ -609,9 +593,8 @@ export default class Cache<
       );
 
       return mapNonEmpty(requests, (_req, i) => {
-        const res = { validatable: [] };
-        publishRead(i, res);
-        return res;
+        publishRead(i, "none");
+        return { validatable: [] };
       });
     }
 
@@ -628,11 +611,7 @@ export default class Cache<
     const cacheEntriesForRequests = await this.#dataStore
       .getMany(
         mapNonEmpty(requests, (req) => ({
-          // SAFETY: `req.id` is `ReadonlyDeep<SpecOf<RT>["id"]>`, which is the
-          // id value itself at runtime (ids are strings); the ReadonlyDeep
-          // wrapper just can't *reduce* to the id type while `RT` is an
-          // unresolved generic.
-          id: req.id as SpecOf<RT>["id"],
+          id: req.id,
           params: this.normalizeParams(req.params),
         })),
         options,
@@ -664,7 +643,7 @@ export default class Cache<
 
     // Process each request and return results in the same order
     return mapNonEmpty(requests, (req, i) => {
-      const res = this.#processCacheEntries(
+      const { result, found } = this.#processCacheEntries(
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         cacheEntriesForRequests[
           i
@@ -677,8 +656,8 @@ export default class Cache<
         now,
         { requestIndex: i },
       );
-      publishRead(i, res);
-      return res;
+      publishRead(i, found);
+      return result;
     });
   }
 
@@ -809,15 +788,22 @@ export default class Cache<
   }
 
   /**
-   * Processes cache entries for a single request and returns the appropriate
-   * CacheLookupResult. This is the core logic shared between get() and getMany().
+   * Processes cache entries for a single request, returning both the
+   * CacheLookupResult and the `found` value that describes it for the read
+   * channel. `found` is returned rather than re-derived from `result` because
+   * this is where the outcome is actually decided -- each branch below knows
+   * its own answer, so there is nothing to reconstruct. This is the core logic
+   * shared between get() and getMany().
    */
   #processCacheEntries<Id extends SpecOf<RT>["id"]>(
     entries: readonly Entry<SpecForId<SpecOf<RT>, Id>, Validators, Params>[],
     directives: ReadonlyDeep<ConsumerDirectives>,
     now: Date,
     context: { requestIndex: number },
-  ): CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params> {
+  ): {
+    result: CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>;
+    found: CacheReadFound;
+  } {
     const classifiedEntries = groupBy(entries, (it) =>
       entryUtils.classify(it, directives, now),
     );
@@ -827,22 +813,30 @@ export default class Cache<
       classifiedEntries,
     });
 
+    const logAndReturn = (
+      result: CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>,
+      found: CacheReadFound,
+    ) => {
+      this.#logger("trace", "chose/returned this data for request", {
+        requestIndex: context.requestIndex,
+        res: result,
+      });
+      return { result, found };
+    };
+
     const usableEntries =
       classifiedEntries[entryUtils.EntryClassification.Usable];
 
     if (usableEntries) {
-      const res = {
-        // Non-null assertion is safe because of lodash groupBy mechanics.
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        usable: Cache.bestEntry(usableEntries)!,
-        validatable: [],
-      };
-
-      this.#logger("trace", "chose/returned this data for request", {
-        requestIndex: context.requestIndex,
-        res,
-      });
-      return res;
+      return logAndReturn(
+        {
+          // Non-null assertion is safe because of groupBy mechanics.
+          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+          usable: Cache.bestEntry(usableEntries)!,
+          validatable: [],
+        },
+        "usable",
+      );
     }
 
     const validatableEntries = entries.filter(entryUtils.isValidatable);
@@ -851,39 +845,55 @@ export default class Cache<
       classifiedEntries[entryUtils.EntryClassification.UsableWhileRevalidate];
 
     if (usableWhileRevalidateEntries) {
-      const res = {
-        // Non-null assertion is safe because of lodash groupBy mechanics.
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        usableWhileRevalidate: Cache.bestEntry(usableWhileRevalidateEntries)!,
-        validatable: validatableEntries,
-      };
-
-      this.#logger("trace", "chose/returned this data for request", {
-        requestIndex: context.requestIndex,
-        res,
-      });
-      return res;
+      return logAndReturn(
+        {
+          // Non-null assertion is safe because of groupBy mechanics.
+          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+          usableWhileRevalidate: Cache.bestEntry(usableWhileRevalidateEntries)!,
+          validatable: validatableEntries,
+        },
+        "usable-while-revalidate",
+      );
     }
 
     const usableIfErrorEntries =
       classifiedEntries[entryUtils.EntryClassification.UsableIfError];
 
-    const res = {
-      usableIfError: usableIfErrorEntries
-        ? // Non-null assertion is safe because of lodash groupBy mechanics.
-          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          Cache.bestEntry(usableIfErrorEntries)!
-        : undefined,
-      validatable: validatableEntries,
-    };
-
-    this.#logger("trace", "chose/returned this data for request", {
-      requestIndex: context.requestIndex,
-      res,
-    });
-    return res;
+    return usableIfErrorEntries
+      ? logAndReturn(
+          {
+            // Non-null assertion is safe because of groupBy mechanics.
+            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+            usableIfError: Cache.bestEntry(usableIfErrorEntries)!,
+            validatable: validatableEntries,
+          },
+          "usable-if-error",
+        )
+      : logAndReturn(
+          { usableIfError: undefined, validatable: validatableEntries },
+          "none",
+        );
   }
 }
+
+/**
+ * {@link Cache.getMany}'s return type: one {@link CacheLookupResult} per
+ * request, each narrowed to the spec variants its own request's id selects.
+ * Named once because it is spelled both in the signature and in the
+ * empty-input early return.
+ */
+type GetManyResults<
+  Reqs extends readonly { id: string }[],
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = {
+  -readonly [K in keyof Reqs]: CacheLookupResult<
+    SpecForId<SpecOf<RT>, Extract<Reqs[K]["id"], SpecOf<RT>["id"]>>,
+    Validators,
+    Params
+  >;
+};
 
 /**
  * Calculates the maximum amount of time -- in seconds! -- that the backing
@@ -915,10 +925,14 @@ function calculateStoreFor(
 /**
  * The one-entry registry {@link singleTypeCacheOptions} builds. Keyed by an
  * index signature, because the name is a runtime value the caller asked not to
- * think about. The types that carry information stay precise -- `SpecOf` of this
- * registry is exactly `CacheSpec<Id, Content>`. The only imprecision is the
- * NAME: `classify()` returns `string` on such a cache rather than the literal.
- * Write the registry out by hand if you want the literal.
+ * think about. The types carrying the cache's *data* contract stay precise --
+ * `SpecOf` of this registry is exactly `CacheSpec<Id, Content>`.
+ *
+ * What the index signature costs is everything keyed by the type's NAME, since
+ * `ResourceTypeName` of this registry is `string`: `classify()` returns `string`
+ * rather than the literal, and a {@link producerByIdType} record's keys are no
+ * longer checked against the registry (see `singleTypeCacheOptions`' docs).
+ * Write the registry out by hand to get both back.
  */
 type SingleTypeRegistry<Id extends string, Content> = {
   readonly [name: string]: ResourceTypeSpec<Id, Content>;
@@ -1045,9 +1059,9 @@ export type SingleTypeCacheOptionsBuilder<Content> = <
  * ## Narrowing the id space
  *
  * By default the sole type accepts every id, so the id space is `string`. Pass
- * `validateId` to narrow it. It is a REAL runtime guard, not an assertion (see
- * below for why the asserted form was removed), so a nonconforming id throws
- * `UnclassifiableIdError` before the store is touched:
+ * `validateId` to narrow it. It is a REAL runtime guard, not a type assertion,
+ * so a nonconforming id throws `UnclassifiableIdError` before the store is
+ * touched:
  *
  * ```ts
  * const cache = new Cache(
@@ -1063,9 +1077,24 @@ export type SingleTypeCacheOptionsBuilder<Content> = <
  *
  * The guard is *required* as soon as `Id` is narrower than `string` (see
  * {@link SingleTypeCacheOptionsBuilder}), so a narrower id space always has a
- * runtime check behind it. Writing the one-entry registry out by hand remains
- * equivalent and is the better choice when you also want the literal
- * resource-type name:
+ * runtime check behind it.
+ *
+ * ## What writing the registry by hand still buys
+ *
+ * This sugar's registry is keyed by an index signature, because the type's name
+ * is a runtime value the caller asked not to think about. Two consequences,
+ * both of which the hand-written form avoids:
+ *
+ * - `classify()` returns `string` rather than the type's literal name.
+ * - `ResourceTypeName` of that registry is `string` too, so the compile-time
+ *   check that a {@link producerByIdType} record's keys are real registry names
+ *   cannot fire. A misspelled key is accepted at compile time and then throws
+ *   `NoProducerForResourceTypeError` on every request. On a hand-written
+ *   registry the same typo is a compile error.
+ *
+ * So prefer the hand-written one-entry registry when you use `producerByIdType`
+ * or want the literal name; the sugar is for the common case of one resource
+ * type and one bare producer function:
  *
  * ```ts
  * new Cache({

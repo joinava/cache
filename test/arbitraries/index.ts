@@ -1,4 +1,5 @@
 // Re-export all arbitraries for easy importing
+export * from "./adversarialIds.js";
 export * from "./01_Params.js";
 export * from "./02_Validators.js";
 export * from "./03_ConsumerRequest.js";

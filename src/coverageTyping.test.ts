@@ -3,8 +3,10 @@ import { describe, it } from "node:test";
 import type { JsonOf } from "type-party";
 
 import {
+  expectType,
   memoryStoreFor,
   uniqueCacheName,
+  type Equal,
 } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
@@ -44,11 +46,6 @@ import wrapProducer from "./utils/wrapProducer.js";
  * running.
  */
 
-type Equal<X, Y> =
-  (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2
-    ? true
-    : false;
-const expectType = <_T extends true>(): void => {};
 
 type SiteId = `site:${string}`;
 type BizId = `biz:${string}`;
@@ -241,7 +238,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       }
     });
 
-    it("rejects non-registry keys, mismatched (branch id, content) pairs, and the removed 1.6.0 options", async () => {
+    it("rejects non-registry keys, mismatched (branch id, content) pairs, and options the branch type does not declare", async () => {
       const cache = new Cache({
         store: memoryStoreFor(registry),
         name: uniqueCacheName("typing-rejections"),
@@ -699,12 +696,14 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     });
 
     it("accepts matchesInput on every branch of a multi-branch wrapper and omission on a single-branch one", async () => {
-      // KNOWN DOC/IMPL GAP (logged in the acceptance report): §6.4/§11.5 spec
-      // "matchesInput required when coverage is multi, forbidden when single"
-      // as compile-time overloads, but the implementation types matchesInput
-      // as plain-optional and documents/enforces the rule in prose + runtime
-      // only. The two negative fixtures (missing-on-multi rejected,
-      // present-on-single rejected) are therefore omitted here -- with them,
+      // `matchesInput` is typed plain-optional, and the
+      // required-when-multi/ignored-when-single rule is enforced by a
+      // construction-time throw rather than by compile-time overloads (a
+      // ratified deviation from the original spec; see §6.7 of
+      // docs/plans/2026-07-28-resource-type-registry-and-diagnostics.md, and
+      // coverageRuntime.test.ts for the runtime pins). The two negative
+      // fixtures (missing-on-multi rejected, present-on-single rejected) are
+      // therefore omitted here -- with them,
       // the suite would not compile against the current implementation.
       const cache = new Cache({
         store: memoryStoreFor(registry),
@@ -770,7 +769,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       }
     });
 
-    it("computing supplementals (restored 1.6.0 parity): cross-branch input-keyed and id-keyed cross-type accepted; id-keyed mismatches rejected", async () => {
+    it("computing supplementals: cross-branch input-keyed and id-keyed cross-type accepted; id-keyed mismatches rejected", async () => {
       const cache = new Cache({
         store: memoryStoreFor(registry),
         name: uniqueCacheName("typing-computing-supplementals"),

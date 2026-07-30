@@ -19,6 +19,7 @@ import type {
   ProducerResultResource,
   RequestPairedProducerResult,
 } from "../types/index.js";
+import { zip2 } from "./utils.js";
 import wrapProducer, {
   producerByIdType,
   type ProducersFor,
@@ -295,11 +296,16 @@ function checkMintedId(
   try {
     classified = cache.classify(id);
   } catch (e) {
+    // `cause` is carried through deliberately: `classify` puts a throwing
+    // registry guard's own error there, and that parse failure is the only
+    // debuggable account of WHY the mint didn't classify. Rebuilding the error
+    // without it would strip it at exactly the boundary that names the branch.
     if (e instanceof UnclassifiableIdError) {
       throw new UnclassifiableIdError({
         cacheName: cache.name,
         id,
         message: `Cache "${cache.name}": \`hashInput\` for branch "${branchName}" minted id ${JSON.stringify(id)}, which matches no resource type in the registry`,
+        cause: e.cause,
       });
     }
     if (e instanceof AmbiguousResourceTypeError) {
@@ -354,7 +360,7 @@ export function wrapComputingProducer<
   Params extends AnyParams = AnyParams,
 >(
   cache: PublicInterface<Cache<RT, Validators, Params>>,
-  options: WrapProducerOptions<Params> | undefined,
+  options: WrapProducerOptions | undefined,
   branches: {
     readonly [K in Covered]: K extends ResourceTypeName<RT>
       ? ComputingBranch<
@@ -497,7 +503,7 @@ export function wrapBulkComputingProducer<
   ErrorType extends Error = Error,
 >(
   cache: PublicInterface<Cache<RT, Validators, Params>>,
-  options: WrapProducerOptions<Params> | undefined,
+  options: WrapProducerOptions | undefined,
   branches: {
     readonly [K in Covered]: K extends ResourceTypeName<RT>
       ? Omit<ComputingBranch<Input, RT, K, Validators, Params>, "produce"> & {
@@ -557,7 +563,6 @@ export function wrapBulkComputingProducer<
     "wrapBulkComputingProducer",
     branches,
   ) as unknown as [string, LooseBulkBranch][];
-  const branchesByName = new Map(branchEntries);
   const registry = new InputRegistry<Input>();
   const hashSupplementals = makeSupplementalHasher<Input>(
     "wrapBulkComputingProducer",
@@ -626,34 +631,36 @@ export function wrapBulkComputingProducer<
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
 
-    // Route each input to its branch, then hash it with that branch's
-    // `hashInput` (bounded by `hashLimit`; `hashInput` may be sync — p-limit
-    // handles that).
-    const branchNames = inputs.map(
-      (input) =>
-        findBranch("wrapBulkComputingProducer", branchEntries, input)[0],
+    // Route each input to its branch, keeping the branch itself (not just its
+    // name) so hashing doesn't have to look it up again, then hash with that
+    // branch's `hashInput` (bounded by `hashLimit`; `hashInput` may be sync --
+    // p-limit handles that).
+    const routed = zip2(
+      inputs,
+      inputs.map((input) =>
+        findBranch("wrapBulkComputingProducer", branchEntries, input),
+      ),
     );
     const ids = await Promise.all(
-      inputs.map(async (input, index) =>
-        hashLimit(async () => {
-          // Non-null assertion is safe: index-aligned with `inputs`, and every
-          // branch name came from `branchEntries`.
-          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          const branch = branchesByName.get(branchNames[index]!)!;
-          return branch.hashInput(input);
-        }),
+      routed.map(async ([input, [, branch]]) =>
+        hashLimit(async () => branch.hashInput(input)),
       ),
     );
     signal?.throwIfAborted();
 
-    ids.forEach((id, index) => {
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- index-aligned with `ids`
-      checkMintedId(cache, branchNames[index]!, id);
+    const mintedIds = zip2(ids, routed);
+
+    mintedIds.forEach(([id, [, [branchName]]]) => {
+      checkMintedId(cache, branchName, id);
     });
 
-    ids.forEach((id, index) => {
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- index-aligned with `ids`
-      registry.acquire(id, inputs[index]!);
+    // A separate pass from the mint check, deliberately: `acquire` is only
+    // balanced by the `finally` below, so a `checkMintedId` throw partway
+    // through a combined loop would leave earlier ids acquired and never
+    // released -- retaining their (potentially large) inputs for the process
+    // lifetime.
+    mintedIds.forEach(([id, [input]]) => {
+      registry.acquire(id, input);
     });
     try {
       return await wrapped(
@@ -713,31 +720,34 @@ function makeSupplementalHasher<Input>(
     return {
       ...primary,
       supplementalResources: await Promise.all(
-        supplementalResources.map(async (resource) =>
-          limit(async () => {
-            if (!("input" in resource)) {
-              // Id-keyed: a plain ProducerResultResource for any registry
-              // type, stored as-is (classified by its own id at store time,
-              // exactly like plain producers' supplementals).
-              return resource;
-            }
-            // Input-keyed: route to a covered branch with the same
-            // `matchesInput` selection applied to call-time inputs, hash
-            // with THAT branch's `hashInput`, and mint-check eagerly -- so
-            // a producer minting a bad supplemental id fails the invocation
-            // loudly (named branch) instead of a silent store-time
-            // rejection behind the wrappers' fire-and-forget store.
-            const { input, ...rest } = resource;
+        supplementalResources.map((resource) => {
+          if (!("input" in resource)) {
+            // Id-keyed: a plain ProducerResultResource for any registry type,
+            // stored as-is (classified by its own id at store time, exactly
+            // like plain producers' supplementals). Resolved OUTSIDE the
+            // limiter -- there is nothing to hash, so queueing it would buy a
+            // p-limit job and a tick to hand back the same object, and would
+            // make id-keyed entries wait behind hashing ones.
+            return Promise.resolve(resource);
+          }
+          // Input-keyed: route to a covered branch with the same
+          // `matchesInput` selection applied to call-time inputs, hash
+          // with THAT branch's `hashInput`, and mint-check eagerly -- so
+          // a producer minting a bad supplemental id fails the invocation
+          // loudly (named branch) instead of a silent store-time
+          // rejection behind the wrappers' fire-and-forget store.
+          const { input, ...rest } = resource;
+          return limit(async () => {
             const [branchName, branch] = findBranch(
               wrapperName,
               branchEntries,
               input,
             );
-            const id = await Promise.resolve(branch.hashInput(input as Input));
+            const id = await branch.hashInput(input as Input);
             checkMintedId(cache, branchName, id);
             return { ...rest, id };
-          }),
-        ),
+          });
+        }),
       ),
     } as unknown as RequestPairedProducerResult<
       CacheSpec,

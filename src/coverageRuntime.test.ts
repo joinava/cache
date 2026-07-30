@@ -164,7 +164,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         expect(siteProducer.mock.callCount()).to.equal(0);
         expect(bizProducer.mock.callCount()).to.equal(0);
         // ...and, as a pre-dispatch validation failure, it emits NO channel
-        // messages (contract adjudication: no disposition ever existed).
+        // messages (no disposition ever existed).
         expect(capture.read).to.deep.equal([]);
         expect(capture.fetch).to.deep.equal([]);
         expect(capture.produce).to.deep.equal([]);
@@ -415,11 +415,12 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     });
 
     it("a multi-branch wrapper missing matchesInput on a branch throws at construction", async () => {
-      // §6.4: matchesInput is "required when the wrapper covers more than one
-      // type". The doc specs the enforcement as compile-time overloads
-      // (§11.5); the implementation enforces it at construction time instead
-      // (see the acceptance report) -- this pins that a multi-branch wrapper
-      // with a matcher-less branch can never be constructed silently.
+      // `matchesInput` is required when the wrapper covers more than one type.
+      // Enforced by a construction-time throw rather than the compile-time
+      // overloads originally specced (a ratified deviation; see §6.7 of
+      // docs/plans/2026-07-28-resource-type-registry-and-diagnostics.md), so
+      // this pins that a multi-branch wrapper with a matcher-less branch can
+      // never be constructed silently.
       const cache = new Cache({
         store: memoryStoreFor(registry),
         name: uniqueCacheName("computing-missing-matcher"),

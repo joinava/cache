@@ -19,12 +19,11 @@ import {
   wrapComputingProducer,
 } from "./wrapComputingProducer.js";
 
-// 2.0: computing wrappers take (cache, options, branches) with per-covered-
-// type { matchesInput, hashInput, produce } branches; the
-// computingProducerByInputType builder is deleted. The 1.6.0 `isCacheable`
-// test was removed with the option itself (§6.3). All computing-wrapper calls
-// pass explicit type arguments: `Input` inference degrades to `unknown` when
-// branch functions are pre-typed references (see the acceptance report).
+// Computing wrappers take (cache, options, branches) with per-covered-type
+// { matchesInput, hashInput, produce } branches. All computing-wrapper calls
+// below pass explicit type arguments, because `Input` inference degrades to
+// `unknown` when branch functions are pre-typed references rather than inline
+// literals.
 const testRegistry = {
   computed: resourceType<string>()({
     matches: (id): id is string => typeof id === "string",
@@ -175,7 +174,7 @@ describe("wrapComputingProducer", () => {
     expect(producer.mock.callCount()).to.eq(1);
   });
 
-  it("call-time directives: maxAge 0 forces recomputation of a memoized input (restored 1.6.0 parity)", async () => {
+  it("call-time directives: maxAge 0 forces recomputation of a memoized input", async () => {
     const producer = mock.fn(async (input: Input) =>
       result(input.text.toUpperCase()),
     );
@@ -274,7 +273,7 @@ describe("wrapBulkComputingProducer", () => {
     expect(producer.mock.callCount()).to.eq(1);
   });
 
-  it("call-time directives apply to every element: maxAge 0 recomputes a memoized batch (restored 1.6.0 parity)", async () => {
+  it("call-time directives apply to every element: maxAge 0 recomputes a memoized batch", async () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text.toUpperCase())),
     );
@@ -302,11 +301,9 @@ describe("wrapBulkComputingProducer", () => {
 
 // --- heterogeneous branches: correlated (input kind, id space, content) ---
 //
-// (Successor of the 1.6.0 computingProducerByInputType tests, including its
-// cross-variant supplemental coverage: supplementals may be input-keyed for
-// ANY covered branch — routed by `matchesInput`, hashed by the routed
-// branch's `hashInput` — or id-keyed for any registry type, restored to full
-// 1.6.0 parity on 2026-07-29.)
+// Includes cross-variant supplemental coverage: supplementals may be
+// input-keyed for ANY covered branch — routed by `matchesInput`, hashed by the
+// routed branch's `hashInput` — or id-keyed for any registry type.
 
 type Story = { id: string; title: string };
 type StoryInput = { kind: "story"; id: string };
@@ -437,7 +434,7 @@ describe("computing wrappers with heterogeneous branches", () => {
     expect(collectionProduce.mock.callCount()).to.eq(1);
   });
 
-  it("input-keyed supplementals may target OTHER covered branches: routed by matchesInput, hashed by the routed branch's hashInput (restored 1.6.0 parity)", async () => {
+  it("input-keyed supplementals may target OTHER covered branches: routed by matchesInput, hashed by the routed branch's hashInput", async () => {
     const collectionProduce = mock.fn(async (input: ReadonlyDeep<VInput>) => ({
       content: (input as CollInput).ids.map(makeStory),
       directives: { freshUntilAge: 100 },

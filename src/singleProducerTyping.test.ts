@@ -2,8 +2,10 @@ import { expect } from "chai";
 import { describe, it } from "node:test";
 
 import {
+  expectType,
   memoryStoreFor,
   uniqueCacheName,
+  type Equal,
 } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
@@ -39,12 +41,6 @@ import {
  * live in their own file to keep this change's tests separable from the 2.0
  * acceptance suites.)
  */
-
-type Equal<X, Y> =
-  (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2
-    ? true
-    : false;
-const expectType = <_T extends true>(): void => {};
 
 type StoryId = `story:${string}`;
 type CollectionId = `collection:${string}`;

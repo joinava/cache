@@ -572,9 +572,9 @@ describe("Cache", { concurrency: true }, () => {
       expect(listener.mock.calls[1]?.arguments[1]).to.eq(Infinity);
     });
 
-    // (The 1.6.0 store-entry-result channel suite that lived here moved to
-    // diagnosticsChannels.test.ts: 2.0 renamed the channel to
-    // @zingage/cache:store-entry and attributed its messages.)
+    // The @zingage/cache:store-entry channel's own conformance suite (payload
+    // shape and per-resource-type attribution) lives in
+    // diagnosticsChannels.test.ts.
   });
 
   describe("AbortSignal support", () => {

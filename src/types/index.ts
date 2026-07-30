@@ -19,6 +19,7 @@ export type {
   ConsumerDirectives,
   ConsumerMaxStale,
   ConsumerRequest,
+  ReadonlyConsumerRequest,
 } from "./03_ConsumerRequest.js";
 export type {
   ProducerDirectives,

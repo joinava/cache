@@ -24,13 +24,12 @@ import type { NormalizedProducerResult } from "../types/06_Normalization.js";
 import { type mapTuple } from "./utils.js";
 import { wrapBulkProducer } from "./wrapBulkProducer.js";
 
-// 2.0: the wrapper takes ONE producer function over a required registry, and a
-// bare function covers the whole registry. This suite's behavior is
+// The wrapper takes ONE producer function over a required registry, and a bare
+// function covers the whole registry. This suite's behavior is
 // id-structure-agnostic (fixture ids are arbitrary strings), so it uses a
 // sole-type registry and passes its producers bare; per-type dispatch
 // (`bulkProducerByIdType`) lives in coverageRuntime.test.ts and
-// diagnosticsChannels.test.ts. The 1.6.0 `isCacheable` tests were removed with
-// the option itself (§6.3's producer purity contract).
+// diagnosticsChannels.test.ts.
 const testRegistry = {
   resources: resourceType<unknown>()({
     matches: (id): id is string => typeof id === "string",

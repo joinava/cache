@@ -368,7 +368,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
 
   describe("classification failures through the wrappers", () => {
     it("an unclassifiable request id rejects the wrapped call pre-dispatch: no read, no fetch, no produce", async () => {
-      // Contract adjudication: pre-dispatch validation failures
+      // Pre-dispatch validation failures
       // (UnclassifiableIdError / AmbiguousResourceTypeError /
       // NoProducerForResourceTypeError) throw before any disposition exists,
       // so -- like the failed-read "throw" path -- they emit NO fetch message.
