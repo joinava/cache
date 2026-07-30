@@ -25,7 +25,7 @@ import type {
   ResourceTypes,
   SpecOf,
 } from "../types/00_ResourceTypes.js";
-import { registryEntries } from "../resourceTypeClassification.js";
+import { resourceTypesEntries } from "../resourceTypeClassification.js";
 import type {
   AnyParams,
   AnyValidators,
@@ -178,7 +178,7 @@ export function bulkProducerByIdType<
 
   // Computed once, here, rather than per classified id. Named for the registry
   // it comes from: `entries` in this function's scope means a request group's.
-  const classifierEntries = registryEntries(resourceTypes);
+  const classifierEntries = resourceTypesEntries(resourceTypes);
 
   type LooseRequest = LooseRequestFor<RT, Params>;
   type LooseResult = LooseResultFor<RT, Validators, Params>;

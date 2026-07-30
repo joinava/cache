@@ -557,12 +557,12 @@ needed for that at all).
 
 ### 11.2 Classification moved to the registry; a cache-free error
 
-`Cache.classify`'s loop moved to `classifyIdAgainst(registryEntries(rt), id)` in
+`Cache.classify`'s loop moved to `classifyIdAgainst(resourceTypesEntries(rt), id)` in
 the registry module, which **returns** an `IdClassification` outcome instead of
 throwing: the registry has no identity to name in an error. `Cache.classify` is
 now a thin renderer of that outcome into its existing cache-named errors — same
 behaviour, one implementation, and the `Object.entries` cast that widened a
-generic mapped type's values now lives in `registryEntries` alone. Both are
+generic mapped type's values now lives in `resourceTypesEntries` alone. Both are
 exported, because a hand-written multi-type producer needs exactly this and
 should not have to reach for a cache either.
 

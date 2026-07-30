@@ -6,7 +6,7 @@
  * derivations -- live in `types/00_ResourceTypes.ts`, which holds only types, as
  * that directory's contract says. This file holds the values: the two entry
  * constructors (`resourceType`, `idStartsWith`) and classification itself
- * (`registryEntries`, `classifyIdAgainst`), plus the two types that exist purely
+ * (`resourceTypesEntries`, `classifyIdAgainst`), plus the two types that exist purely
  * as their result shapes.
  *
  * ## Classification contract
@@ -65,7 +65,7 @@ export function idStartsWith<Prefix extends string>(
 }
 
 /**
- * A registry's enumerable `[name, spec]` pairs; see {@link registryEntries}.
+ * A registry's enumerable `[name, spec]` pairs; see {@link resourceTypesEntries}.
  */
 export type ResourceTypesEntries<RT extends ResourceTypes> =
   readonly (readonly [ResourceTypeName<RT>, RT[ResourceTypeName<RT>]])[];
@@ -74,7 +74,7 @@ export type ResourceTypesEntries<RT extends ResourceTypes> =
  * The registry's entries, typed. Computed ONCE per holder (a cache, a
  * by-id-type producer) rather than per classified id.
  */
-export function registryEntries<RT extends ResourceTypes>(
+export function resourceTypesEntries<RT extends ResourceTypes>(
   resourceTypes: RT,
 ): ResourceTypesEntries<RT> {
   // SAFETY: Object.entries widens a generic mapped type's values to `unknown`

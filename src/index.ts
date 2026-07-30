@@ -25,8 +25,8 @@ export {
 export {
   classifyIdAgainst,
   idStartsWith,
-  registryEntries,
   resourceType,
+  resourceTypesEntries,
   type IdClassification,
   type ResourceTypesEntries,
 } from "./resourceTypeClassification.js";

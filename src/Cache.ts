@@ -35,8 +35,8 @@ import {
 } from "./types/index.js";
 import {
   classifyIdAgainst,
-  registryEntries,
   resourceType,
+  resourceTypesEntries,
   type ResourceTypesEntries,
 } from "./resourceTypeClassification.js";
 import { type Bind1 } from "./types/utils.js";
@@ -285,7 +285,7 @@ export default class Cache<
     this.#onStoreAfterClose = options.onStoreAfterClose ?? "throw";
     this.name = options.name;
     this.resourceTypes = options.resourceTypes;
-    this.#resourceTypeEntries = registryEntries(options.resourceTypes);
+    this.#resourceTypeEntries = resourceTypesEntries(options.resourceTypes);
     this.normalizeParamName = options.normalizeParamName ?? ((it) => it);
     this.normalizeParamValue =
       options.normalizeParamValue ??

@@ -18,8 +18,8 @@ import type {
 import {
   classifyIdAgainst,
   type IdClassification,
+  resourceTypesEntries,
   type ResourceTypesEntries,
-  registryEntries,
 } from "../resourceTypeClassification.js";
 import type { AnyParams, AnyValidators } from "../types/index.js";
 import {
@@ -149,7 +149,7 @@ export function producerByIdType<
   }
 
   // Computed once, here, rather than per classified id.
-  const entries = registryEntries(resourceTypes);
+  const entries = resourceTypesEntries(resourceTypes);
 
   type LooseRequest = LooseRequestFor<RT, Params>;
 
