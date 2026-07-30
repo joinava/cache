@@ -174,16 +174,45 @@ The package provides **four** functions for wrapping producers with a cache. The
 
 - [`wrapComputingProducer.ts`](./src/utils/wrapComputingProducer.ts) — **`wrapComputingProducer`** and **`wrapBulkComputingProducer`**: the "compute" counterparts to the two above, for when the cached value is not an entity looked up by id but an expensive-to-compute **function of some input** — value = `f(input)`, reused whenever the same input recurs (e.g. an LLM extraction over a chunk of text). Here a hash of the input is the natural cache key, but the producer wants the original, un-hashed input to do the work.
 
-  You pass `(cache, options, branches)`, where `branches` has one entry per covered resource type: `{ matchesInput?, hashInput, produce }`. `hashInput` derives the branch's cache ids from its inputs (and must mint ids that the branch's own registry guard accepts — checked at runtime by classifying each minted id, vacuous for accept-everything registries — a `singleTypeCacheOptions` cache with no `validateId` — where `hashInput`'s compile-checked return type is the line of defense). `matchesInput` routes each incoming input to its branch; it's required when the wrapper covers more than one type and ignored when it covers exactly one. The wrapper keeps each input around (reference-counted, so it survives request collapsing without leaking) just long enough to hand it to `produce` on a miss, and otherwise behaves like `wrapProducer`/`wrapBulkProducer` — including call-time consumer `directives` (e.g. `compute(input, { directives: { maxAge: 0 } })` forces a recompute). A computing producer may also return `supplementalResources` in two forms: **input-keyed** (`{ input, … }` — routed to a covered branch via the same `matchesInput` selection as call-time inputs, hashed with that branch's `hashInput`, and mint-checked eagerly, so a later `compute(thatInput)` is a hit) or **id-keyed** (`{ id, … }` — a plain resource for *any* registry type, classified by its own id at store time, exactly like plain producers' supplementals).
+  You pass **one options bag**. For a cache with one resource type, the two functions are the whole contract — no record, no map, no type arguments:
 
   ```ts
-  const extract = wrapComputingProducer(cache, {}, {
-    extraction: {
-      hashInput: (input: Chunk) => `extract:${sha256(canonicalize(input))}` as const,
-      produce: async (input) => ({ content: await runLlm(input), directives: { freshUntilAge: Infinity } }),
-    },
+  const extract = wrapComputingProducer({
+    cache,
+    hashInput: (input: Chunk) => `extract:${sha256(canonicalize(input))}` as const,
+    produce: async (input) => ({ content: await runLlm(input), directives: { freshUntilAge: Infinity } }),
   });
   ```
+
+  For several resource types, `hashingProducerByInputType` builds a **hashing producer** — one `.when` per covered type, dispatching on the input. It takes **no cache**: a hashing producer is a value in its own right, buildable (and reusable) before any cache exists, and checked against a cache's registry only where the two are wired together.
+
+  ```ts
+  const hashingProducer = hashingProducerByInputType<{
+    story: ComputingVariant<StoryInput, Story>;
+    collection: ComputingVariant<CollInput, Story[]>;
+  }>()
+    .when((i): i is StoryInput => i.kind === "story", {
+      name: "story",
+      hashInput: (input) => `extract:story:${input.id}`,        // input: StoryInput
+      produce: async (input) => ({ content: await extractStory(input), directives }),
+    })
+    .when((i): i is CollInput => i.kind === "collection", {
+      name: "collection",
+      hashInput: (input) => `extract:collection:${input.ids.join(",")}`,
+      produce: async (input) => ({ content: await extractAll(input), directives }),
+    })
+    .build();
+
+  const extract = wrapComputingProducer({ cache, hashingProducer });
+  ```
+
+  The variant map declares each resource type's input and the content computed from it, so a branch is validated where it is written: `produce` must return that variant's output, `input` is narrowed to that variant's input (no casts), and a second `.when` for an already-covered variant is rejected rather than silently shadowed. `name` selects the variant and the guard is only the runtime dispatcher — which is why two variants may be computed from the *same* input type (a summary and a translation of one story) and why a guard may prove a *subtype* of the declared input.
+
+  Wiring a producer to a cache is what brings the registry in: each branch's minted-id type is checked against its resource type's id space, each variant's declared output against that type's content, and every variant name against the registry — reported as named, per-branch problems. `hashInput` must mint ids the branch's own registry guard accepts, and that is *also* checked at runtime by classifying each minted id (naming the branch), which is the backstop for a mint arriving through a cast or an untyped boundary. For accept-everything registries — a `singleTypeCacheOptions` cache with no `validateId` — the runtime check is vacuous and the compile-time one carries the weight.
+
+  The wrapper keeps each input around (reference-counted, so it survives request collapsing without leaking) just long enough to hand it to `produce` on a miss, and otherwise behaves like `wrapProducer`/`wrapBulkProducer` — including call-time consumer `directives` (e.g. `compute(input, { directives: { maxAge: 0 } })` forces a recompute). A computing producer may also return `supplementalResources` in two forms: **input-keyed** (`{ input, … }` — routed to a covered branch via the same guard selection as call-time inputs, hashed with that branch's `hashInput`, and mint-checked eagerly, so a later `compute(thatInput)` is a hit; in a hashing producer the `input` and `content` must come from the SAME variant) or **id-keyed** (`{ id, … }` — a plain resource for *any* registry type, classified by its own id at store time, exactly like plain producers' supplementals; typing these needs the registry's id space, so a cache-free hashing producer must be declared with its `SpecOf` to return them).
+
+  `wrapBulkComputingProducer` is the same, with `bulkHashingProducerByInputType` for the multi-type form: each branch's `produce` computes a batch of that branch's missed inputs and returns a result (or an `Error`) per input, aligned by index.
 
 ## Diagnostics channels
 

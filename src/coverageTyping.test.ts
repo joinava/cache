@@ -18,9 +18,13 @@ import {
   resourceType,
   singleTypeCacheOptions,
   wrapBulkProducer,
+  hashingProducerByInputType,
   wrapComputingProducer,
+  type AnyParams,
+  type AnyValidators,
   type CacheReadMessage,
   type CacheSpec,
+  type ComputingVariant,
   type ContentOfResourceType,
   type IdOfResourceType,
   type ResourceTypeName,
@@ -624,52 +628,34 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       });
       try {
         if (false as boolean) {
-          // (Explicit type args on the computing-wrapper calls below: `Input`
-          // inference degrades to `unknown` in some shapes -- see the final
-          // report -- and these fixtures are about hashInput's RETURN type.)
+          // These caches have one resource type, so the two-function form
+          // applies and there is nothing to name: `Input` comes from
+          // `hashInput`'s parameter and the entry type from its RETURN.
 
           // prettier-ignore
           // @ts-expect-error hashInput returning a bare string is rejected when the sole type declares a narrowed Id
-          void wrapComputingProducer<{ b: string }, typeof zendeskRegistry, "ticket_schema">(zendeskCache, {}, { ticket_schema: { hashInput: (input) => `nope-${input.b}`, produce: async () => ({ content: { fields: [] as string[] }, directives: freshFor1 }) } });
+          void wrapComputingProducer({ cache: zendeskCache, hashInput: (input: { b: string }) => `nope-${input.b}`, produce: async () => ({ content: { fields: [] as string[] }, directives: freshFor1 }) });
 
           // A conforming hashInput compiles...
-          void wrapComputingProducer<
-            { b: string },
-            typeof zendeskRegistry,
-            "ticket_schema"
-          >(
-            zendeskCache,
-            {},
-            {
-              ticket_schema: {
-                hashInput: (input): `zendesk-ticket-schema:${string}` =>
-                  `zendesk-ticket-schema:${input.b}`,
-                produce: async () => ({
-                  content: { fields: [] as string[] },
-                  directives: freshFor1,
-                }),
-              },
-            },
-          );
+          void wrapComputingProducer({
+            cache: zendeskCache,
+            hashInput: (input: { b: string }): `zendesk-ticket-schema:${string}` =>
+              `zendesk-ticket-schema:${input.b}`,
+            produce: async () => ({
+              content: { fields: [] as string[] },
+              directives: freshFor1,
+            }),
+          });
 
           // ...and the default (un-narrowed) sole form accepts plain strings.
-          void wrapComputingProducer<
-            { k: string },
-            typeof defaultRegistry,
-            "visits"
-          >(
-            defaultCache,
-            {},
-            {
-              visits: {
-                hashInput: (input) => `computed:${input.k}`,
-                produce: async () => ({
-                  content: [1, 2],
-                  directives: freshFor1,
-                }),
-              },
-            },
-          );
+          void wrapComputingProducer({
+            cache: defaultCache,
+            hashInput: (input: { k: string }) => `computed:${input.k}`,
+            produce: async () => ({
+              content: [1, 2],
+              directives: freshFor1,
+            }),
+          });
         }
       } finally {
         await zendeskCache.close();
@@ -682,146 +668,182 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     type SiteInput = { kind: "site"; key: string };
     type BizInput = { kind: "biz"; key: string };
     type BranchedInput = SiteInput | BizInput;
-    const isInput = (input: unknown): input is BranchedInput =>
-      typeof input === "object" && input !== null && "kind" in input;
-    const siteHash = (input: BranchedInput): SiteId => `site:${input.key}`;
-    const bizHash = (input: BranchedInput): BizId => `biz:${input.key}`;
-    const siteProduceFn = async (_input: BranchedInput) => ({
-      content: { visits: [] as number[] },
-      directives: freshFor1,
-    });
-    const bizProduceFn = async (_input: BranchedInput) => ({
-      content: { visits: [] as number[] },
-      directives: freshFor1,
-    });
+    // Each guard proves only its OWN branch's input, which is what `name`
+    // selecting the variant buys: an input-derived selection would force both
+    // guards to claim the whole union.
+    const isSite = (input: BranchedInput): input is SiteInput =>
+      input.kind === "site";
+    const isBiz = (input: BranchedInput): input is BizInput =>
+      input.kind === "biz";
+    type Variants = {
+      site_day: ComputingVariant<SiteInput, Visits>;
+      business_slice: ComputingVariant<BizInput, Visits>;
+    };
 
-    it("accepts matchesInput on every branch of a multi-branch wrapper and omission on a single-branch one", async () => {
-      // `matchesInput` is typed plain-optional, and the
-      // required-when-multi/ignored-when-single rule is enforced by a
-      // construction-time throw rather than by compile-time overloads (a
-      // ratified deviation from the original spec; see §6.7 of
-      // docs/plans/2026-07-28-resource-type-registry-and-diagnostics.md, and
-      // coverageRuntime.test.ts for the runtime pins). The two negative
-      // fixtures (missing-on-multi rejected, present-on-single rejected) are
-      // therefore omitted here -- with them,
-      // the suite would not compile against the current implementation.
+    it("a hashing producer is built with no cache, and narrows each branch's input", () => {
+      // The whole point of the builder being cache-free: this is a value, not
+      // a call that needs a cache to exist first.
+      const producer = hashingProducerByInputType<Variants>()
+        .when(isSite, {
+          name: "site_day",
+          // `input` is SiteInput -- not the union, and not `any`.
+          hashInput: (input) => `site:${input.key}` as SiteId,
+          produce: async (input) => ({
+            content: { visits: [input.key.length] },
+            directives: freshFor1,
+          }),
+        })
+        .when(isBiz, {
+          name: "business_slice",
+          hashInput: (input) => `biz:${input.key}` as BizId,
+          produce: async (input) => ({
+            content: { visits: [input.key.length] },
+            directives: freshFor1,
+          }),
+        })
+        .build();
+
       const cache = new Cache({
         store: memoryStoreFor(registry),
-        name: uniqueCacheName("typing-matchesinput"),
+        name: uniqueCacheName("typing-computing-built"),
         resourceTypes: registry,
       });
-      try {
-        if (false as boolean) {
-          // Multi-branch WITH matchesInput everywhere: compiles.
-          void wrapComputingProducer<
-            BranchedInput,
-            typeof registry,
-            "site_day" | "business_slice"
-          >(
-            cache,
-            {},
-            {
-              site_day: {
-                matchesInput: isInput,
-                hashInput: siteHash,
-                produce: siteProduceFn,
-              },
-              business_slice: {
-                matchesInput: isInput,
-                hashInput: bizHash,
-                produce: bizProduceFn,
-              },
-            },
-          );
+      const compute = wrapComputingProducer({ cache, hashingProducer: producer });
 
-          // Single-branch WITHOUT matchesInput: compiles.
-          void wrapComputingProducer<
-            BranchedInput,
-            typeof registry,
-            "site_day"
-          >(
-            cache,
-            {},
-            {
-              site_day: { hashInput: siteHash, produce: siteProduceFn },
-            },
-          );
-        }
-      } finally {
-        await cache.close();
+      // The wrapped function accepts the union of the covered branches' inputs,
+      // and returns the union of their contents.
+      expectType<Equal<Parameters<typeof compute>[0], BranchedInput>>();
+      expectType<
+        Equal<Awaited<ReturnType<typeof compute>>["content"], Visits>
+      >();
+
+      if (false as boolean) {
+        // prettier-ignore
+        // @ts-expect-error an input outside every covered variant
+        void compute({ kind: "nope", key: "x" });
+      }
+      void cache.close();
+    });
+
+    it("rejects a branch whose produce returns another variant's content", () => {
+      if (false as boolean) {
+        // Checked against the DECLARED variant, at the branch, with no cache.
+        // prettier-ignore
+        // @ts-expect-error site_day's declared output is Visits, not BlobContent
+        void hashingProducerByInputType<Variants>().when(isSite, { name: "site_day", hashInput: (input) => `site:${input.key}` as SiteId, produce: async () => ({ content: { blob: "x" }, directives: freshFor1 }) });
       }
     });
 
-    it("rejects mismatched (branch id, content) pairs in a computing branch", async () => {
-      const cache = new Cache({
-        store: memoryStoreFor(registry),
-        name: uniqueCacheName("typing-computing-mismatch"),
-        resourceTypes: registry,
-      });
-      try {
-        if (false as boolean) {
-          // prettier-ignore
-          // @ts-expect-error a site_day branch's produce must return site_day content, not extra_blob's
-          void wrapComputingProducer<BranchedInput, typeof registry, "site_day">(cache, {}, { site_day: { hashInput: siteHash, produce: async (_input: BranchedInput) => ({ content: { blob: "x" }, directives: freshFor1 }) } });
-        }
-      } finally {
-        await cache.close();
+    it("rejects a second branch for an already-covered variant", () => {
+      if (false as boolean) {
+        // prettier-ignore
+        // @ts-expect-error site_day already has a `.when` branch, so the second is dead code
+        void hashingProducerByInputType<Variants>().when(isSite, { name: "site_day", hashInput: (input) => `site:${input.key}` as SiteId, produce: async (input) => ({ content: { visits: [input.key.length] }, directives: freshFor1 }) }).when(isSite, { name: "site_day", hashInput: (input) => `site:other-${input.key}` as SiteId, produce: async (input) => ({ content: { visits: [input.key.length] }, directives: freshFor1 }) });
       }
     });
 
-    it("computing supplementals: cross-branch input-keyed and id-keyed cross-type accepted; id-keyed mismatches rejected", async () => {
+    it("rejects a guard that proves an input the variant map never declared", () => {
+      if (false as boolean) {
+        const isUnrelated = (input: BranchedInput): input is BizInput =>
+          input.kind === "biz";
+        // prettier-ignore
+        // @ts-expect-error a BizInput guard cannot serve the site_day variant
+        void hashingProducerByInputType<Variants>().when(isUnrelated, { name: "site_day", hashInput: (input) => `site:${(input as SiteInput).key}` as SiteId, produce: async () => ({ content: { visits: [] as number[] }, directives: freshFor1 }) });
+      }
+    });
+
+    it("rejects, at the cache, a branch minting outside its variant's resource type and a variant name outside the registry", () => {
       const cache = new Cache({
         store: memoryStoreFor(registry),
-        name: uniqueCacheName("typing-computing-supplementals"),
+        name: uniqueCacheName("typing-computing-registry"),
         resourceTypes: registry,
       });
-      try {
-        if (false as boolean) {
-          // A covered branch's produce may return input-keyed supplementals
-          // for ANY covered branch and id-keyed supplementals for ANY
-          // registry type (extra_blob is uncovered here): compiles.
-          void wrapComputingProducer<
-            BranchedInput,
-            typeof registry,
-            "site_day" | "business_slice"
-          >(
-            cache,
-            {},
-            {
-              site_day: {
-                matchesInput: isInput,
-                hashInput: siteHash,
-                produce: async (_input: BranchedInput) => ({
-                  content: { visits: [] as number[] },
+      if (false as boolean) {
+        // The builder is happy (the mint matches nothing it declared about
+        // ids); wiring it to a cache is where the registry has a say.
+        const misMinted = hashingProducerByInputType<Variants>()
+          .when(isSite, {
+            name: "site_day",
+            hashInput: (input) => `biz:${input.key}` as BizId,
+            produce: async () => ({
+              content: { visits: [] as number[] },
+              directives: freshFor1,
+            }),
+          })
+          .build();
+        // prettier-ignore
+        // @ts-expect-error site_day's ids are `site:`, so the wrapped function is a problem object, not callable
+        void wrapComputingProducer({ cache, hashingProducer: misMinted })({ kind: "site", key: "k" });
+
+        const badName = hashingProducerByInputType<{
+          nonsense: ComputingVariant<SiteInput, Visits>;
+        }>()
+          .when(isSite, {
+            name: "nonsense",
+            hashInput: (input) => `site:${input.key}` as SiteId,
+            produce: async () => ({
+              content: { visits: [] as number[] },
+              directives: freshFor1,
+            }),
+          })
+          .build();
+        // prettier-ignore
+        // @ts-expect-error "nonsense" is not a resource type of this registry
+        void wrapComputingProducer({ cache, hashingProducer: badName })({ kind: "site", key: "k" });
+      }
+      void cache.close();
+    });
+
+    it("computing supplementals: input-keyed correlate per variant; id-keyed need the registry declared", () => {
+      if (false as boolean) {
+        // Input-keyed supplementals may target ANY covered variant, and are
+        // correlated: the input and content must come from the same one.
+        // Id-keyed ones need the registry's id space, which a cache-free
+        // builder only has if it is declared (here, for `extra_blob`, which
+        // this producer does not even cover).
+        void hashingProducerByInputType<
+          Variants,
+          AnyValidators,
+          AnyParams,
+          SpecOf<typeof registry>
+        >()
+          .when(isSite, {
+            name: "site_day",
+            hashInput: (input) => `site:${input.key}` as SiteId,
+            produce: async () => ({
+              content: { visits: [] as number[] },
+              directives: freshFor1,
+              supplementalResources: [
+                {
+                  input: { kind: "biz", key: "b" } satisfies BizInput,
+                  content: { visits: [] as number[] } satisfies Visits,
                   directives: freshFor1,
-                  supplementalResources: [
-                    {
-                      input: { kind: "biz", key: "b" } as BranchedInput,
-                      content: { visits: [] as number[] },
-                      directives: freshFor1,
-                    },
-                    {
-                      id: "extra:1" as ExtraId,
-                      content: { blob: "x" },
-                      directives: freshFor1,
-                    },
-                  ],
-                }),
-              },
-              business_slice: {
-                matchesInput: isInput,
-                hashInput: bizHash,
-                produce: bizProduceFn,
-              },
-            },
-          );
+                },
+                {
+                  id: "extra:1" as ExtraId,
+                  content: { blob: "x" } satisfies BlobContent,
+                  directives: freshFor1,
+                },
+              ],
+            }),
+          })
+          .when(isBiz, {
+            name: "business_slice",
+            hashInput: (input) => `biz:${input.key}` as BizId,
+            produce: async () => ({
+              content: { visits: [] as number[] },
+              directives: freshFor1,
+            }),
+          })
+          .build();
 
-          // prettier-ignore
-          // @ts-expect-error an id-keyed supplemental's (id, content) must correlate: an extra_blob id cannot carry site_day content
-          void wrapComputingProducer<BranchedInput, typeof registry, "site_day">(cache, {}, { site_day: { hashInput: siteHash, produce: async (_input: BranchedInput) => ({ content: { visits: [] as number[] }, directives: freshFor1, supplementalResources: [{ id: "extra:1" as ExtraId, content: { visits: [] as number[] }, directives: freshFor1 }] }) } });
-        }
-      } finally {
-        await cache.close();
+        // prettier-ignore
+        // @ts-expect-error an id-keyed supplemental's (id, content) must correlate: an extra_blob id cannot carry Visits
+        void hashingProducerByInputType<Variants, AnyValidators, AnyParams, SpecOf<typeof registry>>().when(isSite, { name: "site_day", hashInput: (input) => `site:${input.key}` as SiteId, produce: async () => ({ content: { visits: [] as number[] }, directives: freshFor1, supplementalResources: [{ id: "extra:1" as ExtraId, content: { visits: [] as number[] }, directives: freshFor1 }] }) });
+
+        // prettier-ignore
+        // @ts-expect-error a business_slice input cannot carry BlobContent, which no variant declares
+        void hashingProducerByInputType<Variants>().when(isSite, { name: "site_day", hashInput: (input) => `site:${input.key}` as SiteId, produce: async () => ({ content: { visits: [] as number[] }, directives: freshFor1, supplementalResources: [{ input: { kind: "biz", key: "b" } satisfies BizInput, content: { blob: "x" }, directives: freshFor1 }] }) });
       }
     });
   });

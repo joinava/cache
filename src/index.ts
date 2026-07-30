@@ -47,10 +47,15 @@ export {
   type WrapProducerOptions,
 } from "./utils/wrapProducer.js";
 export {
+  bulkHashingProducerByInputType,
+  hashingProducerByInputType,
   wrapBulkComputingProducer,
   wrapComputingProducer,
-  type ComputingBranch,
+  type BulkHashingProducerBuilder,
   type ComputingProducerResult,
+  type ComputingVariant,
+  type HashingProducer,
+  type HashingProducerBuilder,
 } from "./utils/wrapComputingProducer.js";
 
 // Diagnostics channels

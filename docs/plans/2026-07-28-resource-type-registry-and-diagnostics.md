@@ -587,9 +587,18 @@ non-exhaustive-build error type are **deleted**.
 
 ### 6.4 Computing producers
 
-Same dissolution: `computingProducerByInputType` and its builder/variant types
+> **Superseded (2026-07-30) by
+> [2026-07-30-hashing-producer-builder.md](./2026-07-30-hashing-producer-builder.md).**
+> The per-covered-type `branches` record described below shipped, then was
+> replaced: the wrappers now take one options bag — `{ cache, hashInput, produce }`
+> for a single resource type, or `{ cache, hashingProducer }` where the producer
+> is built, cache-free, by `hashingProducerByInputType`. What follows still
+> describes the coverage/minted-id/supplemental *contracts*, which carried over
+> unchanged; the shape that carries them did not.
+
+Initially: `computingProducerByInputType` and its builder/variant types
 (`ComputingVariant`, `ComputingVariantSupplemental`, `InputForVariants`,
-`ContentForVariants`, `ComputingProducerByInputTypeBuilder`) are **deleted** in
+`ContentForVariants`, `ComputingProducerByInputTypeBuilder`) were **deleted** in
 favor of a per-covered-type record (coverage inferred from the record's keys,
 exactly as in §6.3 — any non-empty subset of the registry). Because computing ids are hashes, the
 in-band-discriminator requirement (§6.1) is on `hashInput`: each branch's
@@ -1056,13 +1065,19 @@ type, exactly like plain producers' (§6.4). Driving rationale: production's
 contracts shouldn't diverge. Call-time `params` stays out — it never existed
 on computing wrappers, and anything that changes a computed output belongs
 in the input (a second identity axis would compete with the hash).
-`ComputingBranch.matchesInput` is typed plain-optional, with
+`ComputingBranch.matchesInput` was typed plain-optional, with
 required-when-multi enforced by a construction-time throw and silently
-ignored when single (resolving §11's overloads question). Known inference
-limit: computing `Input` infers only from inline branch closures —
-pre-typed function references (e.g. `mock.fn(...)` results) degrade `Input`
-to `unknown`, so pass explicit type args there (a `NoInfer` refinement is a
-candidate follow-up).
+ignored when single (resolving §11's overloads question). **Both of those,
+and the inference limit once recorded here, are moot as of 2026-07-30**: the
+builder takes the guard positionally, so a matcher-less multi-branch producer
+is unconstructible and a single-branch one has no guard to ignore; and `Input`
+is no longer a wrapper type parameter to lose (each `.when` infers its own).
+The claim that pre-typed branch functions degraded `Input` to `unknown` was
+also wrong on its own terms — probing five shapes (inline annotated closures,
+hoisted pre-typed functions, a hoisted record, and the multi-branch shape the
+tests used) inferred correctly in all of them, so the explicit type arguments
+those call sites carried were never necessary. See
+[2026-07-30-hashing-producer-builder.md](./2026-07-30-hashing-producer-builder.md).
 
 Post-review adjudications (2026-07-29, adversarial-review round):
 

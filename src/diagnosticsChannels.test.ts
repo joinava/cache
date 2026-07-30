@@ -1647,23 +1647,17 @@ describe("diagnostics channels (§6.5)", () => {
     it("computing wrappers publish the same channel stream, attributed with minted ids: miss emits read/produce/store-entry/fetch; hit emits read/fetch only", async () => {
       const { name, cache } = makeHarness("produce-computing-channels");
       const capture = captureChannels(name);
-      const compute = wrapComputingProducer<
-        { key: string },
-        typeof registry,
-        "site_day"
-      >(
+      // One resource type, so no hashing producer is needed: the two functions
+      // are the whole contract.
+      const compute = wrapComputingProducer({
         cache,
-        {},
-        {
-          site_day: {
-            hashInput: (input): `site:${string}` => `site:${input.key}`,
-            produce: async (input) => ({
-              content: `computed-${input.key}`,
-              directives: freshFor100,
-            }),
-          },
-        },
-      );
+        hashInput: (input: { key: string }): `site:${string}` =>
+          `site:${input.key}`,
+        produce: async (input) => ({
+          content: `computed-${input.key}`,
+          directives: freshFor100,
+        }),
+      });
       try {
         await compute({ key: "k1" });
         await waitUntil(
