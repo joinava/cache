@@ -30,35 +30,41 @@ export { naiveGetMany } from "./utils/utils.js";
 export type { JsonOf } from "type-party";
 export { jsonParse, jsonStringify } from "type-party/runtime/json.js";
 export {
+  NoProducerForResourceTypeError,
+  UnroutableIdError,
+  type UnroutableIdReason,
+} from "./utils/producer-errors.js";
+export {
+  bulkHashedInputProducerByInputType,
+  hashedInputProducerByInputType,
+  type BulkHashedInputProducerBuilder,
+  type HashedInputProducer,
+  type HashedInputProducerBuilder,
+  type HashedInputVariant,
+} from "./utils/hashedInputProducerByInputType.js";
+export {
   bulkProducerByIdType,
+  producerByIdType,
+} from "./utils/producerByIdType.js";
+export {
   wrapBulkProducer,
   type BulkProducersFor,
   type BulkResourceTypeProducer,
   type CoveringBulkProducer,
 } from "./utils/wrapBulkProducer.js";
 export {
+  wrapBulkHashedInputProducer,
+  wrapHashedInputProducer,
+  type HashedInputProducerResult,
+} from "./utils/wrapHashedInputProducer.js";
+export {
   coveredTypes,
   default as wrapProducer,
-  NoProducerForResourceTypeError,
-  producerByIdType,
-  UnroutableIdError,
   type CoveringProducer,
   type ProducersFor,
   type ResourceTypeProducer,
-  type UnroutableIdReason,
   type WrapProducerOptions,
 } from "./utils/wrapProducer.js";
-export {
-  bulkHashingProducerByInputType,
-  hashingProducerByInputType,
-  wrapBulkComputingProducer,
-  wrapComputingProducer,
-  type BulkHashingProducerBuilder,
-  type ComputingProducerResult,
-  type ComputingVariant,
-  type HashingProducer,
-  type HashingProducerBuilder,
-} from "./utils/wrapComputingProducer.js";
 
 // Diagnostics channels
 export {

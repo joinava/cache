@@ -14,13 +14,13 @@ import {
   resourceType,
   singleTypeCacheOptions,
   wrapBulkProducer,
-  hashingProducerByInputType,
-  wrapComputingProducer,
+  hashedInputProducerByInputType,
+  wrapHashedInputProducer,
   type AnyParams,
   type AnyValidators,
   type CacheReadMessage,
   type CacheSpec,
-  type ComputingVariant,
+  type HashedInputVariant,
   type ContentOfResourceType,
   type IdOfResourceType,
   type ResourceTypeName,
@@ -635,10 +635,10 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
 
           // prettier-ignore
           // @ts-expect-error hashInput returning a bare string is rejected when the sole type declares a narrowed Id
-          void wrapComputingProducer({ cache: zendeskCache, hashInput: (input: { b: string }) => `nope-${input.b}`, produce: async () => ({ content: { fields: [] as string[] }, directives: freshFor1 }) });
+          void wrapHashedInputProducer({ cache: zendeskCache, hashInput: (input: { b: string }) => `nope-${input.b}`, produce: async () => ({ content: { fields: [] as string[] }, directives: freshFor1 }) });
 
           // A conforming hashInput compiles...
-          void wrapComputingProducer({
+          void wrapHashedInputProducer({
             cache: zendeskCache,
             hashInput: (input: {
               b: string;
@@ -651,7 +651,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           });
 
           // ...and the default (un-narrowed) sole form accepts plain strings.
-          void wrapComputingProducer({
+          void wrapHashedInputProducer({
             cache: defaultCache,
             hashInput: (input: { k: string }) => `computed:${input.k}`,
             produce: async () => ({
@@ -667,7 +667,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     });
   });
 
-  describe("computing branches (§6.4)", () => {
+  describe("hashed-input branches (§6.4)", () => {
     type SiteInput = { kind: "site"; key: string };
     type BizInput = { kind: "biz"; key: string };
     type BranchedInput = SiteInput | BizInput;
@@ -679,14 +679,14 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     const isBiz = (input: BranchedInput): input is BizInput =>
       input.kind === "biz";
     type Variants = {
-      site_day: ComputingVariant<SiteInput, Visits>;
-      business_slice: ComputingVariant<BizInput, Visits>;
+      site_day: HashedInputVariant<SiteInput, Visits>;
+      business_slice: HashedInputVariant<BizInput, Visits>;
     };
 
-    it("a hashing producer is built with no cache, and narrows each branch's input", () => {
+    it("a hashed-input producer is built with no cache, and narrows each branch's input", () => {
       // The whole point of the builder being cache-free: this is a value, not
       // a call that needs a cache to exist first.
-      const producer = hashingProducerByInputType<Variants>()
+      const producer = hashedInputProducerByInputType<Variants>()
         .when(isSite, {
           name: "site_day",
           // `input` is SiteInput -- not the union, and not `any`.
@@ -711,9 +711,9 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         name: uniqueCacheName("typing-computing-built"),
         resourceTypes: registry,
       });
-      const compute = wrapComputingProducer({
+      const compute = wrapHashedInputProducer({
         cache,
-        hashingProducer: producer,
+        hashedInputProducer: producer,
       });
 
       // The wrapped function accepts the union of the covered branches' inputs,
@@ -736,7 +736,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         // Checked against the DECLARED variant, at the branch, with no cache.
         // prettier-ignore
         // @ts-expect-error site_day's declared output is Visits, not BlobContent
-        void hashingProducerByInputType<Variants>().when(isSite, { name: "site_day", hashInput: (input) => `site:${input.key}` as SiteId, produce: async () => ({ content: { blob: "x" }, directives: freshFor1 }) });
+        void hashedInputProducerByInputType<Variants>().when(isSite, { name: "site_day", hashInput: (input) => `site:${input.key}` as SiteId, produce: async () => ({ content: { blob: "x" }, directives: freshFor1 }) });
       }
     });
 
@@ -744,7 +744,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       if (false as boolean) {
         // prettier-ignore
         // @ts-expect-error site_day already has a `.when` branch, so the second is dead code
-        void hashingProducerByInputType<Variants>().when(isSite, { name: "site_day", hashInput: (input) => `site:${input.key}` as SiteId, produce: async (input) => ({ content: { visits: [input.key.length] }, directives: freshFor1 }) }).when(isSite, { name: "site_day", hashInput: (input) => `site:other-${input.key}` as SiteId, produce: async (input) => ({ content: { visits: [input.key.length] }, directives: freshFor1 }) });
+        void hashedInputProducerByInputType<Variants>().when(isSite, { name: "site_day", hashInput: (input) => `site:${input.key}` as SiteId, produce: async (input) => ({ content: { visits: [input.key.length] }, directives: freshFor1 }) }).when(isSite, { name: "site_day", hashInput: (input) => `site:other-${input.key}` as SiteId, produce: async (input) => ({ content: { visits: [input.key.length] }, directives: freshFor1 }) });
       }
     });
 
@@ -754,7 +754,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           input.kind === "biz";
         // prettier-ignore
         // @ts-expect-error a BizInput guard cannot serve the site_day variant
-        void hashingProducerByInputType<Variants>().when(isUnrelated, { name: "site_day", hashInput: (input) => `site:${(input as SiteInput).key}` as SiteId, produce: async () => ({ content: { visits: [] as number[] }, directives: freshFor1 }) });
+        void hashedInputProducerByInputType<Variants>().when(isUnrelated, { name: "site_day", hashInput: (input) => `site:${(input as SiteInput).key}` as SiteId, produce: async () => ({ content: { visits: [] as number[] }, directives: freshFor1 }) });
       }
     });
 
@@ -767,7 +767,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       if (false as boolean) {
         // The builder is happy (the mint matches nothing it declared about
         // ids); wiring it to a cache is where the registry has a say.
-        const misMinted = hashingProducerByInputType<Variants>()
+        const misMinted = hashedInputProducerByInputType<Variants>()
           .when(isSite, {
             name: "site_day",
             hashInput: (input) => `biz:${input.key}` as BizId,
@@ -779,10 +779,10 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           .build();
         // prettier-ignore
         // @ts-expect-error site_day's ids are `site:`, so the wrapped function is a problem object, not callable
-        void wrapComputingProducer({ cache, hashingProducer: misMinted })({ kind: "site", key: "k" });
+        void wrapHashedInputProducer({ cache, hashedInputProducer: misMinted })({ kind: "site", key: "k" });
 
-        const badName = hashingProducerByInputType<{
-          nonsense: ComputingVariant<SiteInput, Visits>;
+        const badName = hashedInputProducerByInputType<{
+          nonsense: HashedInputVariant<SiteInput, Visits>;
         }>()
           .when(isSite, {
             name: "nonsense",
@@ -795,19 +795,19 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           .build();
         // prettier-ignore
         // @ts-expect-error "nonsense" is not a resource type of this registry
-        void wrapComputingProducer({ cache, hashingProducer: badName })({ kind: "site", key: "k" });
+        void wrapHashedInputProducer({ cache, hashedInputProducer: badName })({ kind: "site", key: "k" });
       }
       void cache.close();
     });
 
-    it("computing supplementals: input-keyed correlate per variant; id-keyed need the registry declared", () => {
+    it("hashed-input supplementals: input-keyed correlate per variant; id-keyed need the registry declared", () => {
       if (false as boolean) {
         // Input-keyed supplementals may target ANY covered variant, and are
         // correlated: the input and content must come from the same one.
         // Id-keyed ones need the registry's id space, which a cache-free
         // builder only has if it is declared (here, for `extra_blob`, which
         // this producer does not even cover).
-        void hashingProducerByInputType<
+        void hashedInputProducerByInputType<
           Variants,
           AnyValidators,
           AnyParams,
@@ -845,11 +845,11 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
 
         // prettier-ignore
         // @ts-expect-error an id-keyed supplemental's (id, content) must correlate: an extra_blob id cannot carry Visits
-        void hashingProducerByInputType<Variants, AnyValidators, AnyParams, SpecOf<typeof registry>>().when(isSite, { name: "site_day", hashInput: (input) => `site:${input.key}` as SiteId, produce: async () => ({ content: { visits: [] as number[] }, directives: freshFor1, supplementalResources: [{ id: "extra:1" as ExtraId, content: { visits: [] as number[] }, directives: freshFor1 }] }) });
+        void hashedInputProducerByInputType<Variants, AnyValidators, AnyParams, SpecOf<typeof registry>>().when(isSite, { name: "site_day", hashInput: (input) => `site:${input.key}` as SiteId, produce: async () => ({ content: { visits: [] as number[] }, directives: freshFor1, supplementalResources: [{ id: "extra:1" as ExtraId, content: { visits: [] as number[] }, directives: freshFor1 }] }) });
 
         // prettier-ignore
         // @ts-expect-error a business_slice input cannot carry BlobContent, which no variant declares
-        void hashingProducerByInputType<Variants>().when(isSite, { name: "site_day", hashInput: (input) => `site:${input.key}` as SiteId, produce: async () => ({ content: { visits: [] as number[] }, directives: freshFor1, supplementalResources: [{ input: { kind: "biz", key: "b" } satisfies BizInput, content: { blob: "x" }, directives: freshFor1 }] }) });
+        void hashedInputProducerByInputType<Variants>().when(isSite, { name: "site_day", hashInput: (input) => `site:${input.key}` as SiteId, produce: async () => ({ content: { visits: [] as number[] }, directives: freshFor1, supplementalResources: [{ input: { kind: "biz", key: "b" } satisfies BizInput, content: { blob: "x" }, directives: freshFor1 }] }) });
       }
     });
   });

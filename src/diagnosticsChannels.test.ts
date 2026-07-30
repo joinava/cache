@@ -9,6 +9,7 @@ import {
   expectProducerPathFetch,
   expectProduceMessage,
   expectRejection,
+  sortByResourceId,
   uniqueCacheName,
   V2_CHANNEL_NAMES,
   waitUntil,
@@ -29,7 +30,7 @@ import {
   producerByIdType,
   resourceType,
   wrapBulkProducer,
-  wrapComputingProducer,
+  wrapHashedInputProducer,
   type CacheFetchMessage,
   type CacheProduceMessage,
   type CacheReadMessage,
@@ -84,13 +85,6 @@ const makeHarness = (label: string) => {
   });
   return { name, store, cache };
 };
-
-const sortByResourceId = <T extends { resourceId: string }>(
-  messages: readonly T[],
-): T[] =>
-  [...messages].sort((a, b) =>
-    a.resourceId < b.resourceId ? -1 : a.resourceId > b.resourceId ? 1 : 0,
-  );
 
 describe("diagnostics channels (§6.5)", () => {
   describe("channel names and typed-channel exports", () => {
@@ -1062,7 +1056,7 @@ describe("diagnostics channels (§6.5)", () => {
         });
 
         expect(capture.fetch).to.have.lengthOf(2);
-        const fetches = [...capture.fetch].sort(
+        const fetches = capture.fetch.toSorted(
           (a, b) => Number(a.collapsed) - Number(b.collapsed),
         );
         expectProducerPathFetch(fetches[0], {
@@ -1661,12 +1655,12 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("computing wrappers publish the same channel stream, attributed with minted ids: miss emits read/produce/store-entry/fetch; hit emits read/fetch only", async () => {
+    it("hashed-input wrappers publish the same channel stream, attributed with minted ids: miss emits read/produce/store-entry/fetch; hit emits read/fetch only", async () => {
       const { name, cache } = makeHarness("produce-computing-channels");
       const capture = captureChannels(name);
-      // One resource type, so no hashing producer is needed: the two functions
+      // One resource type, so no hashed-input producer is needed: the two functions
       // are the whole contract.
-      const compute = wrapComputingProducer({
+      const compute = wrapHashedInputProducer({
         cache,
         hashInput: (input: { key: string }): `site:${string}` =>
           `site:${input.key}`,
@@ -2076,7 +2070,7 @@ describe("diagnostics channels (§6.5)", () => {
             relationshipToExistingStoredData: "is-new",
           },
         ]);
-        const t0Fetches = [...capture.fetch].sort(
+        const t0Fetches = capture.fetch.toSorted(
           (a, b) => Number(a.collapsed) - Number(b.collapsed),
         );
         expectProducerPathFetch(t0Fetches[0], {

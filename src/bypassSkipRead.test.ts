@@ -266,7 +266,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       ]);
 
       expect(capture.fetch).to.have.lengthOf(2);
-      const fetches = [...capture.fetch].sort(
+      const fetches = capture.fetch.toSorted(
         (a, b) =>
           Number(a.directivesImpliedBypass ?? false) -
           Number(b.directivesImpliedBypass ?? false),
@@ -431,7 +431,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       });
 
       expect(capture.fetch).to.have.lengthOf(2);
-      const fetches = [...capture.fetch].sort(
+      const fetches = capture.fetch.toSorted(
         (a, b) => Number(a.collapsed) - Number(b.collapsed),
       );
       expectProducerPathFetch(fetches[0], {

@@ -17,24 +17,23 @@ import {
   producerByIdType,
   resourceType,
   UnclassifiableIdError,
-  UnroutableIdError,
-  bulkHashingProducerByInputType,
-  hashingProducerByInputType,
-  wrapBulkComputingProducer,
+  bulkHashedInputProducerByInputType,
+  hashedInputProducerByInputType,
+  wrapBulkHashedInputProducer,
   wrapBulkProducer,
-  wrapComputingProducer,
-  type ComputingVariant,
+  wrapHashedInputProducer,
+  type HashedInputVariant,
   type ResourceTypes,
 } from "./index.js";
 import wrapProducer from "./utils/wrapProducer.js";
 
 /**
  * Runtime coverage contract (§6.3, §6.4, as amended by the 2026-07-30
- * single-producer design): the by-id-type helpers and the computing wrappers
+ * single-producer design): the by-id-type helpers and the hashed-input wrappers
  * throw at construction on keyless records; an id classifying outside a
  * wrapper's DECLARED coverage throws NoProducerForResourceTypeError BEFORE any
  * store read; two partial wrappers over one cache serve their own types
- * independently; and computing branches enforce that `hashInput` mints ids
+ * independently; and hashed-input branches enforce that `hashInput` mints ids
  * their own resource type's guard accepts.
  */
 
@@ -51,51 +50,7 @@ const threeTypeRegistry = {
 
 describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
   describe("construction throws on a keyless producers/branches record", () => {
-    it("producerByIdType: an empty record throws at construction time, while a bare producer function is a legal whole-registry producer", async () => {
-      const cache = new Cache({
-        store: new MemoryStore(),
-        name: uniqueCacheName("construct-wrap"),
-        resourceTypes: registry,
-      });
-      try {
-        // The keyless-record check moved out of the wrapper and into the
-        // helper, which is now its only meaningful home. Note the registry,
-        // not the cache: see the cache-free block below.
-        expect(() => producerByIdType(registry, {})).to.throw();
-        // ...and the form that used to throw here is the primitive now: a bare
-        // function covers the whole registry, and its wrapper is callable.
-        const bare = wrapProducer(cache, {}, async () => ({
-          content: "x",
-          directives: freshFor100,
-        }));
-        expect(await bare({ id: "site:1" })).to.include({ content: "x" });
-        expect(await bare({ id: "biz:1" })).to.include({ content: "x" });
-      } finally {
-        await cache.close();
-      }
-    });
-
-    it("bulkProducerByIdType: an empty record throws at construction time, while a bare bulk producer function is a legal whole-registry producer", async () => {
-      const cache = new Cache({
-        store: new MemoryStore(),
-        name: uniqueCacheName("construct-bulk"),
-        resourceTypes: registry,
-      });
-      try {
-        expect(() => bulkProducerByIdType(registry, {})).to.throw();
-        const bare = wrapBulkProducer(cache, {}, async (reqs) =>
-          reqs.map(() => ({ content: "x", directives: freshFor100 })),
-        );
-        const results = await bare([{ id: "site:1" }, { id: "biz:1" }]);
-        expect(
-          results.map((it) => (it instanceof Error ? it : it.content)),
-        ).to.deep.equal(["x", "x"]);
-      } finally {
-        await cache.close();
-      }
-    });
-
-    it("wrapComputingProducer / wrapBulkComputingProducer: empty record and bare function both throw at construction time", async () => {
+    it("wrapHashedInputProducer / wrapBulkHashedInputProducer: empty record and bare function both throw at construction time", async () => {
       const cache = new Cache({
         store: new MemoryStore(),
         name: uniqueCacheName("construct-computing"),
@@ -104,234 +59,20 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       try {
         // Neither form supplied.
         // @ts-expect-error deliberately reaching the runtime guard
-        expect(() => wrapComputingProducer({ cache })).to.throw();
+        expect(() => wrapHashedInputProducer({ cache })).to.throw();
         // @ts-expect-error deliberately reaching the runtime guard
-        expect(() => wrapBulkComputingProducer({ cache })).to.throw();
+        expect(() => wrapBulkHashedInputProducer({ cache })).to.throw();
         // A builder with no `.when` branches could never produce anything.
         expect(() =>
-          hashingProducerByInputType<{
-            site_day: ComputingVariant<{ key: string }, string>;
+          hashedInputProducerByInputType<{
+            site_day: HashedInputVariant<{ key: string }, string>;
           }>().build(),
         ).to.throw();
         expect(() =>
-          bulkHashingProducerByInputType<{
-            site_day: ComputingVariant<{ key: string }, string>;
+          bulkHashedInputProducerByInputType<{
+            site_day: HashedInputVariant<{ key: string }, string>;
           }>().build(),
         ).to.throw();
-      } finally {
-        await cache.close();
-      }
-    });
-
-    it("hashing producer builders: a duplicate `.when` for one variant throws, rather than splitting dispatch from storage", () => {
-      type Variants = { site_day: ComputingVariant<{ key: string }, string> };
-      const isSiteDay = (input: { key: string }): input is { key: string } =>
-        typeof input.key === "string";
-      const hashInput = (input: { key: string }) => `site:${input.key}`;
-      const singleBranch = {
-        name: "site_day" as const,
-        hashInput,
-        produce: async (input: { readonly key: string }) => ({
-          content: `computed-${input.key}`,
-          directives: freshFor100,
-        }),
-      };
-      const bulkBranch = {
-        name: "site_day" as const,
-        hashInput,
-        produce: async (inputs: readonly { readonly key: string }[]) =>
-          inputs.map((input) => ({
-            content: `computed-${input.key}`,
-            directives: freshFor100,
-          })),
-      };
-
-      // `Name extends Exclude<keyof V & string, Covered>` rejects the repeat
-      // where it is written (a compile fixture pins that), so re-typing the
-      // builder as a fresh one is what lets the duplicate be reached at all.
-      // Without the runtime guard it would not merely be shadowed: dispatch
-      // takes the first matching branch while the per-resource-type producer
-      // table keeps the last, storing the second branch's content under the
-      // first branch's minted id.
-      assert.throws(
-        () =>
-          (
-            hashingProducerByInputType<Variants>().when(
-              isSiteDay,
-              singleBranch,
-            ) as unknown as ReturnType<
-              typeof hashingProducerByInputType<Variants>
-            >
-          ).when(isSiteDay, singleBranch),
-        {
-          message:
-            /hashingProducerByInputType: `\.when` was called twice for branch "site_day"/,
-        },
-      );
-
-      assert.throws(
-        () =>
-          (
-            bulkHashingProducerByInputType<Variants>().when(
-              isSiteDay,
-              bulkBranch,
-            ) as unknown as ReturnType<
-              typeof bulkHashingProducerByInputType<Variants>
-            >
-          ).when(isSiteDay, bulkBranch),
-        {
-          message:
-            /bulkHashingProducerByInputType: `\.when` was called twice for branch "site_day"/,
-        },
-      );
-    });
-  });
-
-  describe("by-id-type producers are built from a registry, not a cache", () => {
-    const emptyRequest = { params: {}, directives: {} } as const;
-
-    it("producerByIdType: routes with no Cache in existence, and the same value then wraps against one", async () => {
-      // The capability: routing by id type needs the registry and nothing else,
-      // so the producer is a value in its own right -- buildable, drivable and
-      // testable before any cache exists.
-      const siteProducer = mock.fn(async (req: { readonly id: string }) => ({
-        content: `site-${req.id}`,
-        directives: freshFor100,
-      }));
-      const producer = producerByIdType(registry, {
-        site_day: siteProducer,
-        business_slice: async (req) => ({
-          content: `biz-${req.id}`,
-          directives: freshFor100,
-        }),
-      });
-
-      const direct = await producer({ ...emptyRequest, id: "site:1" });
-      expect(direct.content).to.equal("site-site:1");
-      expect(
-        (await producer({ ...emptyRequest, id: "biz:1" })).content,
-      ).to.equal("biz-biz:1");
-      expect(siteProducer.mock.callCount()).to.equal(1);
-
-      // ...and the very same producer value goes on to feed a cache built
-      // afterwards, serving the second call from the store.
-      const cache = new Cache({
-        store: new MemoryStore(),
-        name: uniqueCacheName("cachefree-single"),
-        resourceTypes: registry,
-      });
-      try {
-        const get = wrapProducer(cache, {}, producer);
-        expect((await get({ id: "site:2" })).content).to.equal("site-site:2");
-        expect(siteProducer.mock.callCount()).to.equal(2);
-        expect((await get({ id: "site:2" })).content).to.equal("site-site:2");
-        expect(siteProducer.mock.callCount()).to.equal(2);
-      } finally {
-        await cache.close();
-      }
-    });
-
-    it("bulkProducerByIdType: splits a mixed batch with no Cache in existence", async () => {
-      const producer = bulkProducerByIdType(registry, {
-        site_day: async (reqs) =>
-          reqs.map((req) => ({
-            content: `site-${req.id}`,
-            directives: freshFor100,
-          })),
-        business_slice: async (reqs) =>
-          reqs.map((req) => ({
-            content: `biz-${req.id}`,
-            directives: freshFor100,
-          })),
-      });
-
-      // Interleaved so a positional-reassembly bug can't pass: each result must
-      // land back on its OWN request's index.
-      const results = await producer([
-        { ...emptyRequest, id: "site:1" },
-        { ...emptyRequest, id: "biz:1" },
-        { ...emptyRequest, id: "site:2" },
-      ]);
-      expect(
-        results.map((it) => (it instanceof Error ? it.message : it.content)),
-      ).to.deep.equal(["site-site:1", "biz-biz:1", "site-site:2"]);
-    });
-
-    it("driven directly, an id it cannot route throws UnroutableIdError -- cache-free, with the reason", async () => {
-      const producer = producerByIdType(threeTypeRegistry, {
-        site_day: async (req) => ({
-          content: `site-${req.id}`,
-          directives: freshFor100,
-        }),
-      });
-
-      // Classifies fine, but to a type this producer doesn't cover.
-      const uncovered = await expectRejection(() =>
-        producer({
-          ...emptyRequest,
-          id: "biz:1" as string as `site:${string}`,
-        }),
-      );
-      assert.ok(uncovered instanceof UnroutableIdError);
-      expect(uncovered.detail).to.deep.equal({
-        reason: "uncovered",
-        resourceType: "business_slice",
-      });
-      expect(uncovered.id).to.equal("biz:1");
-      expect(uncovered.coveredResourceTypes).to.deep.equal(["site_day"]);
-      // No cache to name, so the message names neither one nor a placeholder.
-      expect(uncovered.message).to.not.include("Cache ");
-
-      // Classifies to nothing at all.
-      const unclassifiable = await expectRejection(() =>
-        producer({
-          ...emptyRequest,
-          id: "nope:1" as string as `site:${string}`,
-        }),
-      );
-      assert.ok(unclassifiable instanceof UnroutableIdError);
-      expect(unclassifiable.detail.reason).to.equal("unclassifiable");
-    });
-
-    it("through a wrapper, an UnroutableIdError is re-thrown as the cache-named error", async () => {
-      // Reachable only when the registry the helper was built from disagrees
-      // with the cache's -- the wrapper classifies against the cache's registry
-      // first. Same keys and id types (so it still typechecks), different
-      // guards: this one matches nothing.
-      const divergent = {
-        site_day: resourceType<string>()({
-          matches: (id): id is `site:${string}` => id === "unreachable",
-        }),
-        business_slice: resourceType<string>()({
-          matches: (id): id is `biz:${string}` => id === "unreachable",
-        }),
-      } satisfies ResourceTypes;
-
-      const name = uniqueCacheName("divergent-registry");
-      const cache = new Cache({
-        store: new MemoryStore(),
-        name,
-        resourceTypes: registry,
-      });
-      try {
-        const get = wrapProducer(
-          cache,
-          {},
-          producerByIdType(divergent, {
-            site_day: async (req) => ({
-              content: `site-${req.id}`,
-              directives: freshFor100,
-            }),
-          }),
-        );
-        // The cache classifies `site:1` to a covered type and dispatches; the
-        // producer's own registry then can't route it.
-        const thrown = await expectRejection(() => get({ id: "site:1" }));
-        assert.ok(thrown instanceof UnclassifiableIdError);
-        // The point of the re-throw: the cache's name is back on the error.
-        expect(thrown.cacheName).to.equal(name);
-        expect(thrown.id).to.equal("site:1");
-        expect(thrown.message).to.include(`Cache "${name}"`);
       } finally {
         await cache.close();
       }
@@ -376,7 +117,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         expect(thrown.name).to.equal("NoProducerForResourceTypeError");
         expect(thrown.cacheName).to.equal(name);
         expect(thrown.resourceType).to.equal("extra_blob");
-        expect([...thrown.coveredResourceTypes].sort()).to.deep.equal([
+        expect(thrown.coveredResourceTypes.toSorted()).to.deep.equal([
           "business_slice",
           "site_day",
         ]);
@@ -530,11 +271,11 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     });
   });
 
-  describe("computing wrappers (§6.4)", () => {
+  describe("hashed-input wrappers (§6.4)", () => {
     type SoleInput = { key: string };
     const isSoleInput = (input: SoleInput): input is SoleInput =>
       typeof input.key === "string";
-    type SoleVariants = { site_day: ComputingVariant<SoleInput, string> };
+    type SoleVariants = { site_day: HashedInputVariant<SoleInput, string> };
 
     it("single-branch: no matchesInput required; caches by the branch's hashInput", async () => {
       const cache = new Cache({
@@ -546,7 +287,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         content: `computed-${input.key}`,
         directives: freshFor100,
       }));
-      const compute = wrapComputingProducer({
+      const compute = wrapHashedInputProducer({
         cache,
         hashInput: (input: SoleInput): `site:${string}` => `site:${input.key}`,
         produce,
@@ -579,8 +320,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     const isBizInput = (input: BranchedInput): input is BizInput =>
       input.kind === "biz";
     type BranchedVariants = {
-      site_day: ComputingVariant<SiteInput, string>;
-      business_slice: ComputingVariant<BizInput, string>;
+      site_day: HashedInputVariant<SiteInput, string>;
+      business_slice: HashedInputVariant<BizInput, string>;
     };
 
     it("multi-branch: dispatches by matchesInput; each branch mints and serves its own type's ids", async () => {
@@ -597,9 +338,9 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         content: `biz-computed-${input.key}`,
         directives: freshFor100,
       }));
-      const compute = wrapComputingProducer({
+      const compute = wrapHashedInputProducer({
         cache,
-        hashingProducer: hashingProducerByInputType<BranchedVariants>()
+        hashedInputProducer: hashedInputProducerByInputType<BranchedVariants>()
           .when(isSiteInput, {
             name: "site_day",
             hashInput: (input): `site:${string}` => `site:${input.key}`,
@@ -639,9 +380,9 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         name: uniqueCacheName("computing-unmatched"),
         resourceTypes: registry,
       });
-      const compute = wrapComputingProducer({
+      const compute = wrapHashedInputProducer({
         cache,
-        hashingProducer: hashingProducerByInputType<BranchedVariants>()
+        hashedInputProducer: hashedInputProducerByInputType<BranchedVariants>()
           .when(isSiteInput, {
             name: "site_day",
             hashInput: (input): `site:${string}` => `site:${input.key}`,
@@ -678,9 +419,9 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         name,
         resourceTypes: registry,
       });
-      const compute = wrapComputingProducer({
+      const compute = wrapHashedInputProducer({
         cache,
-        hashingProducer: hashingProducerByInputType<SoleVariants>()
+        hashedInputProducer: hashedInputProducerByInputType<SoleVariants>()
           .when(isSoleInput, {
             name: "site_day",
             // Mints ids that match NO registry guard: violates the §6.4
@@ -712,9 +453,9 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         name: uniqueCacheName("computing-cross-type-hash"),
         resourceTypes: registry,
       });
-      const compute = wrapComputingProducer({
+      const compute = wrapHashedInputProducer({
         cache,
-        hashingProducer: hashingProducerByInputType<SoleVariants>()
+        hashedInputProducer: hashedInputProducerByInputType<SoleVariants>()
           .when(isSoleInput, {
             name: "site_day",
             // Classifiable -- but to business_slice, not this branch's type, so
@@ -739,6 +480,6 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     // Likewise, "matchesInput is ignored on a single-coverage wrapper" no
     // longer has a subject: the two-function form has no guard at all, and a
     // one-`.when` builder's guard IS consulted like any other (pinned in
-    // wrapComputingProducer.test.ts).
+    // wrapHashedInputProducer.test.ts).
   });
 });

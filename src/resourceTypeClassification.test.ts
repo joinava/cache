@@ -75,8 +75,8 @@ const assertAmbiguous = (
   expect(thrown.cacheName).to.equal(expected.cacheName);
   expect(thrown.id).to.equal(expected.id);
   // The doc doesn't specify an order for the matched names; compare sorted.
-  expect([...thrown.matchedResourceTypes].sort()).to.deep.equal(
-    [...expected.matchedResourceTypes].sort(),
+  expect(thrown.matchedResourceTypes.toSorted()).to.deep.equal(
+    expected.matchedResourceTypes.toSorted(),
   );
   return thrown;
 };

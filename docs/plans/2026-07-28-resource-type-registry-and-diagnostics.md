@@ -73,7 +73,7 @@ telemetry attribution — falls out of it.
 - `wrapProducer` / `wrapBulkProducer` take per-resource-type producer maps;
   `producerByIdType` / `computingProducerByInputType` and their builders are
   removed.
-- Computing producers take per-covered-type `{ matchesInput, hashInput,
+- Hashed-input producers take per-covered-type `{ matchesInput, hashInput,
   produce }` branches.
 - Channel redesign: `read`, `fetch`, `produce`, `store-entry` (all messages
   carry cache + resource type). The 1.6.0 `dropped-directive` channel is
@@ -225,7 +225,7 @@ matches, the guard error(s) surface as the `UnclassifiableIdError`'s `cause`
 (an `AggregateError` when several threw) rather than leaking as a raw parse
 error with no cache/id attribution. Guards should be cheap (prefix checks preferred); ids must
 therefore carry their type in-band. This is already the package idiom
-(`idStartsWith`, and hashed computing ids like
+(`idStartsWith`, and hashed hashed-input ids like
 `zendesk-ticket-schema:${businessId}:${hash}`), but 2.0 makes it a stated
 requirement: **an id must be classifiable by inspection.**
 
@@ -585,22 +585,22 @@ export function wrapBulkProducer<
 `producerByIdType`, `ProducerBranch`, `ProducerByIdTypeBuilder`, and the
 non-exhaustive-build error type are **deleted**.
 
-### 6.4 Computing producers
+### 6.4 Hashed-input producers
 
 > **Superseded (2026-07-30) by
 > [2026-07-30-hashing-producer-builder.md](./2026-07-30-hashing-producer-builder.md).**
 > The per-covered-type `branches` record described below shipped, then was
 > replaced: the wrappers now take one options bag — `{ cache, hashInput, produce }`
-> for a single resource type, or `{ cache, hashingProducer }` where the producer
-> is built, cache-free, by `hashingProducerByInputType`. What follows still
+> for a single resource type, or `{ cache, hashedInputProducer }` where the producer
+> is built, cache-free, by `hashedInputProducerByInputType`. What follows still
 > describes the coverage/minted-id/supplemental *contracts*, which carried over
 > unchanged; the shape that carries them did not.
 
 Initially: `computingProducerByInputType` and its builder/variant types
-(`ComputingVariant`, `ComputingVariantSupplemental`, `InputForVariants`,
+(`HashedInputVariant`, `HashedInputVariantSupplemental`, `InputForVariants`,
 `ContentForVariants`, `ComputingProducerByInputTypeBuilder`) were **deleted** in
 favor of a per-covered-type record (coverage inferred from the record's keys,
-exactly as in §6.3 — any non-empty subset of the registry). Because computing ids are hashes, the
+exactly as in §6.3 — any non-empty subset of the registry). Because hashed-input ids are hashes, the
 in-band-discriminator requirement (§6.1) is on `hashInput`: each branch's
 `hashInput` must mint ids that its resource type's `matches` guard accepts —
 checked at runtime (the wrapper classifies the hashed id and throws
@@ -626,16 +626,16 @@ key is present:
 - **Id-keyed** (`{ id, content, … }`, a plain `ProducerResultResource`): for
   ANY registry type, covered or not — exactly what plain producers'
   supplementals are. Classified by their own id at store time. This is what
-  makes "hashed-input producers" (computing wrappers used for key privacy —
+  makes "hashed-input producers" (hashed-input wrappers used for key privacy —
   e.g. keeping a credential out of the cache key — rather than for pure
   computation) full peers of plain producers: fetch a site's data, hash the
   credential-bearing key, and still supplementally store per-business
   slices under their natural ids.
 
 ```ts
-// src/utils/wrapComputingProducer.ts
+// src/utils/wrapHashedInputProducer.ts
 
-export type ComputingProducerResult<
+export type HashedInputProducerResult<
   Input,
   Spec extends CacheSpec,              // the producing branch's spec (primary content)
   Validators extends AnyValidators,
@@ -675,7 +675,7 @@ export type ComputingBranch<
     // No `options`/signal: see the 2026-07-30 note in §6.7.
     input: ReadonlyDeep<Input>,
   ) => Promise<
-    ComputingProducerResult<
+    HashedInputProducerResult<
       Input,
       SpecForId<SpecOf<RT>, IdOfResourceType<RT[K]>>,
       Validators,
@@ -687,14 +687,14 @@ export type ComputingBranch<
 };
 
 // `ComputingProducerOptions` is DELETED: with `isCacheable` gone (§6.3) there
-// is no computing-specific option left, so both computing wrappers take plain
+// is no computing-specific option left, so both hashed-input wrappers take plain
 // `WrapProducerOptions`. (This also deletes the subtlest part of the current
 // implementation: `registry.get` running inside the input-shaped `isCacheable`
 // while the id is still registered.)
 // `cache` moves out of the options bag to a positional arg, matching wrapProducer.
 // `hashInput` moves into the per-branch record.
 
-export function wrapComputingProducer<
+export function wrapHashedInputProducer<
   Input,
   RT extends ResourceTypes,
   Covered extends ResourceTypeName<RT>,
@@ -715,7 +715,7 @@ export function wrapComputingProducer<
   Entry<SpecForId<SpecOf<RT>, IdOfResourceType<RT[Covered]>>, Validators, Params>
 >;
 
-export function wrapBulkComputingProducer<
+export function wrapBulkHashedInputProducer<
   Input,
   RT extends ResourceTypes,
   Covered extends ResourceTypeName<RT>,
@@ -734,7 +734,7 @@ export function wrapBulkComputingProducer<
         inputs: readonly ReadonlyDeep<Input>[],
       ) => Promise<
         (
-          | ComputingProducerResult<Input, SpecForId<SpecOf<RT>, IdOfResourceType<RT[K]>>, Validators, Params>
+          | HashedInputProducerResult<Input, SpecForId<SpecOf<RT>, IdOfResourceType<RT[K]>>, Validators, Params>
           | ErrorType
         )[]
       >;
@@ -743,7 +743,7 @@ export function wrapBulkComputingProducer<
 ): (inputs: readonly Input[], options?: { signal?: AbortSignal }) => Promise<
   (Entry<SpecForId<SpecOf<RT>, IdOfResourceType<RT[Covered]>>, Validators, Params> | ErrorType)[]
 >;
-// Both computing wrappers: coverage inferred from `branches` keys; returned
+// Both hashed-input wrappers: coverage inferred from `branches` keys; returned
 // entries narrow to the covered specs; same construction-time keyless-record
 // throw as wrapProducer. An input no covered branch's `matchesInput` accepts
 // throws (unchanged from the by-input-type builder's unmatched-input error).
@@ -1038,7 +1038,7 @@ TS 5.9 rejected or failed to infer through some doc-exact notations above;
 the shipped `.d.ts` departs mechanically while preserving resolved types at
 every valid call site (probe-verified): getMany/bulk per-slot ids wrap in
 `Extract<…, SpecOf<RT>["id"]>` (identity at valid sites); `IdOfResourceType`
-uses `infer Id extends string`; the computing wrappers constrain
+uses `infer Id extends string`; the hashed-input wrappers constrain
 `Covered extends string` with per-key conditional gating (the dependent
 constraint form collapses `Input` inference to `unknown`);
 `PartialConsumerRequest` keeps its 1.6.0 `ReadonlyDeep<MakeKeysOptional<…>>`
@@ -1051,19 +1051,19 @@ narrowed registries need explicit spec args
 (`new MemoryStore<SpecOf<typeof rts>>()`).
 
 **Restored to full 1.6.0 parity (2026-07-29, user decision reversing two
-initially-ratified cuts):** computing wrappers take call-time `directives`
+initially-ratified cuts):** hashed-input wrappers take call-time `directives`
 again (the cut's "fragile Input inference" rationale was wrong — inference
 happens at wrap time from the branches record, and call options participate
-in none of it), and computing supplementals are no longer confined to the
+in none of it), and hashed-input supplementals are no longer confined to the
 producing branch: input-keyed supplementals may target any COVERED branch
 (routed by `matchesInput`, hashed by the routed branch's `hashInput`,
 mint-checked eagerly), and id-keyed supplementals may target ANY registry
 type, exactly like plain producers' (§6.4). Driving rationale: production's
 "hashed-input producer" archetype (e.g. zendesk's credential-privacy use of
-`wrapComputingProducer`, which does I/O, not pure computation) wants plain
+`wrapHashedInputProducer`, which does I/O, not pure computation) wants plain
 `wrapProducer` semantics with a derived key, so the two consumer-facing
 contracts shouldn't diverge. Call-time `params` stays out — it never existed
-on computing wrappers, and anything that changes a computed output belongs
+on hashed-input wrappers, and anything that changes a computed output belongs
 in the input (a second identity axis would compete with the hash).
 `ComputingBranch.matchesInput` was typed plain-optional, with
 required-when-multi enforced by a construction-time throw and silently
@@ -1097,7 +1097,7 @@ Post-review adjudications (2026-07-29, adversarial-review round):
 - **`Cache.delete` after `close()`** follows `onStoreAfterClose` (deletes
   are writes): "throw" throws the same closed error as `store`; "no-op"
   silently does nothing.
-- **Computing wrappers emit no `aborted` fetch for aborts observed before
+- **Hashed-input wrappers emit no `aborted` fetch for aborts observed before
   delegation** (before/during `matchesInput`/`hashInput`/mint-check): the
   minted id — the request's cache identity — doesn't exist or isn't
   validated yet, so no attributable fetch message is possible. Aborts from
@@ -1145,7 +1145,7 @@ PR #13 review round (2026-07-30, user decisions):
   `{ signal }` parameter unchanged — they use it, forwarding to `Cache.get`/
   `getMany` and racing each caller's own wait (`raceWithSignal`) so aborts are
   still honored per caller. Removing it also deleted a dead branch: the
-  computing wrappers' internal producers called
+  hashed-input wrappers' internal producers called
   `producerOptions ? branch.produce(input, producerOptions) : branch.produce(input)`,
   whose first arm was unreachable because the plain wrappers invoke producers as
   `producer(req)` with no second argument. Source-compatible for producer
@@ -1453,11 +1453,11 @@ const getVisits = wrapProducer(cache, {}, {
 ## 9. Monorepo migration sketch (separate PR, sized for one pass)
 
 Authoritative site inventory: `grep -rn "cacheName:" apps/backend/src` (~43
-wrapper + computing sites; every current site passes one, so none tag
+wrapper + hashed-input sites; every current site passes one, so none tag
 `"unknown"` today) and `grep -rn "new Cache" apps/backend/src` (~25 cache
-constructions). The computing subset is identified by call shape
-(`wrapComputingProducer` / `computingProducerByInputType`); note 1.6.0's
-computing wrappers delegate to `wrapProducer` internally, so their `cacheName`s
+constructions). The hashed-input subset is identified by call shape
+(`wrapHashedInputProducer` / `computingProducerByInputType`); note 1.6.0's
+hashed-input wrappers delegate to `wrapProducer` internally, so their `cacheName`s
 (`ranker_*`, zendesk) flow through today's metric like any other wrapper's.
 
 1. Catalog bump to `^2.0.0`.
@@ -1468,14 +1468,14 @@ computing wrappers delegate to `wrapProducer` internally, so their `cacheName`s
    caches use `singleTypeCacheOptions<Content>()` (see 6.8; `soleResourceType`
    no longer takes a second type arg) — supplying a real guard where
    the site already has a template-literal or branded id (e.g. zendesk's
-   `` `zendesk-ticket-schema:${string}` `` computing ids), so producers keep
+   `` `zendesk-ticket-schema:${string}` `` hashed-input ids), so producers keep
    their current narrow `req.id` types. `Spec` type aliases become
    `SpecOf<typeof rts>` (or stay, with the registry `satisfies`-checked against them).
 3. Every `wrapProducer(cache, { cacheName }, producer)` (~42 sites) → drop
    `cacheName` and wrap the producer as `{ <type-name>: producer }` (the
    bare-function form is gone); `producerByIdType` sites (axis-care visits,
    hhax demographics) become producer records keyed by the registry names.
-4. Computing sites (zendesk ticket-schema, the three staffing-planner ranker
+4. Hashed-input sites (zendesk ticket-schema, the three staffing-planner ranker
    extraction services, and any other computing-shaped callers from the
    inventory): `cache` moves out of the options bag to the first positional
    arg, `hashInput` moves into the per-type branch record keyed by the type
@@ -1601,9 +1601,9 @@ takes a position on.
    detect overlap) rather than first-match-wins. Note the cost is per
    classification PASS, and one logical request makes several: the wrapper's own
    pass, `Cache.get`, and `Cache.store` on a miss, plus one more for
-   `producerByIdType` (§10 deviation 1) and another for a computing wrapper's
+   `producerByIdType` (§10 deviation 1) and another for a hashed-input wrapper's
    `checkMintedId` — 2 passes for a bare-producer cache hit, up to 5 for a
-   computing-wrapper miss, and 5×N for a bulk computing call. So for a
+   computing-wrapper miss, and 5×N for a bulk hashed-input call. So for a
    2-guard JSON-parsing registry (axis-care today) that is ~4–10 `jsonParse`s
    per request, not ~2; and where a guard rejects foreign ids by *throwing*,
    each pass also constructs an error with a stack capture. Acceptable, or

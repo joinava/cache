@@ -28,7 +28,7 @@ about. They are the load-bearing facts behind the design.
 
 1. **1.6.0 had no bulk per-type sugar.** `producerByIdType` built a
    `RequestPairedProducer` (single); `computingProducerByInputType` covered the
-   computing wrappers. Bulk's only form was one function over the whole union.
+   hashed-input wrappers. Bulk's only form was one function over the whole union.
 2. **Today's bare-function form fails in the worst way.** Passing a bare
    function to `wrapBulkProducer` is *silently accepted* — no error at the call
    site — then `Covered` collapses to `never` and the returned wrapper is
@@ -260,7 +260,7 @@ Stated explicitly to bound the change:
 - `read`, `fetch`, and `store-entry` messages: still one per request, still
   attributed by classifying the request's own id.
 - `store()` / `delete()` / after-close options.
-- `wrapComputingProducer` / `wrapBulkComputingProducer`'s **public API**,
+- `wrapHashedInputProducer` / `wrapBulkHashedInputProducer`'s **public API**,
   including their branch records. Their branches route by **input**
   (`matchesInput` / `hashInput`), not by id, so they are a genuinely different
   shape and are not forced into this mold. They keep taking records.
@@ -272,7 +272,7 @@ Stated explicitly to bound the change:
   keep compiling after this change while passing a plain object where a
   function is now expected — a runtime break with no type error. Each must be
   updated to feed its record through the matching `*ByIdType` helper instead.
-  The existing computing suites are the regression net and must stay green.
+  The existing hashed-input suites are the regression net and must stay green.
 - Producer results stay positionally paired; producers still take no
   `AbortSignal`; nothing chunks batches.
 - **All existing export names.** The rename considered during design
@@ -357,7 +357,7 @@ plausibly have broken:
    helpers' narrowing.
 3. Explicit narrowing with a bare function is rejected.
 4. The deferred case verifies: a helper's result forwarded through an
-   *unresolved* generic `Covered`, which is how the computing wrappers forward
+   *unresolved* generic `Covered`, which is how the hashed-input wrappers forward
    theirs into `wrapProducer`.
 
 ### 5.3 Diagnostics (§6.5.3 amendment)
@@ -408,8 +408,8 @@ Contract tests, so the capability survives refactors:
    later.
 7. **Sole-type regression.** An existing sole-type suite converted to the bare
    form behaves identically, pinning that the common case is unaffected.
-8. **Computing wrappers unchanged end-to-end.** The existing
-   `wrapComputingProducer` / `wrapBulkComputingProducer` suites pass untouched
+8. **Hashed-input wrappers unchanged end-to-end.** The existing
+   `wrapHashedInputProducer` / `wrapBulkHashedInputProducer` suites pass untouched
    after their internals are rewired through the `*ByIdType` helpers — the
    regression net for the silent-cast hazard in §4 of this doc.
 
@@ -511,7 +511,7 @@ and §7.
 producerByIdType(cache.resourceTypes, { story: f, collection: g })
 ```
 
-Motivation is the same one that made the hashing producer cache-free
+Motivation is the same one that made the hashed-input producer cache-free
 (`2026-07-30-hashing-producer-builder.md`): it is backwards for the thing that
 *feeds* a cache to need the cache in order to exist. Routing by id type needs
 the registry's `matches` guards and nothing else, so a by-id-type producer is now
@@ -596,7 +596,7 @@ test builds exactly that divergence to pin the mapping.
 rather than its name, so the membership test and the lookup are one own-property
 read) and `rethrowUnroutableWithCacheName`. Both wrappers' `callProducerAndLog`
 gained the catch. 57 call sites in the tests took `cache.resourceTypes`, as did
-the computing wrappers' two internal uses. Four new runtime tests: cache-free
+the hashed-input wrappers' two internal uses. Four new runtime tests: cache-free
 single routing plus reuse against a later cache, cache-free bulk batch splitting,
 direct-drive `UnroutableIdError` for the uncovered and unclassifiable reasons, and
 the divergent-registry re-throw. No other contract changed.
