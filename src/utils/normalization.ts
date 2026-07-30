@@ -95,25 +95,23 @@ export function normalizeProducerDirectives(directives: ProducerDirectives) {
   // `storeFor` is optional: drop it on NaN so the cache falls back to its
   // usual "store for as long as the entry could be useful" behavior.
   // `Math.max(0, storeFor)` clamps `-Infinity` (and other negatives) to 0.
-  let normalizedStoreFor: number | undefined;
-  if (storeFor !== undefined && !Number.isNaN(storeFor)) {
-    normalizedStoreFor = Math.max(0, storeFor);
-  }
+  const normalizedStoreFor =
+    storeFor !== undefined && !Number.isNaN(storeFor)
+      ? Math.max(0, storeFor)
+      : undefined;
 
   // `maxStale` is optional. If any of its three required thresholds is NaN,
   // the whole object is meaningless, so drop it entirely (a `maxStale` with a
   // missing threshold is not meaningful). The cache already has well-defined
   // behavior for "producer didn't specify maxStale": the consumer's policy
   // controls.
-  let normalizedMaxStale: NormalizedProducerMaxStale | undefined;
-  if (
+  const normalizedMaxStale =
     maxStale != null &&
     !Number.isNaN(maxStale.withoutRevalidation) &&
     !Number.isNaN(maxStale.whileRevalidate) &&
     !Number.isNaN(maxStale.ifError)
-  ) {
-    normalizedMaxStale = normalizeProducerMaxStale(maxStale);
-  }
+      ? normalizeProducerMaxStale(maxStale)
+      : undefined;
 
   return instantiateTaggedType<NormalizedProducerDirectives>({
     freshUntilAge: Math.max(freshUntilAge, 0),

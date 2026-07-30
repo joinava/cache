@@ -6,10 +6,21 @@ import type { CacheSpec } from "./00_CacheSpec.js";
  *
  * A cache admits at most one producer per disjoint id-partition ("resource
  * type"): two producers with overlapping id spaces would be two sources of
- * truth for the same key. Resource types are therefore 1:1 with names and
- * with {@link CacheSpec} branches, so the registry of named, classifiable
- * resource types lives on the `Cache`, and everything else -- producer
- * dispatch, coverage inference, telemetry attribution -- is derived from it.
+ * truth for the same key. "Admits" states which setups are *coherent*, not
+ * which ones this package can refuse to build: nothing stops you from wrapping
+ * the same cache twice and handing each wrapper a different producer for the
+ * same resource type, and no error will be raised if you do -- you have simply
+ * built two origins for one key space, and which one a given entry came from
+ * is then a race. What *is* mechanically enforced is the weaker, purely
+ * id-level half of the constraint: every id the cache sees must match exactly
+ * one registry entry (see the classification contract below), so a *partition*
+ * violation always fails loud. Keeping one producer per partition is the
+ * caller's invariant.
+ *
+ * Resource types are therefore 1:1 with names and with {@link CacheSpec}
+ * branches, so the registry of named, classifiable resource types lives on the
+ * `Cache`, and everything else -- producer dispatch, coverage inference,
+ * telemetry attribution -- is derived from it.
  *
  * ## Classification contract
  *
