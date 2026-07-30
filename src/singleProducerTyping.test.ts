@@ -5,6 +5,7 @@ import { memoryStoreFor, uniqueCacheName } from "../test/v2AcceptanceHelpers.js"
 import Cache from "./Cache.js";
 import {
   bulkProducerByIdType,
+  coveredTypes,
   idStartsWith,
   producerByIdType,
   resourceType,
@@ -19,10 +20,12 @@ import {
  * §3.2, §5.2): a bare function covers the whole registry (`Covered` takes its
  * default), a function typed for a strict subset is REJECTED where a bare
  * producer is expected (finding 4: `Covered` never infers from the parameter
- * type), the `*ByIdType` helpers narrow `Covered` through their optional
- * symbol-keyed coverage carrier so an uncovered id is a compile error at the
- * WRAPPED function's call site, and an explicit `Covered` type argument narrows
- * the same way.
+ * type), the `*ByIdType` helpers narrow `Covered` through their symbol-keyed
+ * coverage carrier so an uncovered id is a compile error at the WRAPPED
+ * function's call site, and narrowing `Covered` at all REQUIRES that carrier --
+ * an explicit type argument alone is rejected, because it would narrow the
+ * types while leaving the wrapper's runtime coverage reading as the whole
+ * registry.
  *
  * Follows the coverageTyping.test.ts conventions: `expectType<Equal<...>>()`,
  * `@ts-expect-error` fixtures kept on ONE line so the error's reported position
@@ -294,13 +297,32 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
       }
     });
 
-    it("an explicit `Covered` type argument narrows the wrapped function's ids too, with a bare producer", async () => {
+    it("an explicit `Covered` type argument cannot narrow a BARE producer: narrowed coverage requires the runtime carrier", async () => {
       const cache = makeCache("sp-typing-explicit-covered");
       try {
+        if (false as boolean) {
+          // The function itself fits `Covered = "story"` perfectly (its
+          // parameter takes story ids; its result is story-pinned). What it
+          // lacks is the runtime covered set, which is REQUIRED once `Covered`
+          // is a strict subset -- otherwise the type would say "story only"
+          // while the wrapper's runtime check read "the whole registry", and a
+          // cast-in `collection:` id would reach this story producer instead of
+          // throwing NoProducerForResourceTypeError.
+          // prettier-ignore
+          // @ts-expect-error narrowing Covered requires the [coveredTypes] runtime value
+          void wrapProducer<typeof registry, "story">(cache, {}, storyOnlyProducer);
+        }
+
+        // CONTROL isolating the cause: attach the carrier and the exact same
+        // function is accepted. So the rejection above is about the missing
+        // runtime coverage value, not about the function's signature.
+        const storyOnlyWithCoverage = Object.assign(storyOnlyProducer, {
+          [coveredTypes]: ["story"] as const,
+        });
         const fetchStoryOnly = wrapProducer<typeof registry, "story">(
           cache,
           {},
-          storyOnlyProducer,
+          storyOnlyWithCoverage,
         );
 
         const story = await fetchStoryOnly({ id: "story:1" });

@@ -107,11 +107,13 @@ export type BulkProducersFor<
 
 /**
  * The bulk counterpart of `wrapProducer`'s `CoveringProducer` (see it for why
- * the covered-set property is optional and value-carrying): a bulk producer
- * function that may additionally declare which resource types it covers. A
- * plain function omits the property and covers the whole registry, so it sees
- * the caller's FULL mixed batch in one call and can optimize across resource
- * types (one upstream call spanning several types, cross-type dedup, a join).
+ * the covered-set property carries a runtime value, and why it is optional for
+ * whole-registry coverage but REQUIRED when `Covered` is a strict subset): a
+ * bulk producer function that may additionally declare which resource types it
+ * covers. A plain function omits the property and covers the whole registry, so
+ * it sees the caller's FULL mixed batch in one call and can optimize across
+ * resource types (one upstream call spanning several types, cross-type dedup, a
+ * join).
  */
 export type CoveringBulkProducer<
   RT extends ResourceTypes,
@@ -133,7 +135,10 @@ export type CoveringBulkProducer<
       >
     | ErrorType
   )[]
->) & { readonly [coveredTypes]?: readonly Covered[] };
+>) &
+  ([ResourceTypeName<RT>] extends [Covered]
+    ? { readonly [coveredTypes]?: readonly Covered[] }
+    : { readonly [coveredTypes]: readonly Covered[] });
 
 /** The internal, id-erased dispatch shape; see `LooseProducer` in wrapProducer.ts. */
 type LooseBulkProducer<

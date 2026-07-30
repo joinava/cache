@@ -176,18 +176,39 @@ export const coveredTypes: unique symbol = Symbol("@zingage/cache.coveredTypes")
 
 /**
  * A producer function that may additionally declare WHICH resource types it
- * covers. The property is **optional and carries a real runtime value** -- the
- * covered type names -- so it serves double duty: `Covered` is inferred from
- * it at compile time, and the wrapper reads it at runtime to enforce coverage
- * before touching the store. A plain function omits it and picks up
- * `Covered`'s default (every registry type), which needs no runtime check
- * because the compiler already made the function prove it accepts every
- * registry id.
+ * covers. The property carries a real runtime value -- the covered type names
+ * -- so it serves double duty: `Covered` is inferred from it at compile time,
+ * and the wrapper reads it at runtime to enforce coverage before touching the
+ * store. It is deliberately NOT a value-less phantom, which would leave the
+ * wrapper with no runtime source for the covered set now that there are no
+ * record keys to read.
  *
- * It is deliberately NOT a value-less phantom: making it required would reject
- * bare functions, and making it type-only would leave the wrapper with no
- * runtime source for the covered set now that there are no record keys to
- * read.
+ * ## Why the property is conditionally required
+ *
+ * It is optional when `Covered` is the whole registry -- that is what lets a
+ * bare function be passed with no ceremony, and no runtime check is needed
+ * there because the compiler already made the function prove it accepts every
+ * registry id. It is REQUIRED when `Covered` is a strict subset, which makes
+ * "narrowed coverage implies runtime proof of that narrowing" an invariant the
+ * type system enforces rather than a convention.
+ *
+ * Without that, coverage had two sources that could silently disagree: an
+ * explicit `Covered` type argument (`wrapProducer<RT, "story">(...)`) narrowed
+ * the types while leaving the runtime covered set absent -- which the wrapper
+ * reads as "the whole registry". The types still banned uncovered ids at the
+ * call site, so this was only reachable by defeating them (a cast or a
+ * loosely-typed id -- see {@link NoProducerForResourceTypeError}), but that is
+ * precisely the case that error exists to catch: instead of throwing, the
+ * wrapper would hand the id to a producer written for a different resource
+ * type and then store its content under the incoming id. Requiring the
+ * property under narrowing routes partial coverage through
+ * {@link producerByIdType}, which always supplies the runtime value, so the
+ * single-source property the per-type record had via `Object.keys` is restored
+ * by construction.
+ *
+ * `Covered` still infers from the property even though it also appears in the
+ * condition (probed, along with the deferred case where `Covered` is an
+ * unresolved generic -- how the computing wrappers forward theirs).
  *
  * Narrowing each result's `Id` to `IdOfResourceType<RT[Covered]>` bounds the
  * PRIMARY result to covered types only. Supplementals are unaffected: they are
@@ -208,9 +229,12 @@ export type CoveringProducer<
     Params,
     IdOfResourceType<RT[Covered]>
   >
->) & {
-  readonly [coveredTypes]?: readonly Covered[];
-};
+>) &
+  // The tuple brackets make this a whole-set comparison rather than a
+  // distributive, member-by-member one.
+  ([ResourceTypeName<RT>] extends [Covered]
+    ? { readonly [coveredTypes]?: readonly Covered[] }
+    : { readonly [coveredTypes]: readonly Covered[] });
 
 export type { PartialConsumerRequest };
 

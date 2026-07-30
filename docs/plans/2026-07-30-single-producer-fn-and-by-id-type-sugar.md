@@ -101,9 +101,12 @@ export type CoveringProducer<
     Params,
     IdOfResourceType<RT[Covered]>
   >
->) & {
-  readonly [coveredTypes]?: readonly Covered[];
-};
+>) &
+  // Optional when `Covered` is the whole registry (so a bare function needs no
+  // ceremony); REQUIRED when it is a strict subset. See §5.2 of this doc.
+  ([ResourceTypeName<RT>] extends [Covered]
+    ? { readonly [coveredTypes]?: readonly Covered[] }
+    : { readonly [coveredTypes]: readonly Covered[] });
 
 export type CoveringBulkProducer<
   RT extends ResourceTypes,
@@ -125,7 +128,10 @@ export type CoveringBulkProducer<
       >
     | ErrorType
   )[]
->) & { readonly [coveredTypes]?: readonly Covered[] };
+>) &
+  ([ResourceTypeName<RT>] extends [Covered]
+    ? { readonly [coveredTypes]?: readonly Covered[] }
+    : { readonly [coveredTypes]: readonly Covered[] });
 
 export function wrapProducer<
   RT extends ResourceTypes,
@@ -176,10 +182,13 @@ supplementals for any registry type, as §6.4 requires.
 `ProducersFor` / `BulkProducersFor` are kept as-is — they move from being the
 wrapper's parameter to being the *helper's* parameter.
 
-Both helpers take `cache` for two reasons: to infer `RT`, and — in the bulk
-helper — to `classify` each request when splitting the batch. Each helper sets
+Both helpers take `cache` for two reasons: to infer `RT`, and to `classify` —
+the bulk helper to split the batch, the single helper to pick a sub-producer,
+which has no other route to a request's resource type. Each helper sets
 `[coveredTypes]` to `Object.keys(producers)`; since that property holds a real
-value, no cast or tagged-type stamping is involved.
+value, no cast or tagged-type stamping is involved. That value is also what
+satisfies the *required* branch of the carrier for narrowed coverage (§5.2 of
+this doc), which is why partial coverage routes through a helper.
 
 ### 3.3 Call-site shapes
 
@@ -197,6 +206,16 @@ wrapBulkProducer(cache, opts, bulkProducerByIdType(cache, {
 }));
 ```
 
+**Which to reach for.** The bare form is the right default for a sole-type cache
+and for a genuine cross-type batch optimization. On a registry whose types have
+*different content*, prefer `producerByIdType` / `bulkProducerByIdType` even at
+full coverage: the bare form's result type is the union over its covered ids, so
+nothing ties the returned variant to the id it was handed (§10 of this doc), and
+the second call-site shape above elides that its body must return a distinct
+object literal per branch — a single object with `content: Story | Collection`
+is assignable to neither member. Per-type dispatch restores both properties by
+splitting the function per branch.
+
 ### 3.4 `bulkProducerByIdType` behaviour
 
 Splits the incoming mixed batch by `cache.classify(req.id)`, invokes each
@@ -209,7 +228,15 @@ twice with different `params` (the suite already pins duplicate ids in
 
 Each sub-producer's rejection is **caught** and written into that type's slots
 as `Error` elements, so per-request error isolation survives the merge — it
-lives in the sugar rather than in the wrapper.
+lives in the sugar rather than in the wrapper. A rejection with a non-`Error`
+value is wrapped in an `Error` carrying the original as `cause`, since a
+non-`Error` sitting in a result slot would be read downstream as a *successful*
+producer result.
+
+Those slots are typed `ErrorType` from the caller's side but a caught reason is
+`unknown`, so this needs no separate cast only because the dispatching function
+is already id-erased internally (`(LooseResult | Error)[]`) and re-typed once, at
+the return, by the same cast the helper needs anyway for id erasure.
 
 A sub-producer that under-returns is **not** repaired or padded: the helper
 leaves those slots absent in the reassembled array, so the wrapper's existing
@@ -283,12 +310,54 @@ The wrapper reads the covered set from `producer[coveredTypes]` instead of
 `Object.keys(producers)`. When that property is absent — the bare-function case
 — coverage is the whole registry by construction, so the error is
 **unreachable**: every classifiable id has a producer. It stays reachable, with
-identical before-any-cache-read timing, whenever coverage was narrowed by a
-helper or by an explicit `Covered` type argument.
+identical before-any-cache-read timing, whenever coverage was narrowed.
 
 This is a genuine reduction in reachable failure modes for the common case, not
 a weakening: the bare form cannot under-cover, because its parameter type must
 accept every registry id.
+
+**Amended after implementation.** This section originally also claimed the error
+stayed reachable when coverage was narrowed "by an explicit `Covered` type
+argument". It does not, and cannot: an explicit type argument narrows only the
+type, while a bare function carries no runtime covered set — so the wrapper's
+runtime coverage read as the whole registry while the type said otherwise. Under
+the record form these could not disagree, because `Covered` and the runtime
+check came from one source (the record's keys).
+
+The types still banned uncovered ids at the wrapped function's call site, so the
+divergence was reachable only by defeating them — a cast or a loosely-typed id.
+But that is exactly the case `NoProducerForResourceTypeError` exists to catch,
+and losing it there is worse than losing an error: the wrapper would hand the id
+to a producer written for a different resource type, then store that producer's
+content under the incoming id — a type-mismatched entry that outlives the
+request and is later served to ordinary `Cache.get` readers.
+
+Fixed by making the carrier **conditionally required** — optional when `Covered`
+is the whole registry, required when it is a strict subset (§3.2 of this doc):
+
+```ts
+[ResourceTypeName<RT>] extends [Covered]
+  ? { readonly [coveredTypes]?: readonly Covered[] }   // full set: optional
+  : { readonly [coveredTypes]: readonly Covered[] }    // subset: required
+```
+
+So narrowed coverage cannot exist without runtime proof of that narrowing, and
+the single-source property is restored by construction rather than by
+convention. `wrapProducer<RT, "story">(cache, opts, bareFn)` is now a compile
+error; the sanctioned routes are `producerByIdType` (which always supplies the
+value) or attaching `[coveredTypes]` directly.
+
+Four properties were probed before adopting this, since three of them could
+plausibly have broken:
+
+1. A bare function is still accepted with no ceremony.
+2. `Covered` **still infers from the carrier** even though it also appears in
+   the condition — the failure mode that would have silently defeated the
+   helpers' narrowing.
+3. Explicit narrowing with a bare function is rejected.
+4. The deferred case verifies: a helper's result forwarded through an
+   *unresolved* generic `Covered`, which is how the computing wrappers forward
+   theirs into `wrapProducer`.
 
 ### 5.3 Diagnostics (§6.5.3 amendment)
 
@@ -322,11 +391,20 @@ Contract tests, so the capability survives refactors:
    from record keys to `producer[coveredTypes]` preserved both the error and its
    timing. Its companion: through a bare function, no id of any registry type
    can produce that error.
-6. **Compile fixtures** (`@ts-expect-error`, alongside the existing coverage
-   fixtures): a bare function accepts every registry id; a function typed for a
-   strict subset is **rejected**; a helper narrows `Covered` so an uncovered id
-   is an error at the wrapped function's call site; an empty record throws at
-   construction.
+6. **Compile fixtures** (`@ts-expect-error`): a bare function accepts every
+   registry id; a function typed for a strict subset is **rejected**; the
+   per-resource-type record the wrappers used to take is **rejected** (a
+   surviving record overload would be exactly the compatibility layer this
+   change exists to avoid); a helper narrows `Covered` so an uncovered id is an
+   error at the wrapped function's call site; narrowing `Covered` by an explicit
+   type argument alone is **rejected**, with a control proving the cause is the
+   missing carrier and not the function's signature (§10.1 of this doc); an empty
+   record throws at construction.
+
+   These landed in their own `singleProducerTyping.test.ts` rather than beside
+   the existing `coverageTyping.test.ts` fixtures, so that this change's tests
+   could be written independently of its implementation. Worth folding together
+   later.
 7. **Sole-type regression.** An existing sole-type suite converted to the bare
    form behaves identically, pinning that the common case is unaffected.
 8. **Computing wrappers unchanged end-to-end.** The existing
@@ -368,11 +446,11 @@ wrong, the revert is the inverse codemod (`fn` →
 
 Four, all small; the contracts in §3 shipped as written.
 
-1. **`producerByIdType` classifies too.** §3.2 says both helpers take `cache`
-   "to infer `RT`, and — in the bulk helper — to `classify`". The single helper
-   must classify as well: picking a sub-producer for a request has no other
-   route to the request's resource type. So the double-classification note in
-   §3.4 applies to both helpers, not just bulk.
+1. **`producerByIdType` classifies too.** §3.2 originally said both helpers take
+   `cache` "to infer `RT`, and — in the bulk helper — to `classify`". The single
+   helper must classify as well: picking a sub-producer for a request has no
+   other route to the request's resource type. So the double-classification note
+   in §3.4 applies to both helpers, not just bulk. §3.2 is corrected inline.
 2. **Both helpers throw `NoProducerForResourceTypeError` on an unreachable
    uncovered type.** Unreachable *through the wrappers*, which reject uncovered
    types first, but reachable if a helper's returned function is driven
@@ -394,4 +472,29 @@ record form has. A single producer's result type is the union over its covered
 ids, so returning one variant's content for every id typechecks; there is no
 runtime content check either. That, not just partial coverage, is a standing
 reason to reach for `producerByIdType` on a multi-type registry — and it is
-pinned by a fixture in `coverageTyping.test.ts`.
+pinned by a fixture in `coverageTyping.test.ts` and now stated in §3.3.
+
+This also invalidated a rationale comment that predated the change:
+`requestPairedProducerUtils.ts` credited the *per-type producer records* with
+being "the user-facing (id, content) correlation backstop", and used that to
+justify two `as unknown as` casts. With the record no longer the wrappers'
+parameter, that justification held only for the helper path, and the comment was
+corrected. There is no runtime backstop and never was — the registry's `matches`
+is an *id* predicate, and `resourceType<Content>()` is type-only for content, so
+there is nothing to validate content against without adding content validators
+to the registry.
+
+### 10.1 Post-implementation amendment: the conditional coverage carrier
+
+Adopted after implementation and after review of §5.2, which was wrong (see that
+section for the full account and the four probed properties). The carrier changed
+from unconditionally optional to **optional for whole-registry coverage,
+required for a strict subset**, so type-level and runtime coverage can no longer
+disagree.
+
+Scope of the change: the two type aliases in §3.2, plus one typing fixture that
+flipped from a positive assertion to `@ts-expect-error` — `wrapProducer<RT,
+"story">(cache, opts, bareFn)` is now rejected, with a control proving the
+rejection is the missing carrier rather than the function's signature (attaching
+`[coveredTypes]` makes the identical function compile). No runtime code changed;
+both helpers already set the property. The 336-test suite was unaffected.
