@@ -55,7 +55,7 @@ describe("bulkProducerByIdType", () => {
     });
     try {
       expect(() => bulkProducerByIdType(registry, {})).to.throw();
-      const bare = wrapBulkProducer(cache, {}, async (reqs) =>
+      const bare = wrapBulkProducer({ cache }, async (reqs) =>
         reqs.map(() => ({ content: "x", directives: freshFor100 })),
       );
       const results = await bare([{ id: "site:1" }, { id: "biz:1" }]);

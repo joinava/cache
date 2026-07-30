@@ -1,7 +1,5 @@
 import { partition } from "es-toolkit";
 import stableStringify from "safe-stable-stringify";
-import type { PublicInterface } from "type-party";
-import type Cache from "../Cache.js";
 import { rethrowUnroutableWithCacheName } from "./producer-errors.js";
 import {
   cacheProduceChannel,
@@ -172,10 +170,9 @@ type WrappedBulkProducerFn<
  *   fire-and-forget and never receive a signal, since the caller has already
  *   been given a (stale) result.
  *
- * @param cache - An instance of the cache class. This is where values returned
- *   by the producer (see below) will actually be stored.
- *
- * @param options - See `WrapProducerOptions` for details.
+ * @param options - The cache to wrap, plus the wrapping behaviour; see
+ *   {@link WrapProducerOptions}. `options.cache` is where values returned by
+ *   the producer (see below) will actually be stored.
  *
  * @param producer - The function actually responsible for returning the
  *   results that will be sent to the user and/or stored in the cache. It is
@@ -192,15 +189,15 @@ export function wrapBulkProducer<
   Params extends AnyParams = AnyParams,
   ErrorType extends Error = Error,
 >(
-  cache: PublicInterface<Cache<RT, Validators, Params>>,
-  options: WrapProducerOptions | undefined,
+  options: WrapProducerOptions<RT, Validators, Params>,
   producer: CoveringBulkProducer<RT, Covered, Validators, Params, ErrorType>,
 ): WrappedBulkProducerFn<RT, Covered, Validators, Params, ErrorType> {
   const {
+    cache,
     collapseOverlappingRequestsTime = 3,
     onCacheReadFailure = "call-producer",
     logger = defaultLoggersByComponent["wrap-producer"],
-  } = options ?? {};
+  } = options;
 
   // SAFETY: see LooseProducer in wrapProducer.ts.
   const looseProducer = producer as unknown as LooseBulkProducer<

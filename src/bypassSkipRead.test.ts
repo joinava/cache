@@ -50,8 +50,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       directives: freshFor100,
     }));
     const getSite = wrapProducer(
-      cache,
-      {},
+      { cache },
       producerByIdType(cache.resourceTypes, { site_day: producer }),
     );
     try {
@@ -128,8 +127,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       directives: freshFor100,
     }));
     const getSite = wrapProducer(
-      cache,
-      {},
+      { cache },
       producerByIdType(cache.resourceTypes, { site_day: producer }),
     );
     try {
@@ -174,8 +172,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       directives: freshFor100,
     }));
     const getSite = wrapProducer(
-      cache,
-      {},
+      { cache },
       producerByIdType(cache.resourceTypes, { site_day: producer }),
     );
     try {
@@ -217,8 +214,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       return { content: "produced", directives: freshFor100 };
     });
     const getSite = wrapProducer(
-      cache,
-      {},
+      { cache },
       producerByIdType(cache.resourceTypes, { site_day: producer }),
     );
     try {
@@ -305,8 +301,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
         })),
     );
     const getBulk = wrapBulkProducer(
-      cache,
-      { collapseOverlappingRequestsTime: 0 },
+      { cache, collapseOverlappingRequestsTime: 0 },
       bulkProducerByIdType(cache.resourceTypes, { site_day: bulkProducer }),
     );
     const requests = [
@@ -404,8 +399,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       return { content: "produced-once", directives: freshFor100 };
     });
     const getSite = wrapProducer(
-      cache,
-      {},
+      { cache },
       producerByIdType(cache.resourceTypes, { site_day: producer }),
     );
     try {

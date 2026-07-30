@@ -364,8 +364,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
             directives: freshFor100,
           }));
           const getSite = wrapProducer(
-            cache,
-            {},
+            { cache },
             producerByIdType(cache.resourceTypes, { site_day: producer }),
           );
           const thrown = await expectRejection(() =>
@@ -499,8 +498,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
             ],
           }));
           const getSite = wrapProducer(
-            cache,
-            {},
+            { cache },
             producerByIdType(cache.resourceTypes, { site_day: producer }),
           );
           // The producer result still reaches the caller; whether the wrapped
@@ -680,7 +678,7 @@ describe("singleTypeCacheOptions", () => {
       singleTypeCacheOptions<string>()({ store: new MemoryStore(), name }),
     );
     try {
-      const fetch = wrapProducer(cache, {}, async (req) => ({
+      const fetch = wrapProducer({ cache }, async (req) => ({
         content: `v-${req.id}`,
         directives: freshFor10,
       }));
@@ -712,7 +710,7 @@ describe("singleTypeCacheOptions", () => {
       }),
     );
     try {
-      const fetch = wrapProducer(cache, {}, async (req) => ({
+      const fetch = wrapProducer({ cache }, async (req) => ({
         content: `v-${req.id}`,
         directives: freshFor10,
       }));
@@ -783,7 +781,7 @@ describe("a one-entry registry with a real guard rejects nonconforming ids", () 
     const capture = captureChannels(name);
     const cache = new Cache({ store, name, resourceTypes: guardedRegistry });
     try {
-      const fetch = wrapProducer(cache, {}, async (req) => ({
+      const fetch = wrapProducer({ cache }, async (req) => ({
         content: `v-${req.id}`,
         directives: freshFor100,
       }));

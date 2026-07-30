@@ -134,11 +134,11 @@ This is particularly useful when a producer that fetches a collection wants to a
 
 The package provides **four** functions for wrapping producers with a cache. They split along two axes — single vs. bulk, and "lookup" vs. "compute". All four take **exactly one producer**, and in every case per-resource-type dispatch is opt-in sugar that builds that one producer from several: `producerByIdType`/`bulkProducerByIdType` route by the request's id, while the compute wrappers' `hashedInputProducerByInputType`/`bulkHashedInputProducerByInputType` route by *input*. None of those four sugar helpers needs a cache:
 
-- [`wrapProducer.ts`](./src/utils/wrapProducer.ts) — **`wrapProducer`**: the package's most important export, arguably. It takes a producer (a function that returns data to cache) and a `Cache` instance, and returns a function that will use a cached value when a suitable one is available, but otherwise call through to the producer and store its return value for future requests.
+- [`wrapProducer.ts`](./src/utils/wrapProducer.ts) — **`wrapProducer`**: the package's most important export, arguably. It takes an options bag holding the `Cache` instance, plus a producer (a function that returns data to cache), and returns a function that will use a cached value when a suitable one is available, but otherwise call through to the producer and store its return value for future requests.
 
   ```ts
   // A bare function covers the WHOLE registry. Sole-type caches stop here:
-  const getVisits = wrapProducer(cache, {}, async (req) => ({
+  const getVisits = wrapProducer({ cache }, async (req) => ({
     content: await fetchVisits(req.id),
     directives: { freshUntilAge: 60 },
   }));
@@ -146,7 +146,7 @@ The package provides **four** functions for wrapping producers with a cache. The
   // Per-resource-type dispatch (and/or partial coverage) is opt-in sugar.
   // Note it takes the REGISTRY, not the cache -- routing by id type needs
   // nothing else, so this is a value you can build and test on its own:
-  const getStories = wrapProducer(cache, {}, producerByIdType(storiesResourceTypes, {
+  const getStories = wrapProducer({ cache }, producerByIdType(storiesResourceTypes, {
     story: async (req) => ({ content: await fetchStory(req.id), directives: { freshUntilAge: 60 } }),
     collection: async (req) => {
       const collection = await fetchCollection(req.id);
@@ -181,6 +181,8 @@ The package provides **four** functions for wrapping producers with a cache. The
   `wrapProducer` and `wrapBulkProducer` both treat the cache **`id` as a reference to a mutable entity**: the caller already has the id, and the cached value is whatever that entity currently is — a function of the `id` and time (e.g. "the current `User` for `user:123`"). The id is the natural cache key, so the producer receives it directly.
 
   Both per-resource-type helpers live in [`producerByIdType.ts`](./src/utils/producerByIdType.ts) — they need neither wrapper at runtime, and no `Cache`. The errors both wrappers raise are in [`producer-errors.ts`](./src/utils/producer-errors.ts).
+
+  Like the two "compute" wrappers below, both take **one options bag** followed by the producer: the cache is the bag's required `cache` field (`wrapProducer({ cache, ...options }, producer)`), not a separate positional argument, so all four wrappers are called the same way and no call site has to pass `undefined` in the middle to reach the producer.
 
   Upgrading from 1.6.0: the wrapped function returned by either wrapper is now a **plain function**. 1.6.0 attached the `Cache` instance to it as a `cache` property ("for convenience, e.g. in closing it"); 2.0 does not, since the cache is a field of the options bag the caller already holds. Hold on to that instance yourself if you were reaching for `wrapped.cache` (e.g. `wrapped.cache.close()` → `cache.close()`).
 

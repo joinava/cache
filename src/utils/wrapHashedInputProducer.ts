@@ -1,8 +1,6 @@
 import pLimit from "p-limit";
 import type { ReadonlyDeep } from "type-fest";
-import type { PublicInterface } from "type-party";
 
-import type Cache from "../Cache.js";
 import { AmbiguousResourceTypeError, UnclassifiableIdError } from "../Cache.js";
 import type { CacheSpec, SpecForId } from "../types/00_CacheSpec.js";
 import type {
@@ -499,8 +497,7 @@ export function wrapHashedInputProducer<
   RT extends ResourceTypes,
   Meta extends HashedInputProducerMeta & { kind: "single" },
 >(
-  options: WrapProducerOptions & {
-    cache: PublicInterface<Cache<RT, Meta["validators"], Meta["params"]>>;
+  options: WrapProducerOptions<RT, Meta["validators"], Meta["params"]> & {
     hashedInputProducer: HashedInputProducer<Meta>;
   },
 ): [HashedInputProducerProblems<RT, Meta>] extends [never]
@@ -519,8 +516,7 @@ export function wrapHashedInputProducer<
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 >(
-  options: WrapProducerOptions & {
-    cache: PublicInterface<Cache<RT, Validators, Params>>;
+  options: WrapProducerOptions<RT, Validators, Params> & {
     hashInput: (input: Input) => MintedId | Promise<MintedId>;
     produce: (
       input: ReadonlyDeep<Input>,
@@ -537,14 +533,17 @@ export function wrapHashedInputProducer<
   },
 ): WrappedHashedInputProducer<RT, Input, MintedId, Validators, Params>;
 export function wrapHashedInputProducer(
-  options: WrapProducerOptions & {
-    cache: PublicInterface<Cache<ResourceTypes, AnyValidators, AnyParams>>;
+  options: WrapProducerOptions<ResourceTypes, AnyValidators, AnyParams> & {
     hashedInputProducer?: HashedInputProducer<HashedInputProducerMeta>;
     hashInput?: (input: never) => string | Promise<string>;
     produce?: (input: never) => Promise<unknown>;
   },
 ): unknown {
-  const { cache, hashedInputProducer, hashInput, produce, ...producerOptions } =
+  // `cache` is read directly AND left in `producerOptions`: this wrapper needs
+  // it (mint checks, supplemental hashing, the registry it routes against) and
+  // `wrapProducer` now takes it as a field of the same bag.
+  const { cache } = options;
+  const { hashedInputProducer, hashInput, produce, ...producerOptions } =
     options;
   const branchEntries = branchEntriesFor(
     "wrapHashedInputProducer",
@@ -583,16 +582,14 @@ export function wrapHashedInputProducer(
   const wrapped =
     hashedInputProducer === undefined
       ? wrapProducer(
-          cache,
           producerOptions,
           // Non-null: branchEntriesFor guarantees exactly one entry here.
           // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
           internalProducerFor(branchEntries[0]![1]) as unknown as Parameters<
             typeof wrapProducer
-          >[2],
+          >[1],
         )
       : wrapProducer(
-          cache,
           producerOptions,
           producerByIdType(
             cache.resourceTypes,
@@ -663,8 +660,7 @@ export function wrapBulkHashedInputProducer<
   RT extends ResourceTypes,
   Meta extends HashedInputProducerMeta & { kind: "bulk" },
 >(
-  options: WrapProducerOptions & {
-    cache: PublicInterface<Cache<RT, Meta["validators"], Meta["params"]>>;
+  options: WrapProducerOptions<RT, Meta["validators"], Meta["params"]> & {
     hashedInputProducer: HashedInputProducer<Meta>;
   },
 ): [HashedInputProducerProblems<RT, Meta>] extends [never]
@@ -685,8 +681,7 @@ export function wrapBulkHashedInputProducer<
   Params extends AnyParams = AnyParams,
   ErrorType extends Error = Error,
 >(
-  options: WrapProducerOptions & {
-    cache: PublicInterface<Cache<RT, Validators, Params>>;
+  options: WrapProducerOptions<RT, Validators, Params> & {
     hashInput: (input: Input) => MintedId | Promise<MintedId>;
     produce: (
       inputs: readonly ReadonlyDeep<Input>[],
@@ -713,14 +708,16 @@ export function wrapBulkHashedInputProducer<
   ErrorType
 >;
 export function wrapBulkHashedInputProducer(
-  options: WrapProducerOptions & {
-    cache: PublicInterface<Cache<ResourceTypes, AnyValidators, AnyParams>>;
+  options: WrapProducerOptions<ResourceTypes, AnyValidators, AnyParams> & {
     hashedInputProducer?: HashedInputProducer<HashedInputProducerMeta>;
     hashInput?: (input: never) => string | Promise<string>;
     produce?: (inputs: readonly never[]) => Promise<unknown>;
   },
 ): unknown {
-  const { cache, hashedInputProducer, hashInput, produce, ...producerOptions } =
+  // `cache` both read directly and left in `producerOptions`; see the single
+  // wrapper's note.
+  const { cache } = options;
+  const { hashedInputProducer, hashInput, produce, ...producerOptions } =
     options;
   type LooseBulkBranch = Omit<LooseBranch<never>, "produce"> & {
     produce: (
@@ -770,16 +767,14 @@ export function wrapBulkHashedInputProducer(
   const wrapped =
     hashedInputProducer === undefined
       ? wrapBulkProducer(
-          cache,
           producerOptions,
           // Non-null: branchEntriesFor guarantees exactly one entry here.
           // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
           internalProducerFor(branchEntries[0]![1]) as unknown as Parameters<
             typeof wrapBulkProducer
-          >[2],
+          >[1],
         )
       : wrapBulkProducer(
-          cache,
           producerOptions,
           bulkProducerByIdType(
             cache.resourceTypes,

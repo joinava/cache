@@ -82,7 +82,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
     it("accepts every registry type's id, sees the full id union in `req`, and keeps per-id content narrowing", async () => {
       const cache = makeCache("sp-typing-bare");
       try {
-        const fetchAny = wrapProducer(cache, {}, async (req) => {
+        const fetchAny = wrapProducer({ cache }, async (req) => {
           // `Covered` took its default, so the producer sees -- and must
           // handle -- every registry id. Not narrowed to one type, not `any`.
           expectType<
@@ -131,7 +131,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
     it("wrapBulkProducer: a bare bulk producer accepts request elements of every registry type", async () => {
       const cache = makeCache("sp-typing-bare-bulk");
       try {
-        const getBulk = wrapBulkProducer(cache, {}, async (reqs) => {
+        const getBulk = wrapBulkProducer({ cache }, async (reqs) => {
           expectType<
             IsEqual<
               (typeof reqs)[number]["id"],
@@ -186,22 +186,22 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
           // coverage must go through a helper instead.
           // prettier-ignore
           // @ts-expect-error a story-only producer cannot satisfy the whole-registry default
-          void wrapProducer(cache, {}, storyOnlyProducer);
+          void wrapProducer({ cache }, storyOnlyProducer);
 
           // prettier-ignore
           // @ts-expect-error same for the bulk wrapper
-          void wrapBulkProducer(cache, {}, storyOnlyBulkProducer);
+          void wrapBulkProducer({ cache }, storyOnlyBulkProducer);
 
           // A record is the *helper's* parameter, not a producer. (A record
           // overload here would be exactly the compatibility layer this
           // design avoids.)
           // prettier-ignore
           // @ts-expect-error a per-resource-type record is not a function; records go through producerByIdType
-          void wrapProducer(cache, {}, { story: storyOnlyProducer });
+          void wrapProducer({ cache }, { story: storyOnlyProducer });
 
           // prettier-ignore
           // @ts-expect-error likewise for wrapBulkProducer / bulkProducerByIdType
-          void wrapBulkProducer(cache, {}, { story: storyOnlyBulkProducer });
+          void wrapBulkProducer({ cache }, { story: storyOnlyBulkProducer });
         }
       } finally {
         await cache.close();
@@ -214,8 +214,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
       const cache = makeCache("sp-typing-helper-single");
       try {
         const fetchStoryOrCollection = wrapProducer(
-          cache,
-          {},
+          { cache },
           producerByIdType(cache.resourceTypes, {
             story: async (req) => {
               // Contextually narrowed per key, exactly as under the 2.0 record.
@@ -259,8 +258,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
       const cache = makeCache("sp-typing-helper-bulk");
       try {
         const getBulk = wrapBulkProducer(
-          cache,
-          {},
+          { cache },
           bulkProducerByIdType(cache.resourceTypes, {
             story: async (reqs) => {
               expectType<IsEqual<(typeof reqs)[number]["id"], StoryId>>();
@@ -312,7 +310,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
           // throwing NoProducerForResourceTypeError.
           // prettier-ignore
           // @ts-expect-error narrowing Covered requires the [coveredTypes] runtime value
-          void wrapProducer<typeof registry, "story">(cache, {}, storyOnlyProducer);
+          void wrapProducer<typeof registry, "story">({ cache }, storyOnlyProducer);
         }
 
         // CONTROL isolating the cause: attach the carrier and the exact same
@@ -322,8 +320,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
           [coveredTypes]: ["story"] as const,
         });
         const fetchStoryOnly = wrapProducer<typeof registry, "story">(
-          cache,
-          {},
+          { cache },
           storyOnlyWithCoverage,
         );
 

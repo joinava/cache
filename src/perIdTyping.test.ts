@@ -79,7 +79,7 @@ describe("Per-id content typing", () => {
         resourceTypes: soleRegistry,
       });
       try {
-        const _f = wrapProducer(cache, {}, async (req) => ({
+        const _f = wrapProducer({ cache }, async (req) => ({
           content: req.id,
           directives: { freshUntilAge: 1 },
         }));
@@ -247,8 +247,7 @@ describe("Per-id content typing", () => {
         // TypeScript fully checks the (id, content) correlation per branch with
         // no user-side casts.
         const fetcher = wrapProducer(
-          cache,
-          { collapseOverlappingRequestsTime: 0 },
+          { cache, collapseOverlappingRequestsTime: 0 },
           producerByIdType(cache.resourceTypes, {
             story: async (req) => ({
               content: {
@@ -294,8 +293,7 @@ describe("Per-id content typing", () => {
         const story2: Story = { id: "2", title: "Second" };
 
         const fetcher = wrapProducer(
-          cache,
-          { collapseOverlappingRequestsTime: 0 },
+          { cache, collapseOverlappingRequestsTime: 0 },
           producerByIdType(cache.resourceTypes, {
             collection: async (_req) => ({
               content: [story1, story2] satisfies Story[],
@@ -472,8 +470,7 @@ describe("Per-id content typing", () => {
         // branch's branded key, and its return is required to be content for
         // that variant.
         const fetcher = wrapProducer(
-          cache,
-          { collapseOverlappingRequestsTime: 0 },
+          { cache, collapseOverlappingRequestsTime: 0 },
           producerByIdType(cache.resourceTypes, {
             story: async (req) => {
               expectType<IsEqual<typeof req.id, StoryKey>>();
