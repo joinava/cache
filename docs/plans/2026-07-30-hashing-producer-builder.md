@@ -109,6 +109,18 @@ narrowing was asserted and never enforced. It is what a branch `name` buys at
 runtime: without one, the check degrades from "the story branch minted a
 collection id" to "this id classifies to something".
 
+That distinction earns its own error, `MintedIdResourceTypeMismatchError`, rather
+than a re-worded `UnclassifiableIdError`. The two other mint failures — matched
+nothing, matched several — are `UnclassifiableIdError`/`AmbiguousResourceTypeError`
+rethrown from `classify` with the branch named, because the fact is unchanged and
+only the message improves. A mint that classified to exactly ONE type that isn't
+the branch's is a different fact: classification succeeded, so the culprit is the
+branch's `hashInput` and not the registry's guards. It carries `branch` and
+`classifiedResourceType` as fields, so the "story branch minted a collection id"
+that motivates the whole check is readable programmatically and not only from the
+message — which is what lets an alert route it apart from "this registry does not
+cover this id space".
+
 ## What the builder cannot know
 
 A branch's result carries more than content: `validators`, `vary`, and id-keyed
