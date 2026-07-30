@@ -9,8 +9,10 @@ import {
 } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
+  bulkProducerByIdType,
   idStartsWith,
   NoProducerForResourceTypeError,
+  producerByIdType,
   resourceType,
   UnclassifiableIdError,
   wrapBulkComputingProducer,
@@ -21,12 +23,13 @@ import {
 import wrapProducer from "./utils/wrapProducer.js";
 
 /**
- * Runtime coverage contract (§6.3, §6.4): wrappers throw at construction on
- * keyless producer/branch records; an id classifying outside a wrapper's
- * coverage throws NoProducerForResourceTypeError BEFORE any store read; two
- * partial wrappers over one cache serve their own types independently; and
- * computing branches enforce that `hashInput` mints ids their own resource
- * type's guard accepts.
+ * Runtime coverage contract (§6.3, §6.4, as amended by the 2026-07-30
+ * single-producer design): the by-id-type helpers and the computing wrappers
+ * throw at construction on keyless records; an id classifying outside a
+ * wrapper's DECLARED coverage throws NoProducerForResourceTypeError BEFORE any
+ * store read; two partial wrappers over one cache serve their own types
+ * independently; and computing branches enforce that `hashInput` mints ids
+ * their own resource type's guard accepts.
  */
 
 const registry = {
@@ -44,36 +47,42 @@ const freshFor100 = { freshUntilAge: 100 };
 
 describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
   describe("construction throws on a keyless producers/branches record", () => {
-    it("wrapProducer: empty record and bare function both throw at construction time", async () => {
+    it("producerByIdType: an empty record throws at construction time, while a bare producer function is a legal whole-registry producer", async () => {
       const cache = new Cache(memoryStoreFor(registry), {
         name: uniqueCacheName("construct-wrap"),
         resourceTypes: registry,
       });
       try {
-        expect(() => wrapProducer(cache, {}, {})).to.throw();
-        // A bare function (1.6.0's sugar) structurally matches the mapped
-        // record as `{}`; the sugar is gone, so this must throw too.
-        expect(() =>
-          wrapProducer(cache, {}, async () => ({
-            content: "x",
-            directives: freshFor100,
-          })),
-        ).to.throw();
+        // The keyless-record check moved out of the wrapper and into the
+        // helper, which is now its only meaningful home.
+        expect(() => producerByIdType(cache, {})).to.throw();
+        // ...and the form that used to throw here is the primitive now: a bare
+        // function covers the whole registry, and its wrapper is callable.
+        const bare = wrapProducer(cache, {}, async () => ({
+          content: "x",
+          directives: freshFor100,
+        }));
+        expect(await bare({ id: "site:1" })).to.include({ content: "x" });
+        expect(await bare({ id: "biz:1" })).to.include({ content: "x" });
       } finally {
         await cache.close();
       }
     });
 
-    it("wrapBulkProducer: empty record and bare function both throw at construction time", async () => {
+    it("bulkProducerByIdType: an empty record throws at construction time, while a bare bulk producer function is a legal whole-registry producer", async () => {
       const cache = new Cache(memoryStoreFor(registry), {
         name: uniqueCacheName("construct-bulk"),
         resourceTypes: registry,
       });
       try {
-        expect(() => wrapBulkProducer(cache, {}, {})).to.throw();
-        expect(() =>
-          wrapBulkProducer(cache, {}, async () => []),
-        ).to.throw();
+        expect(() => bulkProducerByIdType(cache, {})).to.throw();
+        const bare = wrapBulkProducer(cache, {}, async (reqs) =>
+          reqs.map(() => ({ content: "x", directives: freshFor100 })),
+        );
+        const results = await bare([{ id: "site:1" }, { id: "biz:1" }]);
+        expect(
+          results.map((it) => (it instanceof Error ? it : it.content)),
+        ).to.deep.equal(["x", "x"]);
       } finally {
         await cache.close();
       }
@@ -115,10 +124,14 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         content: `biz-${req.id}`,
         directives: freshFor100,
       }));
-      const getCovered = wrapProducer(cache, {}, {
-        site_day: siteProducer,
-        business_slice: bizProducer,
-      });
+      const getCovered = wrapProducer(
+        cache,
+        {},
+        producerByIdType(cache, {
+          site_day: siteProducer,
+          business_slice: bizProducer,
+        }),
+      );
       const capture = captureChannels(name);
       try {
         // Reachable only via a cast / loosely-typed id -- the compiler bans
@@ -174,7 +187,11 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
             directives: freshFor100,
           })),
       );
-      const getBulk = wrapBulkProducer(cache, {}, { site_day: siteBulk });
+      const getBulk = wrapBulkProducer(
+        cache,
+        {},
+        bulkProducerByIdType(cache, { site_day: siteBulk }),
+      );
       try {
         const thrown = await expectRejection(() =>
           getBulk([
@@ -226,8 +243,16 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
       // Two wrappers, each covering a different non-empty subset of the one
       // cache's registry (the well-sky site-persons shape).
-      const getSite = wrapProducer(cache, {}, { site_day: siteProducer });
-      const getBiz = wrapProducer(cache, {}, { business_slice: bizProducer });
+      const getSite = wrapProducer(
+        cache,
+        {},
+        producerByIdType(cache, { site_day: siteProducer }),
+      );
+      const getBiz = wrapProducer(
+        cache,
+        {},
+        producerByIdType(cache, { business_slice: bizProducer }),
+      );
       try {
         const siteRes = await getSite({ id: "site:1" });
         expect(siteRes.content).to.equal("site-content-site:1");

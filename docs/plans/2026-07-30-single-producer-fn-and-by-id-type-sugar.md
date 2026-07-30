@@ -1,7 +1,7 @@
 # Single producer function + by-id-type sugar
 
 **Date:** 2026-07-30
-**Status:** design approved, not implemented
+**Status:** implemented (see §10 for the ratified deviations)
 **Amends:** `2026-07-28-resource-type-registry-and-diagnostics.md` §6.3, §6.5.3, §6.6
 
 Bare `§n.n` references throughout point at that 2.0 plan; sections of *this*
@@ -363,3 +363,35 @@ wrong, the revert is the inverse codemod (`fn` →
 - **Per-type collapse inside `bulkProducerByIdType`** (§5.1 of this doc). Trigger: evidence
   from the `produce` channel that duplicate cross-caller origin work is
   material.
+
+## 10. Ratified implementation deviations
+
+Four, all small; the contracts in §3 shipped as written.
+
+1. **`producerByIdType` classifies too.** §3.2 says both helpers take `cache`
+   "to infer `RT`, and — in the bulk helper — to `classify`". The single helper
+   must classify as well: picking a sub-producer for a request has no other
+   route to the request's resource type. So the double-classification note in
+   §3.4 applies to both helpers, not just bulk.
+2. **Both helpers throw `NoProducerForResourceTypeError` on an unreachable
+   uncovered type.** Unreachable *through the wrappers*, which reject uncovered
+   types first, but reachable if a helper's returned function is driven
+   directly, so it fails loud rather than leaving result slots empty.
+3. **`wrapBulkProducer`'s under-return message now counts filled slots**
+   ("returned results for only N of M requests") instead of reporting the result
+   array's `length`. Required by §3.4's no-padding rule: the helper reassembles
+   into a preallocated array, whose `length` always equals `reqs.length` even
+   when slots are holes, so the old message read "3 results for 3 requests" on a
+   short return. The *check* was unaffected; only its wording was wrong.
+4. **A sub-producer that rejects with a non-`Error` value is wrapped** in an
+   `Error` carrying the original as `cause`, rather than written into result
+   slots raw — a non-`Error` in a result slot would be read downstream as a
+   successful producer result.
+
+Consequence worth stating, since §2's finding 3 only implies it: the bare
+whole-registry form gives up the per-branch **(id, content) correlation** the
+record form has. A single producer's result type is the union over its covered
+ids, so returning one variant's content for every id typechecks; there is no
+runtime content check either. That, not just partial coverage, is a standing
+reason to reach for `producerByIdType` on a multi-type registry — and it is
+pinned by a fixture in `coverageTyping.test.ts`.

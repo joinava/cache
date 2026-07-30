@@ -18,9 +18,11 @@ import type {
 } from "../types/index.js";
 import wrapProducer from "./wrapProducer.js";
 
-// 2.0: producers are per-resource-type records over a required registry. This
-// suite's behavior is id-structure-agnostic, so it uses a sole-type registry;
-// coverage/classification behavior lives in coverageRuntime.test.ts and
+// 2.0: the wrapper takes ONE producer function over a required registry, and a
+// bare function covers the whole registry. This suite's behavior is
+// id-structure-agnostic, so it uses a sole-type registry and passes its
+// producers bare; per-type dispatch (`producerByIdType`) and
+// coverage/classification behavior live in coverageRuntime.test.ts and
 // resourceTypeClassification.test.ts. (The 1.6.0 `isCacheable` pass-through
 // test that lived here was removed with the option itself -- §6.3's producer
 // purity contract.)
@@ -83,7 +85,7 @@ describe("wrapProducer", () => {
     sut = wrapProducer(
       cache,
       { collapseOverlappingRequestsTime: 0 },
-      { resources: fetcher },
+      fetcher,
     );
   });
 
@@ -131,7 +133,7 @@ describe("wrapProducer", () => {
     const freshSut = wrapProducer(
       cache,
       { collapseOverlappingRequestsTime: 0 },
-      { resources: freshFetcher },
+      freshFetcher,
     );
 
     await freshSut({ id: "myUrl" });
@@ -168,7 +170,7 @@ describe("wrapProducer", () => {
     const swrSut = wrapProducer(
       cache,
       { collapseOverlappingRequestsTime: 0 },
-      { resources: swrFetcher },
+      swrFetcher,
     );
 
     // Load content into the cache.
@@ -219,7 +221,7 @@ describe("wrapProducer", () => {
   it("should return the error if the fetcher rejects", async () => {
     const testError = new Error("test");
     const rejectingFetcher = mock.fn(async () => Promise.reject(testError));
-    const sut2 = wrapProducer(cache, {}, { resources: rejectingFetcher });
+    const sut2 = wrapProducer(cache, {}, rejectingFetcher);
 
     return sut2({ id: "someUrl" }).then(
       () => {
@@ -267,7 +269,7 @@ describe("wrapProducer", () => {
       }
     });
 
-    const sut2 = wrapProducer(cache, {}, { resources: customTestFetcher });
+    const sut2 = wrapProducer(cache, {}, customTestFetcher);
 
     const firstRes = await sut2({ id: "someUrl" });
     expect(firstRes).to.deep.include(testResult);
@@ -305,7 +307,7 @@ describe("wrapProducer", () => {
           directives: { freshUntilAge: 0 },
         }) satisfies RequestPairedProducerResult<any, any, any>,
     );
-    const sut2 = wrapProducer(cache, {}, { resources: resolveWithErrorFetcher });
+    const sut2 = wrapProducer(cache, {}, resolveWithErrorFetcher);
 
     return sut2({ id: "someUrl2" }).then((it) => {
       expect(it).to.include({ content: test404 });
@@ -346,12 +348,10 @@ describe("wrapProducer", () => {
       const wrappedProducer = wrapProducer(
         mockCache,
         { onCacheReadFailure: "throw" },
-        {
-          resources: async ({ id }) => ({
-            content: id,
-            directives: { freshUntilAge: 1 },
-          }),
-        },
+        async ({ id }) => ({
+          content: id,
+          directives: { freshUntilAge: 1 },
+        }),
       );
 
       await wrappedProducer({ id: "test" }).then(
@@ -373,7 +373,7 @@ describe("wrapProducer", () => {
       const wrappedProducer = wrapProducer(
         mockCache,
         { onCacheReadFailure: "call-producer" },
-        { resources: mockProducer },
+        mockProducer,
       );
 
       const res = await wrappedProducer({ id: "test" });
@@ -386,9 +386,7 @@ describe("wrapProducer", () => {
         directives: { freshUntilAge: 1 },
       }));
 
-      const wrappedProducer = wrapProducer(mockCache, {}, {
-        resources: mockProducer,
-      });
+      const wrappedProducer = wrapProducer(mockCache, {}, mockProducer);
 
       const res = await wrappedProducer({ id: "test" });
       expect(res.content).to.eq("test");
@@ -432,7 +430,7 @@ describe("wrapProducer", () => {
       const sut2 = wrapProducer(
         mockCache,
         { collapseOverlappingRequestsTime: 0 },
-        { resources: producerFn },
+        producerFn,
       );
 
       const resultPromise = sut2(
@@ -481,7 +479,7 @@ describe("wrapProducer", () => {
       const slowSut = wrapProducer(
         cache,
         { collapseOverlappingRequestsTime: 0 },
-        { resources: slowFetcher },
+        slowFetcher,
       );
 
       const resultPromise = slowSut(
@@ -529,7 +527,7 @@ describe("wrapProducer", () => {
       const collapsingSut = wrapProducer(
         cache,
         { collapseOverlappingRequestsTime: 10 },
-        { resources: slowFetcher },
+        slowFetcher,
       );
 
       const req = { id: "collapse-abort-store" };
@@ -587,7 +585,7 @@ describe("wrapProducer", () => {
       const errorProducer = mock.fn(async () => {
         throw new Error("producer-error");
       });
-      const sut2 = wrapProducer(cache, {}, { resources: errorProducer });
+      const sut2 = wrapProducer(cache, {}, errorProducer);
 
       // With an already-aborted signal, the call should reject immediately
       // (before even checking the cache or calling the producer)
@@ -619,7 +617,7 @@ describe("wrapProducer", () => {
       const sut2 = wrapProducer(
         mockCache,
         { onCacheReadFailure: "call-producer" },
-        { resources: producerFn },
+        producerFn,
       );
 
       controller.abort(new Error("aborted-during-cache-read"));

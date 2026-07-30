@@ -43,15 +43,20 @@ export function completeRequest<Params extends AnyParams, Id extends string>(
  * supplemental resources may correspond to any variant -- not just the one
  * matching the request's id.
  *
- * The user-facing (id, content) correlation backstop comes from the per-type
- * producer records the wrappers take (`ResourceTypeProducer` /
- * `BulkResourceTypeProducer`): each producer's `req.id` is pinned to its own
- * registry branch, so its result can only pair that branch's content with that
- * branch's ids. This helper's job is just to build the runtime store input. TS
- * can't see through the conditional/distributive types involved here, so the
- * construction needs an unsafe cast; the cast is sound because we don't
- * synthesize id/content -- we just spread fields the producer already
- * paired correctly.
+ * The strongest available user-facing (id, content) correlation backstop comes
+ * from the per-type producer records the by-id-type helpers take
+ * (`ResourceTypeProducer` / `BulkResourceTypeProducer`): there each
+ * sub-producer's `req.id` is pinned to its own registry branch, so its result
+ * can only pair that branch's content with that branch's ids. A single
+ * whole-registry producer function gets a weaker guarantee -- its result type is
+ * the union over its covered ids, so the compiler does not require the content
+ * it returns to match the specific id it was handed (nothing checks content
+ * shape at runtime either -- reach for the by-id-type helper when that
+ * correlation matters). Either way this helper's job is just to build the
+ * runtime store input: it never synthesizes id or content, only spreads what
+ * the producer returned alongside the request's own id. TS can't see through
+ * the conditional/distributive types involved here, so the construction needs
+ * an unsafe cast; the cast is sound in that same sense.
  */
 export function requestPairedProducerResultToResources<
   Spec extends CacheSpec,

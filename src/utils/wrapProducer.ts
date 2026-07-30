@@ -47,6 +47,15 @@ import {
  * request type bans covered-set violations at compile time. Thrown BEFORE
  * any cache read: serving a hit for an uncovered type would smuggle the
  * serve-if-present contract back in through a cast.
+ *
+ * Only reachable when coverage was actually NARROWED -- i.e. the producer
+ * came from {@link producerByIdType}/`bulkProducerByIdType` (which declare
+ * their covered set), or `Covered` was pinned by an explicit type argument.
+ * A bare producer function covers the whole registry by construction (its
+ * parameter type must accept every registry id), so it declares no covered
+ * set, the wrapper runs no coverage check, and this error cannot occur: every
+ * classifiable id has a producer. Unclassifiable/ambiguous ids still fail
+ * loud, from `cache.classify`.
  */
 export class NoProducerForResourceTypeError extends Error {
   override readonly name = "NoProducerForResourceTypeError";
@@ -118,7 +127,9 @@ export type WrapProducerOptions<Params extends AnyParams> = {
 };
 
 /**
- * The producer for one resource type: sees only its own branch's ids.
+ * The producer for one resource type: sees only its own branch's ids. This is
+ * a {@link producerByIdType} sub-producer -- the wrappers themselves take a
+ * single {@link CoveringProducer}.
  *
  * Note: {@link RequestPairedProducerResult} already allows
  * `supplementalResources` from ANY spec variant, so (e.g.) a `site_day`
@@ -141,10 +152,10 @@ export type ResourceTypeProducer<
 >;
 
 /**
- * The producers this wrapper covers: one entry per covered resource type, any
- * non-empty subset of the registry. `Covered` is inferred from the record's
- * keys. Non-coverage is expressed by omission, so a wrapper never has to make
- * claims about types that other wrappers may produce.
+ * {@link producerByIdType}'s argument: one entry per covered resource type,
+ * any non-empty subset of the registry. `Covered` is inferred from the
+ * record's keys. Non-coverage is expressed by omission, so a wrapper never has
+ * to make claims about types that other wrappers may produce.
  */
 export type ProducersFor<
   RT extends ResourceTypes,
@@ -155,14 +166,61 @@ export type ProducersFor<
   readonly [K in Covered]: ResourceTypeProducer<RT, K, Validators, Params>;
 };
 
+/**
+ * The key under which a producer function declares WHICH resource types it
+ * covers. A real runtime symbol carrying a real runtime value (see
+ * {@link CoveringProducer}), not a type-only phantom: the wrappers read it to
+ * enforce coverage, and it is exported so declaration emit can name it.
+ */
+export const coveredTypes: unique symbol = Symbol("@zingage/cache.coveredTypes");
+
+/**
+ * A producer function that may additionally declare WHICH resource types it
+ * covers. The property is **optional and carries a real runtime value** -- the
+ * covered type names -- so it serves double duty: `Covered` is inferred from
+ * it at compile time, and the wrapper reads it at runtime to enforce coverage
+ * before touching the store. A plain function omits it and picks up
+ * `Covered`'s default (every registry type), which needs no runtime check
+ * because the compiler already made the function prove it accepts every
+ * registry id.
+ *
+ * It is deliberately NOT a value-less phantom: making it required would reject
+ * bare functions, and making it type-only would leave the wrapper with no
+ * runtime source for the covered set now that there are no record keys to
+ * read.
+ *
+ * Narrowing each result's `Id` to `IdOfResourceType<RT[Covered]>` bounds the
+ * PRIMARY result to covered types only. Supplementals are unaffected: they are
+ * a separate field typed over the full `SpecOf<RT>`, so a covered producer can
+ * still attach supplementals for any registry type.
+ */
+export type CoveringProducer<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+> = ((
+  req: ReadonlyDeep<ConsumerRequest<Params, IdOfResourceType<RT[Covered]>>>,
+) => Promise<
+  RequestPairedProducerResult<
+    SpecOf<RT>,
+    Validators,
+    Params,
+    IdOfResourceType<RT[Covered]>
+  >
+>) & {
+  readonly [coveredTypes]?: readonly Covered[];
+};
+
 export type { PartialConsumerRequest };
 
 /**
  * The internal, id-erased shape all wrapper plumbing dispatches through.
- * SAFETY: a value is only read out of the producers record after (a) the
- * construction-time keys check, (b) `cache.classify(req.id)` succeeding, and
- * (c) the coverage check confirming the classified type is a record key --
- * so the request's id is in exactly the id sub-space the producer declared.
+ * SAFETY: the producer is only invoked after (a) `cache.classify(req.id)`
+ * succeeds and (b) the coverage check confirms the classified type is one the
+ * producer declared (or the producer declared none, i.e. it covers the whole
+ * registry) -- so the request's id is in exactly the id sub-space the producer
+ * accepts.
  */
 type LooseProducer<
   RT extends ResourceTypes,
@@ -178,31 +236,34 @@ type LooseProducer<
  * replacement for them, except that it tries to lookup and reuse prior
  * results from a cache, before calling the underlying user-provided producer.
  *
- * Producers are declared as a record with one entry per covered resource
- * type -- any non-empty subset of the cache's registry. The record's keys are
- * inferred as the wrapper's coverage (`Covered`), which bounds the returned
- * function's request type: it accepts exactly the covered types' ids, and
- * requests for uncovered types are compile errors. A type with no producer in
- * any wrapper is legal and normal: its entries are written as other
- * producers' supplemental resources (or direct `store()` calls) and read via
- * `Cache.get` -- the serve-if-present contract. Partial coverage is also what
- * makes capability-scoped and split wrappers honest: a second `wrapProducer`
- * call can cover a different subset of the same cache, and adding a registry
- * type grants no existing wrapper-holder fetch authority over it.
+ * Exactly ONE producer function is passed, and it is the primitive:
  *
- * There is no bare-function form: a bare function can't carry a coverage key
- * (it structurally matches the record type as `{}`, inferring
- * `Covered = never` and yielding an uncallable wrapper). Even sole-type
- * caches write `{ <type-name>: producer }`. `wrapProducer` throws at
- * construction time if `producers` has no own enumerable keys.
+ * - A **bare function covers the whole registry.** `Covered` defaults to
+ *   every registry type name, and the compiler makes the function prove it --
+ *   its parameter must accept every registry id. Sole-type caches therefore
+ *   just pass their producer.
+ * - **Partial coverage requires {@link producerByIdType}**, which turns a
+ *   per-resource-type record into a single function carrying its covered set
+ *   in the optional {@link coveredTypes} property. `Covered` is inferred from
+ *   that property (inference beats the default whenever it is present), which
+ *   bounds the returned function's request type: it accepts exactly the
+ *   covered types' ids, and requests for uncovered types are compile errors.
  *
- * Dispatch: the wrapper calls `cache.classify(req.id)` once per request and
- * invokes that type's producer. The classify result is also what stamps
- * `resourceType` on the `fetch`/`produce` diagnostics messages, so dispatch
- * and telemetry cannot disagree. If the classified type is not in this
- * wrapper's coverage -- reachable only via a cast or loosely-typed id --
- * the wrapper throws {@link NoProducerForResourceTypeError} before reading
- * the cache.
+ * A type with no producer in any wrapper is legal and normal: its entries are
+ * written as other producers' supplemental resources (or direct `store()`
+ * calls) and read via `Cache.get` -- the serve-if-present contract. Partial
+ * coverage is also what makes capability-scoped and split wrappers honest: a
+ * second `wrapProducer` call can cover a different subset of the same cache,
+ * and adding a registry type grants no existing wrapper-holder fetch authority
+ * over it.
+ *
+ * The wrapper calls `cache.classify(req.id)` once per request; the classify
+ * result is what stamps `resourceType` on the `fetch`/`produce` diagnostics
+ * messages. If the producer declared a covered set and the classified type is
+ * not in it -- reachable only via a cast or loosely-typed id -- the wrapper
+ * throws {@link NoProducerForResourceTypeError} before reading the cache. A
+ * bare function declares no covered set, so that check is skipped entirely
+ * (its coverage is the whole registry by construction).
  *
  * ## Producer purity contract
  *
@@ -241,7 +302,7 @@ type LooseProducer<
  * producer must be called, no signal reaches the producer -- because that call
  * may be sharing one underlying producer invocation with other callers who have
  * not aborted. Producers accordingly take **no** `options` parameter at all
- * (see {@link ResourceTypeProducer}): through 1.6.0 the type declared one, but
+ * (see {@link CoveringProducer}): through 1.6.0 the type declared one, but
  * with the `isCacheable` pass-through gone there is no longer any
  * non-collapsed producer call for a signal to be forwarded on, so the
  * parameter was unreachable surface and has been removed. The caller's wait for
@@ -259,27 +320,28 @@ type LooseProducer<
  * defeat its purpose.
  *
  * @param cache - An instance of the cache class. This is where values returned
- *   by the producers (see below) will actually be stored.
+ *   by the producer (see below) will actually be stored.
  *
  * @param options - See `WrapProducerOptions` for details.
  *
- * @param producers - The functions actually responsible for returning the
- *   results that will be sent to the user and/or stored in the cache, one per
- *   covered resource type. Each acts as the origin or "producer" for its
- *   resource type. Each is passed the request (id and params) along with the
- *   caller's cache directives, which may be needed in case the producer is
- *   itself backed by a cache, and it needs to decide whether to contact its
- *   origin.
+ * @param producer - The function actually responsible for returning the
+ *   results that will be sent to the user and/or stored in the cache. It acts
+ *   as the origin or "producer" for every resource type it covers. It is
+ *   passed the request (id and params) along with the caller's cache
+ *   directives, which may be needed in case the producer is itself backed by a
+ *   cache, and it needs to decide whether to contact its origin. Pass a bare
+ *   function to cover the whole registry, or {@link producerByIdType}'s result
+ *   to cover a subset with one sub-producer per resource type.
  */
 export default function wrapProducer<
   RT extends ResourceTypes,
-  Covered extends ResourceTypeName<RT>,
+  Covered extends ResourceTypeName<RT> = ResourceTypeName<RT>,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 >(
   cache: PublicInterface<Cache<RT, Validators, Params>>,
   options: WrapProducerOptions<Params> | undefined,
-  producers: ProducersFor<RT, Covered, Validators, Params>,
+  producer: CoveringProducer<RT, Covered, Validators, Params>,
 ): <Id extends IdOfResourceType<RT[Covered]>>(
   req: PartialConsumerRequest<Params, Id>,
   options?: { signal?: AbortSignal },
@@ -290,26 +352,22 @@ export default function wrapProducer<
     logger = defaultLoggersByComponent["wrap-producer"],
   } = options ?? {};
 
-  // SAFETY: see LooseProducer. The record's own entries are also snapshotted
-  // here, before any request runs, so a post-wrap mutation of the caller's
-  // record can't widen (or otherwise change) coverage later -- dispatch and
-  // the coverage check both consult the snapshot.
-  const looseProducers: Readonly<
-    Record<string, LooseProducer<RT, Validators, Params>>
-  > = {
-    ...(producers as unknown as Readonly<
-      Record<string, LooseProducer<RT, Validators, Params>>
-    >),
-  };
-  const coveredResourceTypes = Object.keys(looseProducers);
+  // SAFETY: see LooseProducer.
+  const looseProducer = producer as unknown as LooseProducer<
+    RT,
+    Validators,
+    Params
+  >;
 
-  if (coveredResourceTypes.length === 0) {
-    throw new Error(
-      "wrapProducer: `producers` must be a record with one entry per covered " +
-        "resource type and cannot be empty. (Passing a bare producer function " +
-        "is not supported; wrap it as `{ <resource-type-name>: producer }`.)",
-    );
-  }
+  // The declared covered set is snapshotted here, before any request runs, so
+  // a post-wrap mutation of the caller's array can't widen (or otherwise
+  // change) coverage later -- the coverage check consults the snapshot.
+  // `undefined` means the producer declared nothing, which (see
+  // CoveringProducer) means it covers the whole registry: there is no covered
+  // set to enumerate and nothing to check.
+  const declaredCoveredTypes = producer[coveredTypes];
+  const coveredResourceTypes: readonly string[] | undefined =
+    declaredCoveredTypes === undefined ? undefined : [...declaredCoveredTypes];
 
   const logTrace = logger.bind(null, "wrap-producer", "trace");
   const logWarning = logger.bind(null, "wrap-producer", "warn");
@@ -326,16 +384,9 @@ export default function wrapProducer<
     Params
   >;
 
-  const callProducerAndLog = async (
-    resourceType: string,
-    req: LooseRequest,
-  ) => {
+  const callProducerAndLog = async (req: LooseRequest) => {
     logTrace("contacting producer", req);
-    // Non-null assertion is safe: dispatch only happens after the coverage
-    // check confirms `resourceType` is one of the record's own keys.
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const producer = looseProducers[resourceType]!;
-    const resp = await producer(req);
+    const resp = await looseProducer(req);
     logTrace("got response from producer", resp);
     return resp;
   };
@@ -398,7 +449,7 @@ export default function wrapProducer<
   // what keeps bypass (`maxAge: 0`) invocations from ever being shared with
   // plain-miss callers.
   //
-  // No signal reaches the producer (`ResourceTypeProducer` takes no options
+  // No signal reaches the producer (`CoveringProducer` takes no options
   // parameter at all), because the
   // task may be shared with other callers who haven't aborted. It always
   // fires a (non-awaited) cache.store() after the producer resolves. This is
@@ -436,7 +487,7 @@ export default function wrapProducer<
       };
 
       try {
-        requestPairedResult = await callProducerAndLog(resourceType, req);
+        requestPairedResult = await callProducerAndLog(req);
       } catch (error) {
         publishProduce("error");
         throw error;
@@ -479,9 +530,14 @@ export default function wrapProducer<
     // contract violations, not dispositions -- no fetch message).
     const resourceType = cache.classify(id);
 
-    // A classified type outside this wrapper's coverage throws BEFORE any
-    // cache read (see NoProducerForResourceTypeError's docs).
-    if (!Object.hasOwn(looseProducers, resourceType)) {
+    // A classified type outside this wrapper's DECLARED coverage throws BEFORE
+    // any cache read (see NoProducerForResourceTypeError's docs). Skipped
+    // entirely for a bare producer, which declares no covered set because it
+    // covers the whole registry.
+    if (
+      coveredResourceTypes !== undefined &&
+      !coveredResourceTypes.includes(resourceType)
+    ) {
       throw new NoProducerForResourceTypeError({
         cacheName: cache.name,
         resourceType,
@@ -699,6 +755,96 @@ export default function wrapProducer<
     req: PartialConsumerRequest<Params, Id>,
     options?: { signal?: AbortSignal },
   ) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>>;
+}
+
+/**
+ * Sugar over {@link wrapProducer}'s single-producer primitive: turns a record
+ * with one entry per covered resource type into ONE function that dispatches
+ * by the request's classified type, and that declares its covered set in
+ * {@link coveredTypes} so `wrapProducer` can both infer `Covered` from it and
+ * enforce it at runtime.
+ *
+ * Use this when a wrapper should cover a strict subset of the registry, or
+ * when each resource type has its own origin. A producer that covers the whole
+ * registry needs no helper: pass it to `wrapProducer` directly.
+ *
+ * Throws at construction on an empty record -- the only place that check has a
+ * meaningful home now that a producer's coverage is not read off record keys.
+ *
+ * Note that requests routed through this helper are classified TWICE (once
+ * here to pick the sub-producer, once in the wrapper for dispatch/telemetry).
+ * That is the price of the sugar being opt-in; guards are meant to be cheap.
+ *
+ * @param cache - The cache the producer will be wrapped against. Used to infer
+ *   `RT` and to classify each request's id.
+ * @param producers - One {@link ResourceTypeProducer} per covered resource
+ *   type; `Covered` is inferred from the keys.
+ */
+export function producerByIdType<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+>(
+  cache: PublicInterface<Cache<RT, Validators, Params>>,
+  producers: ProducersFor<RT, Covered, Validators, Params>,
+): CoveringProducer<RT, Covered, Validators, Params> {
+  // SAFETY: see LooseProducer. A value is only read out of this record after
+  // `cache.classify` succeeds and the key is confirmed to be the record's own,
+  // so the request's id is in exactly the id sub-space that sub-producer
+  // declared. The record's own entries are snapshotted here, before any
+  // request runs, so a post-helper mutation of the caller's record can't widen
+  // (or otherwise change) coverage later.
+  const looseProducers: Readonly<
+    Record<string, LooseProducer<RT, Validators, Params>>
+  > = {
+    ...(producers as unknown as Readonly<
+      Record<string, LooseProducer<RT, Validators, Params>>
+    >),
+  };
+  const coveredResourceTypes = Object.keys(looseProducers);
+
+  if (coveredResourceTypes.length === 0) {
+    throw new Error(
+      "producerByIdType: `producers` must be a record with one entry per " +
+        "covered resource type and cannot be empty. (A producer that covers " +
+        "the whole registry needs no helper: pass the function itself to " +
+        "wrapProducer.)",
+    );
+  }
+
+  // The id is re-narrowed past its ReadonlyDeep wrapper, which cannot *reduce*
+  // to the (string) id type while `RT` is an unresolved generic, even though
+  // it's the id value itself at runtime.
+  type LooseRequest = ReadonlyDeep<
+    ConsumerRequest<Params, SpecOf<RT>["id"]>
+  > & { readonly id: SpecOf<RT>["id"] };
+
+  const dispatchingProducer = async (req: LooseRequest) => {
+    const resourceType = cache.classify(req.id);
+    const subProducer = Object.hasOwn(looseProducers, resourceType)
+      ? looseProducers[resourceType]
+      : undefined;
+    // Unreachable through `wrapProducer`, which rejects uncovered types before
+    // this function is ever called; reachable if the returned producer is
+    // driven directly. Fail loud either way rather than serving nothing.
+    if (subProducer === undefined) {
+      throw new NoProducerForResourceTypeError({
+        cacheName: cache.name,
+        resourceType,
+        coveredResourceTypes,
+        id: req.id,
+      });
+    }
+    return subProducer(req);
+  };
+
+  // SAFETY: the dispatching function is id-erased internally (see
+  // LooseProducer), and the covered names are the record's own keys, so the
+  // declared set and the reachable sub-producers cannot disagree.
+  return Object.assign(dispatchingProducer, {
+    [coveredTypes]: coveredResourceTypes,
+  }) as unknown as CoveringProducer<RT, Covered, Validators, Params>;
 }
 
 export function isRequestingCacheBypass(

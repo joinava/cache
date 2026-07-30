@@ -39,17 +39,20 @@ import {
   zip2,
 } from "./utils.js";
 import {
+  coveredTypes,
   isRequestingCacheBypass,
   NoProducerForResourceTypeError,
   type WrapProducerOptions,
 } from "./wrapProducer.js";
 
 /**
- * A bulk producer for ONE resource type. The wrapper groups collapsed
- * requests by classified resource type and issues one bulk call per type per
- * collapse window (a batch never mixes types -- each type has its own
- * origin). Results are request-paired; Error elements mark per-request
- * failures.
+ * A bulk producer for ONE resource type: a {@link bulkProducerByIdType}
+ * sub-producer. That helper splits the wrapper's batch by classified resource
+ * type and calls each sub-producer once with its own type's slice, so a
+ * sub-producer's batch never mixes types. (The wrapper itself takes a single
+ * {@link CoveringBulkProducer}, which by default sees the WHOLE mixed batch --
+ * that is the point of the single-function form.) Results are request-paired;
+ * Error elements mark per-request failures.
  *
  * The result type is a flat array of (RequestPairedProducerResult |
  * ErrorType): each element is a discriminated union over the type's spec, so
@@ -82,9 +85,9 @@ export type BulkResourceTypeProducer<
 >;
 
 /**
- * The bulk producers this wrapper covers: one entry per covered resource
+ * {@link bulkProducerByIdType}'s argument: one entry per covered resource
  * type, any non-empty subset of the registry. `Covered` is inferred from the
- * record's keys, exactly as in `wrapProducer`.
+ * record's keys, exactly as in `producerByIdType`.
  */
 export type BulkProducersFor<
   RT extends ResourceTypes,
@@ -101,6 +104,36 @@ export type BulkProducersFor<
     ErrorType
   >;
 };
+
+/**
+ * The bulk counterpart of `wrapProducer`'s `CoveringProducer` (see it for why
+ * the covered-set property is optional and value-carrying): a bulk producer
+ * function that may additionally declare which resource types it covers. A
+ * plain function omits the property and covers the whole registry, so it sees
+ * the caller's FULL mixed batch in one call and can optimize across resource
+ * types (one upstream call spanning several types, cross-type dedup, a join).
+ */
+export type CoveringBulkProducer<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+  ErrorType extends Error = Error,
+> = ((
+  reqs: readonly ReadonlyDeep<
+    ConsumerRequest<Params, IdOfResourceType<RT[Covered]>>
+  >[],
+) => Promise<
+  (
+    | RequestPairedProducerResult<
+        SpecOf<RT>,
+        Validators,
+        Params,
+        IdOfResourceType<RT[Covered]>
+      >
+    | ErrorType
+  )[]
+>) & { readonly [coveredTypes]?: readonly Covered[] };
 
 /** The internal, id-erased dispatch shape; see `LooseProducer` in wrapProducer.ts. */
 type LooseBulkProducer<
@@ -122,22 +155,30 @@ type LooseBulkProducer<
  * calling the underlying user-provided producers only for those requests that
  * could not be resolved from the cache (or that need revalidation later).
  *
- * Like {@link wrapProducer} (see its docs for the shared contracts: coverage
- * inference from the record's keys, classification-driven dispatch, the
- * producer purity contract, and bypass requests skipping the cache read),
- * producers are declared per covered resource type. The wrapper groups the
- * requests it must send to a producer by their classified resource type and
- * issues ONE bulk call per type per collapse window -- a batch never mixes
- * types, since each type has its own origin. A single `reqs` array passed to
- * the wrapped function may freely mix covered types; ids of uncovered types
- * are compile errors per element (and, via casts, throw
- * {@link NoProducerForResourceTypeError} before any cache read).
+ * Like {@link wrapProducer} (see its docs for the shared contracts: the single
+ * producer function and how `Covered` is inferred, the producer purity
+ * contract, and bypass requests skipping the cache read), exactly ONE producer
+ * function is passed.
  *
- * Note that this can call an underlying producer up to twice per wrapped
- * call (per covered type): once for requests that had no
- * immediately-usable cached values (including bypass requests, which skip
- * the read), and once (in the background) for requests that had
- * usableWhileRevalidate results and need to be revalidated in the background.
+ * That is what restores this wrapper's defining bulk capability: a bare
+ * function covers the whole registry and is handed the **full** set of
+ * requests it must produce, mixed resource types and all, in ONE call -- so it
+ * can optimize across them (a single upstream call covering several types,
+ * cross-type dedup, a join). Per-type dispatch is available as opt-in sugar via
+ * {@link bulkProducerByIdType}, which splits the batch by classified type,
+ * calls each sub-producer once with its own slice, and reassembles the results
+ * positionally.
+ *
+ * A single `reqs` array passed to the wrapped function may freely mix covered
+ * types; ids of uncovered types are compile errors per element (and, via casts,
+ * throw {@link NoProducerForResourceTypeError} before any cache read -- only
+ * when coverage was actually narrowed; see that error's docs).
+ *
+ * Note that this can call the underlying producer up to twice per wrapped
+ * call: once for requests that had no immediately-usable cached values
+ * (including bypass requests, which skip the read), and once (in the
+ * background) for requests that had usableWhileRevalidate results and need to
+ * be revalidated in the background.
  *
  * Note that any supplemental resources returned by a producer will be
  * cached but not returned to the caller.
@@ -167,26 +208,28 @@ type LooseBulkProducer<
  *   been given a (stale) result.
  *
  * @param cache - An instance of the cache class. This is where values returned
- *   by the producers (see below) will actually be stored.
+ *   by the producer (see below) will actually be stored.
  *
  * @param options - See `WrapProducerOptions` for details.
  *
- * @param producers - The functions actually responsible for returning the
- *   results that will be sent to the user and/or stored in the cache, one per
- *   covered resource type. Each is passed an array of requests (id and
- *   params) -- all of its own resource type -- along with the callers' cache
- *   directives.
+ * @param producer - The function actually responsible for returning the
+ *   results that will be sent to the user and/or stored in the cache. It is
+ *   passed an array of requests (id and params) along with the callers' cache
+ *   directives, and must return one result (or `ErrorType`) per request, in the
+ *   same order. Pass a bare function to cover the whole registry and receive
+ *   the full mixed batch, or {@link bulkProducerByIdType}'s result to dispatch
+ *   per resource type.
  */
 export function wrapBulkProducer<
   RT extends ResourceTypes,
-  Covered extends ResourceTypeName<RT>,
+  Covered extends ResourceTypeName<RT> = ResourceTypeName<RT>,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
   ErrorType extends Error = Error,
 >(
   cache: PublicInterface<Cache<RT, Validators, Params>>,
   options: WrapProducerOptions<Params> | undefined,
-  producers: BulkProducersFor<RT, Covered, Validators, Params, ErrorType>,
+  producer: CoveringBulkProducer<RT, Covered, Validators, Params, ErrorType>,
 ): <
   const Reqs extends readonly PartialConsumerRequest<
     Params,
@@ -206,24 +249,22 @@ export function wrapBulkProducer<
     logger = defaultLoggersByComponent["wrap-producer"],
   } = options ?? {};
 
-  // SAFETY: see LooseProducer in wrapProducer.ts -- values are only read
-  // after the construction-time keys check, per-request classification, and
-  // the coverage check. The record's own entries are snapshotted (as in
-  // wrapProducer) so a post-wrap mutation of the caller's record can't
-  // change coverage later.
-  const looseProducers = { ...producers } as unknown as Readonly<
-      Record<string, LooseBulkProducer<RT, Validators, Params, ErrorType>>
-    >;
+  // SAFETY: see LooseProducer in wrapProducer.ts.
+  const looseProducer = producer as unknown as LooseBulkProducer<
+    RT,
+    Validators,
+    Params,
+    ErrorType
+  >;
 
-  const coveredResourceTypes = Object.keys(looseProducers);
-
-  if (coveredResourceTypes.length === 0) {
-    throw new Error(
-      "wrapBulkProducer: `producers` must be a record with one entry per " +
-        "covered resource type and cannot be empty. (Passing a bare producer " +
-        "function is not supported; wrap it as `{ <resource-type-name>: producer }`.)",
-    );
-  }
+  // The declared covered set is snapshotted here, before any request runs, so
+  // a post-wrap mutation of the caller's array can't widen (or otherwise
+  // change) coverage later. `undefined` means the producer declared nothing,
+  // which (see CoveringBulkProducer) means it covers the whole registry: there
+  // is no covered set to enumerate and nothing to check.
+  const declaredCoveredTypes = producer[coveredTypes];
+  const coveredResourceTypes: readonly string[] | undefined =
+    declaredCoveredTypes === undefined ? undefined : [...declaredCoveredTypes];
 
   const logTrace = logger.bind(null, "wrap-producer", "trace");
   const logWarning = logger.bind(null, "wrap-producer", "warn");
@@ -242,33 +283,48 @@ export function wrapBulkProducer<
   >;
 
   const callProducerAndLog = async (
-    resourceType: string,
     reqs: readonly LooseRequest[],
   ): Promise<(LooseResult | ErrorType)[]> => {
-    logTrace("contacting bulk producer", { resourceType, reqs });
-    // Non-null assertion is safe: dispatch only happens after the coverage
-    // check confirms `resourceType` is one of the record's own keys.
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const producer = looseProducers[resourceType]!;
-    const responses = await producer(reqs);
+    logTrace("contacting bulk producer", { reqs });
+    const responses = await looseProducer(reqs);
     logTrace("got responses from bulk producer", { responses });
     return responses;
   };
 
-  // One collapsed invocation per (resource type, request batch). No signal
-  // reaches the producer -- the invocation may be shared with callers who
-  // haven't aborted, so there is no one caller's signal to hand it, which is
-  // why `BulkResourceTypeProducer` takes no options parameter at all. The task
-  // always fires a (non-awaited) cache.store() with the non-error results after
-  // the producer succeeds (so its work isn't wasted even when every caller that
-  // triggered it has aborted), and publishes the invocation's `produce`
-  // diagnostics message when the producer settles. See wrapProducer's
-  // implementation for the full collapsing rationale.
+  // One collapsed invocation per request batch. No signal reaches the producer
+  // -- the invocation may be shared with callers who haven't aborted, so there
+  // is no one caller's signal to hand it, which is why `CoveringBulkProducer`
+  // takes no options parameter at all. The task always fires a (non-awaited)
+  // cache.store() with the non-error results after the producer succeeds (so
+  // its work isn't wasted even when every caller that triggered it has
+  // aborted), and publishes the invocation's `produce` diagnostics message when
+  // the producer settles. See wrapProducer's implementation for the full
+  // collapsing rationale.
+  //
+  // COLLAPSE GRANULARITY. The key is the batch's full requests (ids, params,
+  // directives) -- the parallel `resourceTypes` argument is derived from the
+  // ids and is deliberately excluded. With one producer that means ONE
+  // invocation per trigger group, where before there was one per (trigger
+  // group x resource type). Bypass, miss, and revalidation groups still stay
+  // separate -- not because `trigger` is in the key (it is not), but because
+  // their request arrays differ, bypass carrying `maxAge: 0` directives.
+  //
+  // The cost is real: two callers whose `story` sub-batches are identical used
+  // to share that invocation even when their `collection` parts differed, and
+  // now one key spans the whole mixed batch, so they share nothing. This is
+  // 1.6.0's behaviour, and it is recoverable later INSIDE
+  // `bulkProducerByIdType` via the already-exported `collapsedTaskCreator` --
+  // deliberately not done here, since that would relocate the complexity one
+  // layer down rather than remove it. (`wrapProducer` is unaffected: it
+  // handles one request, so there is no merge and its keying is unchanged.)
   const collapsedCallProducerAndStore = collapsedInvocationTaskCreator(
     async (
       invocation: CollapsedInvocation,
-      resourceType: string,
       reqs: readonly LooseRequest[],
+      // Index-aligned with `reqs`; carried through so the produce message can
+      // attribute each element to its own type without re-classifying (the
+      // batch may now span resource types).
+      resourceTypes: readonly string[],
     ) => {
       const start = performance.now();
 
@@ -276,7 +332,10 @@ export function wrapBulkProducer<
         publishCacheProduce({
           cache: cache.name,
           trigger: invocation.trigger,
-          requests: reqs.map((req) => ({ resourceType, resourceId: req.id })),
+          requests: zip2(resourceTypes, reqs).map(([resourceType, req]) => ({
+            resourceType,
+            resourceId: req.id,
+          })),
           collapsedCallerCount: invocation.attachedCallerCount(),
           outcome,
           durationMs: performance.now() - start,
@@ -285,22 +344,26 @@ export function wrapBulkProducer<
 
       let requestPairedProducerResults: (LooseResult | ErrorType)[];
       try {
-        requestPairedProducerResults = await callProducerAndLog(
-          resourceType,
-          reqs,
-        );
+        requestPairedProducerResults = await callProducerAndLog(reqs);
         // A producer that returns fewer results than requests (or an
         // undefined element) violated its contract, and the positional
         // (result, request) pairing is no longer trustworthy -- a dropped
         // middle element would silently pair later results with the wrong
         // requests. So nothing is stored and the WHOLE invocation fails:
         // this throw rejects it, settling every waiting element's fetch as
-        // `producer-error` via the groups' rejection handlers.
-        if (
-          reqs.some((_, i) => requestPairedProducerResults[i] === undefined)
-        ) {
+        // `producer-error` via the group's rejection handler.
+        //
+        // The count reports FILLED slots rather than the array's `length`,
+        // which is not the same thing: `bulkProducerByIdType` reassembles into
+        // a preallocated array (deliberately leaving an under-returning
+        // sub-producer's slots as holes for this check to catch), so its
+        // `length` always equals `reqs.length` even when results are missing.
+        const answered = reqs.filter(
+          (_, i) => requestPairedProducerResults[i] !== undefined,
+        ).length;
+        if (answered !== reqs.length) {
           throw new Error(
-            `wrapBulkProducer: producer for resource type "${resourceType}" returned ${String(requestPairedProducerResults.length)} results for ${String(reqs.length)} requests (every request must receive a result or an Error element)`,
+            `wrapBulkProducer: producer returned results for only ${String(answered)} of ${String(reqs.length)} requests (every request must receive a result or an Error element)`,
           );
         }
       } catch (error) {
@@ -342,9 +405,8 @@ export function wrapBulkProducer<
       return requestPairedProducerResults;
     },
     collapseOverlappingRequestsTime * 1000,
-    // The key covers the batch's full requests (ids, params, directives);
-    // resourceType is derived from the ids but including it is harmless.
-    (args) => stableStringify(args),
+    // See the COLLAPSE GRANULARITY note above.
+    ([reqs]) => stableStringify(reqs),
   );
 
   const normalizeVaryBound = (vary: Vary<Params>) =>
@@ -387,16 +449,20 @@ export function wrapBulkProducer<
       };
     });
 
-    const uncovered = items.find(
-      (item) => !Object.hasOwn(looseProducers, item.resourceType),
-    );
-    if (uncovered) {
-      throw new NoProducerForResourceTypeError({
-        cacheName: cache.name,
-        resourceType: uncovered.resourceType,
-        coveredResourceTypes,
-        id: uncovered.req.id,
-      });
+    // Skipped entirely for a bare producer, which declares no covered set
+    // because it covers the whole registry (see wrapProducer's docs).
+    if (coveredResourceTypes !== undefined) {
+      const uncovered = items.find(
+        (item) => !coveredResourceTypes.includes(item.resourceType),
+      );
+      if (uncovered) {
+        throw new NoProducerForResourceTypeError({
+          cacheName: cache.name,
+          resourceType: uncovered.resourceType,
+          coveredResourceTypes,
+          id: uncovered.req.id,
+        });
+      }
     }
 
     type FetchDisposition =
@@ -469,83 +535,92 @@ export function wrapBulkProducer<
       readItems,
     });
 
-    // Groups a set of request items by resource type and attaches each group
-    // to a collapsed producer invocation. Returns one "attached group" per
-    // type; `handled` settles each element's fetch message when the
-    // invocation settles (unless an abort settled it first) and yields the
-    // per-item results.
+    type AttachedGroup = {
+      items: readonly RequestItem[];
+      rode: boolean;
+      handled: Promise<(LooseEntry | ErrorType)[]>;
+    };
+
+    // Attaches a set of request items to a collapsed producer invocation:
+    // `handled` settles each element's fetch message when the invocation
+    // settles (unless an abort settled it first) and yields the per-item
+    // results. With a single producer there is at most ONE invocation per call
+    // to this helper -- the resource-type partition is gone (see the COLLAPSE
+    // GRANULARITY note above); it still returns a list so its callers can
+    // concatenate their trigger classes, and so an empty set attaches nothing.
     const attachGroups = (
       groupItems: readonly RequestItem[],
       trigger: CollapsedInvocation["trigger"],
       usableIfErrorByItem?: ReadonlyMap<RequestItem, LooseEntry>,
-    ) => {
-      const byType = Map.groupBy(groupItems, (item) => item.resourceType);
-      return [...byType.entries()].map(([resourceType, itemsOfType]) => {
-        const attached = collapsedCallProducerAndStore(
-          trigger,
-          resourceType,
-          itemsOfType.map((item) => item.req),
-        );
+    ): AttachedGroup[] => {
+      if (groupItems.length === 0) {
+        return [];
+      }
 
-        const handled: Promise<(LooseEntry | ErrorType)[]> =
-          attached.promise.then(
-            (producerResults) =>
-              itemsOfType.map((item, i) => {
-                // Non-null assertion is safe: the invocation task validates
-                // result completeness before resolving (an under-return
-                // rejects the whole invocation, handled below), and riders
-                // share the initiator's exact request batch (it's the
-                // collapse key).
-                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-                const producerResult = producerResults[i]!;
+      const attached = collapsedCallProducerAndStore(
+        trigger,
+        groupItems.map((item) => item.req),
+        groupItems.map((item) => item.resourceType),
+      );
 
-                if (producerResult instanceof Error) {
-                  const fallback = usableIfErrorByItem?.get(item);
-                  if (fallback) {
-                    logWarning(
-                      "error calling producer; falling back to a cached value, as permitted",
-                      { error: producerResult, entry: fallback },
-                    );
-                    settleFetch(item, attached.rode, {
-                      disposition: "served-stale-after-error",
-                    });
-                    return fallback;
-                  }
+      const handled: Promise<(LooseEntry | ErrorType)[]> =
+        attached.promise.then(
+          (producerResults) =>
+            groupItems.map((item, i) => {
+              // Non-null assertion is safe: the invocation task validates
+              // result completeness before resolving (an under-return
+              // rejects the whole invocation, handled below), and riders
+              // share the initiator's exact request batch (it's the
+              // collapse key).
+              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+              const producerResult = producerResults[i]!;
+
+              if (producerResult instanceof Error) {
+                const fallback = usableIfErrorByItem?.get(item);
+                if (fallback) {
+                  logWarning(
+                    "error calling producer; falling back to a cached value, as permitted",
+                    { error: producerResult, entry: fallback },
+                  );
                   settleFetch(item, attached.rode, {
-                    disposition: "producer-error",
-                    directivesImpliedBypass: item.directivesImpliedBypass,
+                    disposition: "served-stale-after-error",
                   });
-                  return producerResult;
+                  return fallback;
                 }
-
-                settleFetch(item, attached.rode, {
-                  disposition: "served-from-producer",
-                  directivesImpliedBypass: item.directivesImpliedBypass,
-                });
-                return primaryNormalizedResultResourceFromRequestPairedProducerResult<
-                  SpecOf<RT>,
-                  Validators,
-                  Params,
-                  SpecOf<RT>["id"]
-                >(normalizeVaryBound, producerResult, item.req.id);
-              }),
-            (error: unknown) => {
-              // The bulk producer itself rejected (it's supposed to return
-              // Error elements for per-request failures instead). There's no
-              // way to handle this per the wrapped function's contract except
-              // rethrowing (we don't know the thrown value is an `ErrorType`).
-              itemsOfType.forEach((item) => {
                 settleFetch(item, attached.rode, {
                   disposition: "producer-error",
                   directivesImpliedBypass: item.directivesImpliedBypass,
                 });
-              });
-              throw error;
-            },
-          );
+                return producerResult;
+              }
 
-        return { items: itemsOfType, rode: attached.rode, handled };
-      });
+              settleFetch(item, attached.rode, {
+                disposition: "served-from-producer",
+                directivesImpliedBypass: item.directivesImpliedBypass,
+              });
+              return primaryNormalizedResultResourceFromRequestPairedProducerResult<
+                SpecOf<RT>,
+                Validators,
+                Params,
+                SpecOf<RT>["id"]
+              >(normalizeVaryBound, producerResult, item.req.id);
+            }),
+          (error: unknown) => {
+            // The bulk producer itself rejected (it's supposed to return
+            // Error elements for per-request failures instead). There's no
+            // way to handle this per the wrapped function's contract except
+            // rethrowing (we don't know the thrown value is an `ErrorType`).
+            groupItems.forEach((item) => {
+              settleFetch(item, attached.rode, {
+                disposition: "producer-error",
+                directivesImpliedBypass: item.directivesImpliedBypass,
+              });
+            });
+            throw error;
+          },
+        );
+
+      return [{ items: groupItems, rode: attached.rode, handled }];
     };
 
     // Kick off the bypass requests' producer calls immediately (in parallel
@@ -740,4 +815,171 @@ export function wrapBulkProducer<
       | EntryForId<SpecOf<RT>, Validators, Params, Extract<Reqs[K]["id"], SpecOf<RT>["id"]>>
       | ErrorType;
   }>;
+}
+
+/**
+ * The bulk counterpart of {@link producerByIdType}: sugar over
+ * {@link wrapBulkProducer}'s single-producer primitive that turns a record with
+ * one bulk producer per covered resource type into ONE function, and declares
+ * its covered set in {@link coveredTypes} so the wrapper can both infer
+ * `Covered` from it and enforce it at runtime.
+ *
+ * Use it when each resource type has its own origin, or to cover a strict
+ * subset of the registry. Skip it -- pass a bare function -- when the producer
+ * wants the full mixed batch, which is the capability the single-function form
+ * exists for.
+ *
+ * Behaviour on each invocation:
+ *
+ * - The incoming batch is split by `cache.classify(req.id)`, remembering every
+ *   request's ORIGINAL index, and each sub-producer is invoked once,
+ *   concurrently, with its own slice.
+ * - Results are reassembled **positionally**: slice position `j` maps back to
+ *   that request's original index. Positional is forced, not chosen: a batch
+ *   can legitimately contain the same id twice with different `params`, so the
+ *   id is not a routing key.
+ * - A sub-producer's **rejection** is caught and written into that type's slots
+ *   as `Error` elements, so per-request error isolation survives the merge --
+ *   it lives in the sugar rather than in the wrapper.
+ * - A sub-producer that **under-returns** is NOT repaired or padded: those
+ *   slots are left absent, so the wrapper's own under-return check (which
+ *   rejects the whole invocation rather than risk misaligned pairing) fires
+ *   exactly as it would for a bare producer. Silently substituting an `Error`
+ *   would convert a contract violation into a per-request failure and hide the
+ *   bug.
+ * - A sub-producer that **over-returns** has no slot for the extras, so they
+ *   are dropped -- matching the wrapper's own choice not to police
+ *   over-return.
+ *
+ * Note that requests routed through this helper are classified TWICE (once here
+ * to split the batch, once in the wrapper for dispatch/telemetry). That is the
+ * price of the sugar being opt-in; guards are meant to be cheap.
+ *
+ * Throws at construction on an empty record.
+ *
+ * @param cache - The cache the producer will be wrapped against. Used to infer
+ *   `RT` and to classify each request's id.
+ * @param producers - One {@link BulkResourceTypeProducer} per covered resource
+ *   type; `Covered` is inferred from the keys.
+ */
+export function bulkProducerByIdType<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+  ErrorType extends Error = Error,
+>(
+  cache: PublicInterface<Cache<RT, Validators, Params>>,
+  producers: BulkProducersFor<RT, Covered, Validators, Params, ErrorType>,
+): CoveringBulkProducer<RT, Covered, Validators, Params, ErrorType> {
+  // SAFETY: see LooseProducer in wrapProducer.ts. A value is only read out of
+  // this record after `cache.classify` succeeds and the key is confirmed to be
+  // the record's own, so each sub-producer's slice holds exactly the ids it
+  // declared. The record's own entries are snapshotted here, before any request
+  // runs, so a post-helper mutation of the caller's record can't widen (or
+  // otherwise change) coverage later.
+  const looseProducers = { ...producers } as unknown as Readonly<
+    Record<string, LooseBulkProducer<RT, Validators, Params, ErrorType>>
+  >;
+  const coveredResourceTypes = Object.keys(looseProducers);
+
+  if (coveredResourceTypes.length === 0) {
+    throw new Error(
+      "bulkProducerByIdType: `producers` must be a record with one entry per " +
+        "covered resource type and cannot be empty. (A producer that covers " +
+        "the whole registry needs no helper: pass the function itself to " +
+        "wrapBulkProducer.)",
+    );
+  }
+
+  // The id is re-narrowed past its ReadonlyDeep wrapper, which cannot *reduce*
+  // to the (string) id type while `RT` is an unresolved generic, even though
+  // it's the id value itself at runtime.
+  type LooseRequest = ReadonlyDeep<
+    ConsumerRequest<Params, SpecOf<RT>["id"]>
+  > & { readonly id: SpecOf<RT>["id"] };
+  type LooseResult = RequestPairedProducerResult<
+    SpecOf<RT>,
+    Validators,
+    Params
+  >;
+
+  const dispatchingProducer = async (reqs: readonly LooseRequest[]) => {
+    const classified = reqs.map((req, index) => ({
+      index,
+      req,
+      resourceType: cache.classify(req.id),
+    }));
+
+    // Sparse by design: only the slots a sub-producer actually returned get
+    // filled, so an under-return leaves holes for the wrapper to catch.
+    // oxlint-disable-next-line unicorn/no-new-array -- intentional sparse preallocation; filled by index below
+    const results: (LooseResult | Error)[] = new Array(reqs.length);
+
+    await Promise.all(
+      [...Map.groupBy(classified, (it) => it.resourceType).entries()].map(
+        async ([resourceType, entries]) => {
+          const subProducer = Object.hasOwn(looseProducers, resourceType)
+            ? looseProducers[resourceType]
+            : undefined;
+          // Unreachable through the wrappers, which reject uncovered types
+          // before this function is ever called; reachable if the returned
+          // producer is driven directly. Fail the whole invocation loudly
+          // rather than leaving those slots empty.
+          if (subProducer === undefined) {
+            throw new NoProducerForResourceTypeError({
+              cacheName: cache.name,
+              resourceType,
+              coveredResourceTypes,
+              // Non-null assertion is safe: Map.groupBy never makes an empty
+              // group.
+              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+              id: entries[0]!.req.id,
+            });
+          }
+
+          const subResults = await subProducer(
+            entries.map((it) => it.req),
+          ).catch((error: unknown) => {
+            // Per-request error isolation survives the merge: this type's
+            // slots settle as Error elements instead of failing the whole
+            // invocation. A non-Error rejection is wrapped rather than stored
+            // raw, since a non-Error in a result slot would be read as a
+            // successful producer result; the original is kept as `cause`.
+            const asError =
+              error instanceof Error
+                ? error
+                : new Error(
+                    `bulkProducerByIdType: the "${resourceType}" producer rejected with a non-Error value`,
+                    { cause: error },
+                  );
+            return entries.map(() => asError);
+          });
+
+          entries.forEach((entry, j) => {
+            const result = subResults[j];
+            if (result !== undefined) {
+              results[entry.index] = result;
+            }
+          });
+        },
+      ),
+    );
+
+    return results;
+  };
+
+  // SAFETY: the dispatching function is id-erased internally (see
+  // LooseProducer in wrapProducer.ts), and the covered names are the record's
+  // own keys, so the declared set and the reachable sub-producers cannot
+  // disagree.
+  return Object.assign(dispatchingProducer, {
+    [coveredTypes]: coveredResourceTypes,
+  }) as unknown as CoveringBulkProducer<
+    RT,
+    Covered,
+    Validators,
+    Params,
+    ErrorType
+  >;
 }

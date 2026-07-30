@@ -80,12 +80,19 @@ This is particularly useful when a producer that fetches a collection wants to a
 
 - [`PostgresStore.ts`](./src/stores/PostgresStore/PostgresStore.ts): a store for retaining cached data in Postgres.
 
-The package provides **four** functions for wrapping producers with a cache. They split along two axes — single vs. bulk, and "lookup" vs. "compute" — and all four take their producers as a **record with one entry per covered resource type**:
+The package provides **four** functions for wrapping producers with a cache. They split along two axes — single vs. bulk, and "lookup" vs. "compute". The two lookup wrappers take **exactly one producer function**; the two compute wrappers take a record of branches keyed by resource type (their branches route by *input*, not by id):
 
-- [`wrapProducer.ts`](./src/utils/wrapProducer.ts) — **`wrapProducer`**: the package's most important export, arguably. It takes producers (functions that return data to cache, one per covered resource type) and a `Cache` instance, and returns a function that will use a cached value when a suitable one is available, but otherwise classify the request's id, call through to *that resource type's* producer, and store its return value for future requests.
+- [`wrapProducer.ts`](./src/utils/wrapProducer.ts) — **`wrapProducer`**: the package's most important export, arguably. It takes a producer (a function that returns data to cache) and a `Cache` instance, and returns a function that will use a cached value when a suitable one is available, but otherwise call through to the producer and store its return value for future requests.
 
   ```ts
-  const getStories = wrapProducer(cache, {}, {
+  // A bare function covers the WHOLE registry. Sole-type caches stop here:
+  const getVisits = wrapProducer(cache, {}, async (req) => ({
+    content: await fetchVisits(req.id),
+    directives: { freshUntilAge: 60 },
+  }));
+
+  // Per-resource-type dispatch (and/or partial coverage) is opt-in sugar:
+  const getStories = wrapProducer(cache, {}, producerByIdType(cache, {
     story: async (req) => ({ content: await fetchStory(req.id), directives: { freshUntilAge: 60 } }),
     collection: async (req) => {
       const collection = await fetchCollection(req.id);
@@ -96,16 +103,22 @@ The package provides **four** functions for wrapping producers with a cache. The
         supplementalResources: collection.stories.map((s) => ({ id: `story:${s.id}`, content: s, directives: { freshUntilAge: 60 } })),
       };
     },
-  });
+  }));
   ```
 
-  The record's keys are inferred as the wrapper's **coverage** — any non-empty subset of the registry — and bound the returned function's request type: requests for uncovered types are compile errors (and, if reached via casts, throw `NoProducerForResourceTypeError` *before any cache read*). A type with no producer in any wrapper is legal and normal: its entries are written as other producers' supplemental resources (or direct `store()` calls) and read via `Cache.get` — the serve-if-present contract. Partial coverage also makes capability-scoped and split wrappers honest: a second `wrapProducer` call can cover a different subset of the same cache. There is **no bare-function form** — even sole-type caches write `{ <type-name>: producer }` (a keyless record throws at construction time).
+  A **bare function covers the whole registry**, and the compiler makes it prove that: its parameter must accept every registry id. **Partial coverage requires `producerByIdType`** (or `bulkProducerByIdType`), which turns a per-resource-type record into one function carrying its covered set in an optional symbol-keyed property (`coveredTypes`). That set is the wrapper's **coverage**, and it bounds the returned function's request type: requests for uncovered types are compile errors (and, if reached via casts, throw `NoProducerForResourceTypeError` *before any cache read*). A bare producer can't under-cover, so that error is unreachable for it. `producerByIdType` throws at construction on an empty record.
+
+  Reaching for `producerByIdType` also buys per-branch type checking: each key narrows its sub-producer's `req.id` **and** its result to that resource type's content, so TypeScript checks the (id, content) correlation per branch. A single function's result type is the union over its covered ids, so it is free to return one variant's content for every id.
+
+  A type with no producer in any wrapper is legal and normal: its entries are written as other producers' supplemental resources (or direct `store()` calls) and read via `Cache.get` — the serve-if-present contract. Partial coverage also makes capability-scoped and split wrappers honest: a second `wrapProducer` call can cover a different subset of the same cache.
 
   Producers must be **side-effect-free reads of their resource type's origin**: invocations may be collapsed (shared with concurrent logical callers) and their results stored, so producer calls are never 1:1 with callers. Consumers that must reach the origin send bypass directives (`maxAge: 0`) — which skip the cache read entirely, guaranteeing producer contact (the result is still stored, and identical bypass requests still collapse). Producers whose response must not be stored return `storeFor: 0`.
 
-- [`wrapBulkProducer.ts`](./src/utils/wrapBulkProducer.ts) — **`wrapBulkProducer`**: the same idea for producers that resolve many requests at once. It looks each request up in the cache and calls the underlying producers only for the ones that missed (or need background revalidation), grouping requests by classified resource type — one bulk call per type per collapse window; a batch never mixes types.
+- [`wrapBulkProducer.ts`](./src/utils/wrapBulkProducer.ts) — **`wrapBulkProducer`**: the same idea for producers that resolve many requests at once. It looks each request up in the cache and calls the underlying producer only for the ones that missed (or need background revalidation).
 
-  `wrapProducer` and `wrapBulkProducer` both treat the cache **`id` as a reference to a mutable entity**: the caller already has the id, and the cached value is whatever that entity currently is — a function of the `id` and time (e.g. "the current `User` for `user:123`"). The id is the natural cache key, so the producers receive it directly.
+  Because the producer is a single function, a bare one receives the **full** set of requests to produce — mixed resource types and all — in ONE call, so it can optimize across them (a single upstream call covering several types, cross-type dedup, a join). That means one producer invocation per collapse window, not one per resource type. `bulkProducerByIdType` opts into per-type dispatch instead: it splits the batch by classified resource type, calls each sub-producer once with its own type-pure slice, reassembles the results positionally into the caller's order, and isolates a sub-producer's rejection into that type's result slots as `Error` elements.
+
+  `wrapProducer` and `wrapBulkProducer` both treat the cache **`id` as a reference to a mutable entity**: the caller already has the id, and the cached value is whatever that entity currently is — a function of the `id` and time (e.g. "the current `User` for `user:123`"). The id is the natural cache key, so the producer receives it directly.
 
 - [`wrapComputingProducer.ts`](./src/utils/wrapComputingProducer.ts) — **`wrapComputingProducer`** and **`wrapBulkComputingProducer`**: the "compute" counterparts to the two above, for when the cached value is not an entity looked up by id but an expensive-to-compute **function of some input** — value = `f(input)`, reused whenever the same input recurs (e.g. an LLM extraction over a chunk of text). Here a hash of the input is the natural cache key, but the producer wants the original, un-hashed input to do the work.
 
@@ -128,7 +141,7 @@ The package publishes telemetry on four [`diagnostics_channel`](https://nodejs.o
 | ----------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `@zingage/cache:read`        | One per cache lookup (`Cache.get`; per request for `getMany`) — including direct callers | `found`: `"usable"` \| `"usable-while-revalidate"` \| `"usable-if-error"` \| `"none"`, evaluated against the request's directives. Bypass requests never appear (they skip the read); a read the store failed emits nothing (the error propagates).                        |
 | `@zingage/cache:fetch`       | One per call of a wrapped producer (per request element, for bulk), at settlement        | `disposition`: `served-from-cache`, `served-stale-while-revalidating`, `served-stale-after-error`, `served-from-producer`, `producer-error`, or `aborted`; `collapsed` (the settlement rode an in-flight invocation; cache-served settlements report `false` even when they attached a background revalidation as a rider); producer-path dispositions carry `directivesImpliedBypass`.       |
-| `@zingage/cache:produce`     | One per actual producer invocation (foreground misses AND background revalidations)      | `trigger`: `"miss"` \| `"revalidation"` \| `"bypass"` (the invocation's initiating cause; riders never re-label); `requests[]` (`{resourceType, resourceId}`, all one type); `collapsedCallerCount`; `outcome`; `durationMs`. Producer latency and error rate live here. |
+| `@zingage/cache:produce`     | One per actual producer invocation (foreground misses AND background revalidations)      | `trigger`: `"miss"` \| `"revalidation"` \| `"bypass"` (the invocation's initiating cause; riders never re-label); `requests[]` (`{resourceType, resourceId}`, in the order the producer received them — a bulk batch MAY span resource types, so read each element's own `resourceType`); `collapsedCallerCount`; `outcome`; `durationMs`. Producer latency and error rate live here. |
 | `@zingage/cache:store-entry` | One per entry passed to `Cache.store()` (supplementals attributed to their own type)     | `resourceId`, `vary`, `validators`, `relationshipToExistingStoredData` (`"is-new"` \| `"unchanged"` \| `"changed"` \| `undefined`).                                                                                                                                       |
 
 `fetch` and `produce` are the two spans of one story with different subjects and cardinalities: a `fetch` is the consumer-side span (one per logical request); a `produce` is the origin-side span (one per invocation). N collapsed callers ride one invocation, one bulk invocation covers many requests, a stale-while-revalidate refresh settles *after* its triggering fetch already shipped, and an `aborted` fetch settles *before* its invocation does (the collapsed producer call keeps running and stores in the background).

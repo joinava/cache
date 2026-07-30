@@ -22,8 +22,16 @@ import type {
   ProducerResultResource,
   RequestPairedProducerResult,
 } from "../types/index.js";
-import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
-import { wrapBulkProducer } from "./wrapBulkProducer.js";
+import wrapProducer, {
+  producerByIdType,
+  type ProducersFor,
+  type WrapProducerOptions,
+} from "./wrapProducer.js";
+import {
+  bulkProducerByIdType,
+  wrapBulkProducer,
+  type BulkProducersFor,
+} from "./wrapBulkProducer.js";
 
 /**
  * ## Computing producers vs. (plain) producers
@@ -395,17 +403,26 @@ export function wrapComputingProducer<
     ]),
   );
 
-  // SAFETY: the cast bridges the erased internal producers record to
-  // `wrapProducer`'s per-type record type, which is opaque while `RT` is an
+  // The per-type record goes through `producerByIdType`, which is what turns it
+  // into the single producer function `wrapProducer` takes -- and which carries
+  // this wrapper's coverage, so the branch keys still bound the delegated
+  // requests. SAFETY: the cast bridges the erased internal producers record to
+  // the helper's per-type record type, which is opaque while `RT` is an
   // unresolved generic. Runtime dispatch upholds the contract: each producer
   // only ever receives ids its branch's `hashInput` minted (checked, below,
   // to classify to that branch's type before any request is made).
   const wrapped = wrapProducer<RT, Covered & ResourceTypeName<RT>, Validators, Params>(
     cache,
     options,
-    producers as unknown as Parameters<
-      typeof wrapProducer<RT, Covered & ResourceTypeName<RT>, Validators, Params>
-    >[2],
+    producerByIdType<RT, Covered & ResourceTypeName<RT>, Validators, Params>(
+      cache,
+      producers as unknown as ProducersFor<
+        RT,
+        Covered & ResourceTypeName<RT>,
+        Validators,
+        Params
+      >,
+    ),
   );
 
   const wrappedComputingProducer = async (
@@ -563,13 +580,27 @@ export function wrapBulkComputingProducer<
     ]),
   );
 
-  // SAFETY: same bridge as wrapComputingProducer's (see there).
+  // Same routing through the by-id-type helper, and same bridging cast, as
+  // wrapComputingProducer's (see there).
   const wrapped = wrapBulkProducer<RT, Covered & ResourceTypeName<RT>, Validators, Params, ErrorType>(
     cache,
     options,
-    producers as unknown as Parameters<
-      typeof wrapBulkProducer<RT, Covered & ResourceTypeName<RT>, Validators, Params, ErrorType>
-    >[2],
+    bulkProducerByIdType<
+      RT,
+      Covered & ResourceTypeName<RT>,
+      Validators,
+      Params,
+      ErrorType
+    >(
+      cache,
+      producers as unknown as BulkProducersFor<
+        RT,
+        Covered & ResourceTypeName<RT>,
+        Validators,
+        Params,
+        ErrorType
+      >,
+    ),
   );
 
   const wrappedBulkComputingProducer = async (

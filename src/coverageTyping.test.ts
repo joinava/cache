@@ -5,9 +5,11 @@ import type { JsonOf } from "type-party";
 import { memoryStoreFor, uniqueCacheName } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
+  bulkProducerByIdType,
   cacheReadChannel,
   idStartsWith,
   MemoryStore,
+  producerByIdType,
   resourceType,
   soleResourceType,
   wrapBulkProducer,
@@ -26,10 +28,11 @@ import wrapProducer from "./utils/wrapProducer.js";
 /**
  * Type-level acceptance tests for the §6.1/§6.3/§6.4 coverage machinery,
  * mirroring the design probes: `Covered` inferred from a partial producer
- * record bounds the wrapped function's request ids; producer `req`s are
- * contextually narrowed per key; non-registry keys are rejected;
- * supplementals may target uncovered types; keyless records are compile-dead;
- * and `soleResourceType`'s optional narrowed `Id` flows through everything.
+ * record (via `producerByIdType`) bounds the wrapped function's request ids;
+ * producer `req`s are contextually narrowed per key; non-registry keys are
+ * rejected; supplementals may target uncovered types; a record passed where the
+ * single producer function belongs is a compile error; and
+ * `soleResourceType`'s optional narrowed `Id` flows through everything.
  *
  * Follows the perIdTyping.test.ts conventions: compile-time assertions via
  * `expectType<Equal<...>>()`, `@ts-expect-error` fixtures (kept on ONE line
@@ -113,14 +116,14 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     });
   });
 
-  describe("wrapProducer: Covered inferred from the partial record (§6.3)", () => {
+  describe("wrapProducer: Covered inferred from producerByIdType's partial record (§6.3)", () => {
     it("bounds the wrapped function's ids to the covered types and narrows per-key", async () => {
       const cache = new Cache(memoryStoreFor(registry), {
         name: uniqueCacheName("typing-partial"),
         resourceTypes: registry,
       });
       try {
-        const fetchSite = wrapProducer(cache, {}, {
+        const fetchSite = wrapProducer(cache, {}, producerByIdType(cache, {
           site_day: async (req) => {
             // Contextually typed per key -- narrowed, and NOT any.
             expectType<Equal<typeof req.id, SiteId>>();
@@ -142,7 +145,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
               ],
             };
           },
-        });
+        }));
 
         const res = await fetchSite({ id: "site:1" });
         expectType<Equal<typeof res.content, Visits>>();
@@ -167,7 +170,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         resourceTypes: registry,
       });
       try {
-        const fetchTwo = wrapProducer(cache, {}, {
+        const fetchTwo = wrapProducer(cache, {}, producerByIdType(cache, {
           site_day: async (req) => {
             expectType<Equal<typeof req.id, SiteId>>();
             return { content: { visits: [1, 2] }, directives: freshFor1 };
@@ -176,7 +179,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
             expectType<Equal<typeof req.id, ExtraId>>();
             return { content: { blob: "b" }, directives: freshFor1 };
           },
-        });
+        }));
 
         const visits = await fetchTwo({ id: "site:1" });
         expectType<Equal<typeof visits.content, Visits>>();
@@ -208,45 +211,67 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         if (false as boolean) {
           // prettier-ignore
           // @ts-expect-error 'sight_day' is not a registry resource-type name
-          void wrapProducer(cache, {}, { sight_day: siteProducerStub });
+          void producerByIdType(cache, { sight_day: siteProducerStub });
 
           // prettier-ignore
           // @ts-expect-error extra_blob's content shape is not assignable under site_day
-          void wrapProducer(cache, {}, { site_day: async () => ({ content: { blob: "x" }, directives: freshFor1 }) });
+          void producerByIdType(cache, { site_day: async () => ({ content: { blob: "x" }, directives: freshFor1 }) });
 
           // prettier-ignore
           // @ts-expect-error `cacheName` was deleted from WrapProducerOptions (names come from the cache + registry now)
-          void wrapProducer(cache, { cacheName: "legacy" }, { site_day: siteProducerStub });
+          void wrapProducer(cache, { cacheName: "legacy" }, producerByIdType(cache, { site_day: siteProducerStub }));
 
           // prettier-ignore
           // @ts-expect-error `isCacheable` was deleted (the producer purity contract, §6.3)
-          void wrapProducer(cache, { isCacheable: () => false }, { site_day: siteProducerStub });
+          void wrapProducer(cache, { isCacheable: () => false }, producerByIdType(cache, { site_day: siteProducerStub }));
         }
       } finally {
         await cache.close();
       }
     });
 
-    it("bare function or empty record infer Covered = never: the wrapper is uncallable", async () => {
+    it("a record where the single producer belongs is rejected, as is a bare function typed for a strict subset; a whole-registry bare function covers everything", async () => {
       const cache = new Cache(memoryStoreFor(registry), {
         name: uniqueCacheName("typing-never"),
         resourceTypes: registry,
       });
       try {
         if (false as boolean) {
-          // Both constructions COMPILE (a bare function structurally matches
-          // the mapped record as {}), but yield uncallable wrappers -- and
-          // throw at construction time at runtime (see coverageRuntime).
-          const mistake = wrapProducer(cache, {}, async (_req: { id: SiteId }) => ({
-            content: { visits: [] as number[] },
-            directives: freshFor1,
-          }));
-          // @ts-expect-error Covered = never, so no id is accepted
-          void mistake({ id: "site:1" });
+          // prettier-ignore
+          // @ts-expect-error the wrapper takes ONE producer function; a per-type record must go through producerByIdType
+          void wrapProducer(cache, {}, { site_day: async (_req: { id: SiteId }) => ({ content: { visits: [] as number[] }, directives: freshFor1 }) });
 
-          const empty = wrapProducer(cache, {}, {});
-          // @ts-expect-error empty coverage is equally uncallable
-          void empty({ id: "site:1" });
+          // prettier-ignore
+          // @ts-expect-error an empty record is not a function either
+          void wrapProducer(cache, {}, {});
+
+          // `Covered` never infers from the producer's PARAMETER type, so it
+          // keeps its default (the whole registry) and the compiler makes the
+          // function prove it: one typed for only site_day ids is rejected,
+          // rather than silently widened.
+          // prettier-ignore
+          // @ts-expect-error a bare function that accepts only site_day ids cannot cover the registry
+          void wrapProducer(cache, {}, async (_req: { id: SiteId }) => ({ content: { visits: [] as number[] }, directives: freshFor1 }));
+
+          // A function that accepts EVERY registry id is accepted, and its
+          // wrapper takes every registry id.
+          const whole = wrapProducer(cache, {}, async (req) => {
+            expectType<Equal<typeof req.id, SiteId | BizId | ExtraId>>();
+            return { content: { visits: [] as number[] }, directives: freshFor1 };
+          });
+          void whole({ id: "site:1" });
+          void whole({ id: "biz:1" });
+          void whole({ id: "extra:1" });
+
+          // Note what the bare form gives up, and why `producerByIdType` is
+          // still worth reaching for: a single producer's result type is the
+          // UNION over its covered ids, so returning one variant's content for
+          // every id typechecks (`whole` above only ever returns Visits, yet
+          // covers extra_blob, whose content is a blob). The per-branch
+          // (id, content) correlation comes from the record form, where each
+          // key narrows its sub-producer's result to that key's content -- as
+          // the two tests above pin. The wrapper still narrows what the CALLER
+          // sees per request id either way.
         }
       } finally {
         await cache.close();
@@ -259,7 +284,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         resourceTypes: registry,
       });
       try {
-        const bulk = wrapBulkProducer(cache, {}, {
+        const bulk = wrapBulkProducer(cache, {}, bulkProducerByIdType(cache, {
           site_day: async (reqs) => {
             expectType<Equal<(typeof reqs)[number]["id"], SiteId>>();
             return reqs.map(() => ({
@@ -272,7 +297,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
               content: { visits: [] as number[] },
               directives: freshFor1,
             })),
-        });
+        }));
 
         // A reqs array may mix COVERED types.
         const results = await bulk([{ id: "site:1" }, { id: "biz:1" }]);

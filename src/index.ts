@@ -27,13 +27,18 @@ export { naiveGetMany } from "./utils/utils.js";
 export type { JsonOf } from "type-party";
 export { jsonParse, jsonStringify } from "type-party/runtime/json.js";
 export {
+  bulkProducerByIdType,
   wrapBulkProducer,
   type BulkProducersFor,
   type BulkResourceTypeProducer,
+  type CoveringBulkProducer,
 } from "./utils/wrapBulkProducer.js";
 export {
+  coveredTypes,
   default as wrapProducer,
   NoProducerForResourceTypeError,
+  producerByIdType,
+  type CoveringProducer,
   type ProducersFor,
   type ResourceTypeProducer,
   type WrapProducerOptions,

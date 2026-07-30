@@ -12,7 +12,9 @@ import {
 } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
+  bulkProducerByIdType,
   idStartsWith,
+  producerByIdType,
   resourceType,
   wrapBulkProducer,
   type ResourceTypes,
@@ -52,7 +54,11 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       content: "from-producer",
       directives: freshFor100,
     }));
-    const getSite = wrapProducer(cache, {}, { site_day: producer });
+    const getSite = wrapProducer(
+      cache,
+      {},
+      producerByIdType(cache, { site_day: producer }),
+    );
     try {
       const res = await getSite({
         id: "site:a",
@@ -126,7 +132,11 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       content: "regenerated-content",
       directives: freshFor100,
     }));
-    const getSite = wrapProducer(cache, {}, { site_day: producer });
+    const getSite = wrapProducer(
+      cache,
+      {},
+      producerByIdType(cache, { site_day: producer }),
+    );
     try {
       const res = await getSite({ id: "site:a", directives: { maxAge: 0 } });
       expect(res.content).to.equal("regenerated-content");
@@ -167,7 +177,11 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       content: "from-producer",
       directives: freshFor100,
     }));
-    const getSite = wrapProducer(cache, {}, { site_day: producer });
+    const getSite = wrapProducer(
+      cache,
+      {},
+      producerByIdType(cache, { site_day: producer }),
+    );
     try {
       const res = await getSite({
         id: "site:skewed",
@@ -206,7 +220,11 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       await gate;
       return { content: "produced", directives: freshFor100 };
     });
-    const getSite = wrapProducer(cache, {}, { site_day: producer });
+    const getSite = wrapProducer(
+      cache,
+      {},
+      producerByIdType(cache, { site_day: producer }),
+    );
     try {
       const bypassCall = getSite({
         id: "site:a",
@@ -293,7 +311,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
     const getBulk = wrapBulkProducer(
       cache,
       { collapseOverlappingRequestsTime: 0 },
-      { site_day: bulkProducer },
+      bulkProducerByIdType(cache, { site_day: bulkProducer }),
     );
     const requests = [
       { id: "site:plain-a" },
@@ -388,7 +406,11 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       await delay(80);
       return { content: "produced-once", directives: freshFor100 };
     });
-    const getSite = wrapProducer(cache, {}, { site_day: producer });
+    const getSite = wrapProducer(
+      cache,
+      {},
+      producerByIdType(cache, { site_day: producer }),
+    );
     try {
       const first = getSite({ id: "site:a", directives: { maxAge: 0 } });
       await delay(10);

@@ -248,9 +248,10 @@ export type CacheProduceMessage = {
    */
   trigger: "miss" | "revalidation" | "bypass";
   /**
-   * The requests this invocation covered. Length 1 except for bulk producers
-   * (which batch within one resource type, so all elements share
-   * resourceType).
+   * The requests this invocation covered, in the order the producer received
+   * them. Length 1 except for bulk producers, whose batches MAY span resource
+   * types -- so read each element's own `resourceType`; do not treat
+   * `requests[0].resourceType` as the invocation's type.
    */
   requests: readonly { resourceType: string; resourceId: string }[];
   /**

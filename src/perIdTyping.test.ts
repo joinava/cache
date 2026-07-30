@@ -7,6 +7,7 @@ import { memoryStoreFor } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
   idStartsWith,
+  producerByIdType,
   resourceType,
   soleResourceType,
   type ResourceTypes,
@@ -74,17 +75,17 @@ describe("Per-id content typing", () => {
   // (1.6.0's `RequestPairedProducer` was a conditional that resolved to a
   // non-generic single-id form or a generic multi-id form depending on whether
   // `Spec` was a union, selected by an `IsSingleType<Spec>` helper. All of that
-  // was deleted in 2.0 -- dispatch is owned by the per-resource-type producer
-  // records, so nothing in the implementation ever referenced the three forms,
-  // and the type-level assertions here were a test of the conditional by the
-  // conditional. What still matters behaviorally is the case below: a
+  // was deleted in 2.0 -- dispatch is owned by the request's classified
+  // resource type, so nothing in the implementation ever referenced the three
+  // forms, and the type-level assertions here were a test of the conditional by
+  // the conditional. What still matters behaviorally is the case below: a
   // sole-type cache's producer stays writable as a vanilla lambda.)
 
   describe("Producer shape for a sole-type cache", () => {
     it("accepts a plain async lambda producer for a sole-type cache", () => {
-      // In 2.0 the producer is always a per-type record, but a sole-type
-      // cache's one producer is still a plain non-generic function: a vanilla
-      // `async (req) => ({...})` lambda satisfies it with no dispatch helper.
+      // A sole-type cache's one producer covers the whole registry, so it goes
+      // in bare: a vanilla `async (req) => ({...})` lambda satisfies the
+      // wrapper directly, with no record and no dispatch helper.
       const soleRegistry = {
         entries: soleResourceType<string>(),
       } satisfies ResourceTypes;
@@ -93,12 +94,10 @@ describe("Per-id content typing", () => {
         resourceTypes: soleRegistry,
       });
       try {
-        const _f = wrapProducer(cache, {}, {
-          entries: async (req) => ({
-            content: req.id,
-            directives: { freshUntilAge: 1 },
-          }),
-        });
+        const _f = wrapProducer(cache, {}, async (req) => ({
+          content: req.id,
+          directives: { freshUntilAge: 1 },
+        }));
         void _f;
       } finally {
         void cache.close();
@@ -108,10 +107,10 @@ describe("Per-id content typing", () => {
 
   // (1.6.0's producerByIdType builder -- Covered-union accumulation, the
   // non-exhaustive-build error tuple, and per-`.when()` narrowing -- was
-  // deleted in 2.0: coverage is inferred from the producer record's keys and
-  // may be any non-empty subset of the registry. That machinery's typing is
-  // covered in coverageTyping.test.ts, and its runtime in
-  // coverageRuntime.test.ts.)
+  // deleted in 2.0. The name is back as a plain record -> function helper, but
+  // coverage is now inferred from the record's keys and may be any non-empty
+  // subset of the registry. That machinery's typing is covered in
+  // coverageTyping.test.ts, and its runtime in coverageRuntime.test.ts.)
 
   describe("Type-level: idStartsWith", () => {
     type AllIds = `story:${string}` | `collection:${string}`;
@@ -261,13 +260,14 @@ describe("Per-id content typing", () => {
       const cache = makeStoriesCache();
       try {
         // With a multi-type registry, the per-id-typed producer is written as
-        // a per-resource-type record: each entry's producer is non-generic
-        // over its own branch's id, so TypeScript fully checks the
-        // (id, content) correlation per branch with no user-side casts.
+        // a per-resource-type record routed through `producerByIdType`: each
+        // entry's producer is non-generic over its own branch's id, so
+        // TypeScript fully checks the (id, content) correlation per branch with
+        // no user-side casts.
         const fetcher = wrapProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          {
+          producerByIdType(cache, {
             story: async (req) => ({
               content: {
                 id: req.id,
@@ -282,7 +282,7 @@ describe("Per-id content typing", () => {
               ] satisfies Story[],
               directives: { freshUntilAge: 1 },
             }),
-          },
+          }),
         );
 
         const storyResult = await fetcher({ id: "story:abc" });
@@ -314,7 +314,7 @@ describe("Per-id content typing", () => {
         const fetcher = wrapProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          {
+          producerByIdType(cache, {
             collection: async (_req) => ({
               content: [story1, story2] satisfies Story[],
               directives: { freshUntilAge: 100 },
@@ -340,7 +340,7 @@ describe("Per-id content typing", () => {
               content: { id: req.id, title: "fallback" } satisfies Story,
               directives: { freshUntilAge: 1 },
             }),
-          },
+          }),
         );
 
         // Fetching the collection should also cache the individual stories.
@@ -491,7 +491,7 @@ describe("Per-id content typing", () => {
         const fetcher = wrapProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          {
+          producerByIdType(cache, {
             story: async (req) => {
               expectType<Equal<typeof req.id, StoryKey>>();
               const parsed = JSON.parse(req.id) as { story: string };
@@ -513,7 +513,7 @@ describe("Per-id content typing", () => {
                 directives: { freshUntilAge: 1 },
               };
             },
-          },
+          }),
         );
 
         const storyResult = await fetcher({ id: storyId });

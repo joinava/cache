@@ -24,10 +24,13 @@ import type { NormalizedProducerResult } from "../types/06_Normalization.js";
 import { type mapTuple } from "./utils.js";
 import { wrapBulkProducer } from "./wrapBulkProducer.js";
 
-// 2.0: producers are per-resource-type records over a required registry; this
-// suite's behavior is id-structure-agnostic (fixture ids are arbitrary
-// strings), so it uses a sole-type registry. The 1.6.0 `isCacheable` tests
-// were removed with the option itself (§6.3's producer purity contract).
+// 2.0: the wrapper takes ONE producer function over a required registry, and a
+// bare function covers the whole registry. This suite's behavior is
+// id-structure-agnostic (fixture ids are arbitrary strings), so it uses a
+// sole-type registry and passes its producers bare; per-type dispatch
+// (`bulkProducerByIdType`) lives in coverageRuntime.test.ts and
+// diagnosticsChannels.test.ts. The 1.6.0 `isCacheable` tests were removed with
+// the option itself (§6.3's producer purity contract).
 const testRegistry = {
   resources: soleResourceType<unknown>(),
 } satisfies ResourceTypes;
@@ -53,12 +56,12 @@ describe("wrapBulkProducer", () => {
               const wrappedProducer = wrapProducer(
                 cache,
                 { collapseOverlappingRequestsTime: 0 },
-                { resources: producer },
+                producer,
               );
               const wrappedBulkProducer = wrapBulkProducer(
                 cache,
                 { collapseOverlappingRequestsTime: 0 },
-                { resources: producer },
+                producer,
               );
 
               const request = { id: entry.id, directives: consumerDirs };
@@ -103,11 +106,11 @@ describe("wrapBulkProducer", () => {
                 const singleProducer = mock.fn(producerBase);
                 const bulkProducer = mock.fn(bulkProducerBase);
 
-                const wrappedProducer = wrapProducer(cache, {}, { resources: singleProducer },);
+                const wrappedProducer = wrapProducer(cache, {}, singleProducer);
                 const wrappedBulkProducer = wrapBulkProducer(
                   cache,
                   {},
-                  { resources: bulkProducer },
+                  bulkProducer,
                 );
 
                 const request = { id: entry.id, directives: consumerDirs };
@@ -159,11 +162,11 @@ describe("wrapBulkProducer", () => {
                   },
                 );
 
-                const wrappedProducer = wrapProducer(cache, {}, { resources: singleProducer },);
+                const wrappedProducer = wrapProducer(cache, {}, singleProducer);
                 const wrappedBulkProducer = wrapBulkProducer(
                   cache,
                   {},
-                  { resources: bulkProducer },
+                  bulkProducer,
                 );
 
                 const request = { id: entry.id, directives: consumerDirs };
@@ -210,11 +213,11 @@ describe("wrapBulkProducer", () => {
                 const singleProducer = mock.fn(producerBase);
                 const bulkProducer = mock.fn(bulkProducerBase);
 
-                const wrappedProducer = wrapProducer(cache, {}, { resources: singleProducer },);
+                const wrappedProducer = wrapProducer(cache, {}, singleProducer);
                 const wrappedBulkProducer = wrapBulkProducer(
                   cache,
                   {},
-                  { resources: bulkProducer },
+                  bulkProducer,
                 );
 
                 const request = { id: entry.id, directives: consumerDirs };
@@ -346,7 +349,7 @@ describe("wrapBulkProducer", () => {
               const wrappedBulkProducer = wrapBulkProducer(
                 cache,
                 {},
-                { resources: bulkProducer },
+                bulkProducer,
               );
 
               const results = await wrappedBulkProducer(
@@ -481,7 +484,7 @@ describe("wrapBulkProducer", () => {
               const wrappedBulk = wrapBulkProducer(
                 cache,
                 { collapseOverlappingRequestsTime: 0 },
-                { resources: bulkProducer },
+                bulkProducer,
               );
 
               // Call wrapBulkProducer with the requests
@@ -525,7 +528,7 @@ describe("wrapBulkProducer", () => {
           const wrappedBulkProducer = wrapBulkProducer(
             cache,
             { onCacheReadFailure: "throw" },
-            { resources: bulkProducer },
+            bulkProducer,
           );
 
           await assert.rejects(
@@ -562,7 +565,7 @@ describe("wrapBulkProducer", () => {
           const wrappedBulkProducer = wrapBulkProducer(
             cache,
             { onCacheReadFailure: "call-producer" },
-            { resources: bulkProducer },
+            bulkProducer,
           );
 
           const _results = await wrappedBulkProducer([
@@ -609,7 +612,7 @@ describe("wrapBulkProducer", () => {
           const wrappedBulkProducer = wrapBulkProducer(
             cache,
             { collapseOverlappingRequestsTime: 1 }, // 1 second window
-            { resources: bulkProducer },
+            bulkProducer,
           );
 
           // Make multiple overlapping requests for the same resources
@@ -658,7 +661,7 @@ describe("wrapBulkProducer", () => {
           const wrappedBulkProducer = wrapBulkProducer(
             cache,
             { collapseOverlappingRequestsTime: 0.05 }, // 50ms window
-            { resources: bulkProducer },
+            bulkProducer,
           );
 
           // Make requests with delay between them
@@ -705,7 +708,7 @@ describe("wrapBulkProducer", () => {
             },
           );
 
-          const wrappedBulkProducer = wrapBulkProducer(cache, {}, { resources: bulkProducer },);
+          const wrappedBulkProducer = wrapBulkProducer(cache, {}, bulkProducer);
 
           // Request main resources
           const results = await wrappedBulkProducer([
@@ -760,7 +763,7 @@ describe("wrapBulkProducer", () => {
             })),
         );
 
-        const wrappedBulk = wrapBulkProducer(cache, {}, { resources: producer },);
+        const wrappedBulk = wrapBulkProducer(cache, {}, producer);
 
         const controller = new AbortController();
         controller.abort(new Error("pre-aborted"));
@@ -804,7 +807,7 @@ describe("wrapBulkProducer", () => {
         const wrappedBulk = wrapBulkProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          { resources: producer },
+          producer,
         );
 
         const resultPromise = wrappedBulk(
@@ -858,7 +861,7 @@ describe("wrapBulkProducer", () => {
         const wrappedBulk = wrapBulkProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          { resources: slowProducer },
+          slowProducer,
         );
 
         const resultPromise = wrappedBulk(
@@ -903,7 +906,7 @@ describe("wrapBulkProducer", () => {
         const wrappedBulk = wrapBulkProducer(
           cache,
           { collapseOverlappingRequestsTime: 0 },
-          { resources: producer },
+          producer,
         );
 
         // Populate cache
@@ -949,7 +952,7 @@ describe("wrapBulkProducer", () => {
         const wrappedBulk = wrapBulkProducer(
           cache,
           { onCacheReadFailure: "call-producer" },
-          { resources: producer },
+          producer,
         );
 
         const controller = new AbortController();
