@@ -1,6 +1,5 @@
 import { partition } from "es-toolkit";
 import stableStringify from "safe-stable-stringify";
-import type { ReadonlyDeep } from "type-fest";
 import type { PublicInterface } from "type-party";
 import type Cache from "../Cache.js";
 import { rethrowUnroutableWithCacheName } from "./producer-errors.js";
@@ -19,9 +18,7 @@ import {
 import type {
   AnyParams,
   AnyValidators,
-  ConsumerRequest,
   EntryForId,
-  RequestPairedProducerResult,
   Vary,
 } from "../types/index.js";
 import {
@@ -41,6 +38,7 @@ import {
   raceWithSignal,
   zip2,
 } from "./utils.js";
+import type { BulkResourceTypeProducer } from "./bulkProducerByIdType.js";
 import {
   assertResourceTypeCovered,
   coveredTypeSet,
@@ -54,66 +52,6 @@ import {
   type LooseResultFor,
   type WrapProducerOptions,
 } from "./wrapProducer.js";
-
-/**
- * A bulk producer for ONE resource type: a {@link bulkProducerByIdType}
- * sub-producer. That helper splits the wrapper's batch by classified resource
- * type and calls each sub-producer once with its own type's slice, so a
- * sub-producer's batch never mixes types. (The wrapper itself takes a single
- * {@link CoveringBulkProducer}, which by default sees the WHOLE mixed batch --
- * that is the point of the single-function form.) Results are request-paired;
- * Error elements mark per-request failures.
- *
- * The result type is a flat array of (RequestPairedProducerResult |
- * ErrorType): each element is a discriminated union over the type's spec, so
- * each (id, content) pair must internally agree, but the type system does
- * not require the i'th result element to align with the i'th request's id at
- * the call site (which would require gnarly mapped-tuple typing). When
- * `wrapBulkProducer` returns its results to the caller, they ARE narrowed
- * per-request via the wrapper's own generic.
- */
-export type BulkResourceTypeProducer<
-  RT extends ResourceTypes,
-  K extends ResourceTypeName<RT>,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-  ErrorType extends Error,
-> = (
-  reqs: readonly ReadonlyDeep<
-    ConsumerRequest<Params, IdOfResourceType<RT[K]>>
-  >[],
-) => Promise<
-  (
-    | RequestPairedProducerResult<
-        SpecOf<RT>,
-        Validators,
-        Params,
-        IdOfResourceType<RT[K]>
-      >
-    | ErrorType
-  )[]
->;
-
-/**
- * {@link bulkProducerByIdType}'s argument: one entry per covered resource
- * type, any non-empty subset of the registry. `Covered` is inferred from the
- * record's keys, exactly as in `producerByIdType`.
- */
-export type BulkProducersFor<
-  RT extends ResourceTypes,
-  Covered extends ResourceTypeName<RT>,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-  ErrorType extends Error,
-> = {
-  readonly [K in Covered]: BulkResourceTypeProducer<
-    RT,
-    K,
-    Validators,
-    Params,
-    ErrorType
-  >;
-};
 
 /**
  * The bulk counterpart of `wrapProducer`'s `CoveringProducer` (see it for why

@@ -22,6 +22,14 @@ export {
   type SqliteStoreCompatibleSpec,
   type SqliteStoreSupportedParams,
 } from "./stores/SqliteStore/SqliteStore.js";
+export {
+  classifyIdAgainst,
+  idStartsWith,
+  registryEntries,
+  resourceType,
+  type IdClassification,
+  type ResourceTypesEntries,
+} from "./resourceTypeClassification.js";
 export * from "./types/index.js";
 export { default as collapsedTaskCreator } from "./utils/collapsedTaskCreator.js";
 export { restoreInfinityInDirectives } from "./utils/normalization.js";
@@ -42,14 +50,14 @@ export {
   type HashedInputProducerBuilder,
   type HashedInputVariant,
 } from "./utils/hashedInputProducerByInputType.js";
+export { producerByIdType } from "./utils/producerByIdType.js";
 export {
   bulkProducerByIdType,
-  producerByIdType,
-} from "./utils/producerByIdType.js";
-export {
-  wrapBulkProducer,
   type BulkProducersFor,
   type BulkResourceTypeProducer,
+} from "./utils/bulkProducerByIdType.js";
+export {
+  wrapBulkProducer,
   type CoveringBulkProducer,
 } from "./utils/wrapBulkProducer.js";
 export {

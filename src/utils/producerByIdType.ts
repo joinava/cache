@@ -11,32 +11,28 @@
  *
  * @module
  */
+import type {
+  ResourceTypeName,
+  ResourceTypes,
+} from "../types/00_ResourceTypes.js";
 import {
   classifyIdAgainst,
   type IdClassification,
-  type RegistryEntries,
+  type ResourceTypesEntries,
   registryEntries,
-  type ResourceTypeName,
-  type ResourceTypes,
-} from "../types/00_ResourceTypes.js";
+} from "../resourceTypeClassification.js";
 import type { AnyParams, AnyValidators } from "../types/index.js";
 import {
   UnroutableIdError,
   type UnroutableIdReason,
 } from "./producer-errors.js";
 import { assertUnreachable } from "./utils.js";
-import type {
-  BulkProducersFor,
-  CoveringBulkProducer,
-  LooseBulkProducer,
-} from "./wrapBulkProducer.js";
 import {
   coveredTypes,
   emptyProducersRecordMessage,
   type CoveringProducer,
   type LooseProducer,
   type LooseRequestFor,
-  type LooseResultFor,
   type ProducersFor,
 } from "./wrapProducer.js";
 
@@ -53,7 +49,7 @@ import {
  * cannot drift.
  */
 export function resolveCoveredSubProducer<SubProducer>(
-  entries: RegistryEntries<ResourceTypes>,
+  entries: ResourceTypesEntries<ResourceTypes>,
   subProducers: Readonly<Record<string, SubProducer>>,
   coveredResourceTypes: readonly string[],
   id: string,
@@ -177,157 +173,4 @@ export function producerByIdType<
   return Object.assign(dispatchingProducer, {
     [coveredTypes]: coveredResourceTypes,
   }) as unknown as CoveringProducer<RT, Covered, Validators, Params>;
-}
-
-/**
- * The bulk counterpart of {@link producerByIdType}: sugar over
- * {@link wrapBulkProducer}'s single-producer primitive that turns a record with
- * one bulk producer per covered resource type into ONE function, and declares
- * its covered set in {@link coveredTypes} so the wrapper can both infer
- * `Covered` from it and enforce it at runtime.
- *
- * Use it when each resource type has its own origin, or to cover a strict
- * subset of the registry. Skip it -- pass a bare function -- when the producer
- * wants the full mixed batch, which is the capability the single-function form
- * exists for.
- *
- * Behaviour on each invocation:
- *
- * - The incoming batch is split by classifying each `req.id` against the
- *   registry, remembering every request's ORIGINAL index, and each sub-producer
- *   is invoked once, concurrently, with its own slice.
- * - Results are reassembled **positionally**: slice position `j` maps back to
- *   that request's original index. Positional is forced, not chosen: a batch
- *   can legitimately contain the same id twice with different `params`, so the
- *   id is not a routing key.
- * - A sub-producer's **rejection** is caught and written into that type's slots
- *   as `Error` elements, so per-request error isolation survives the merge --
- *   it lives in the sugar rather than in the wrapper.
- * - A sub-producer that **under-returns** is NOT repaired or padded: those
- *   slots are left absent, so the wrapper's own under-return check (which
- *   rejects the whole invocation rather than risk misaligned pairing) fires
- *   exactly as it would for a bare producer. Silently substituting an `Error`
- *   would convert a contract violation into a per-request failure and hide the
- *   bug.
- * - A sub-producer that **over-returns** has no slot for the extras, so they
- *   are dropped -- matching the wrapper's own choice not to police
- *   over-return.
- *
- * Requests routed through this helper are classified twice, for the reason
- * given on {@link producerByIdType}.
- *
- * Throws at construction on an empty record.
- *
- * @param resourceTypes - The registry the producer's ids will be classified
- *   against: `cache.resourceTypes` for the cache it will be wrapped against.
- *   See {@link producerByIdType} for why the registry and not the cache.
- * @param producers - One {@link BulkResourceTypeProducer} per covered resource
- *   type; `Covered` is inferred from the keys.
- */
-export function bulkProducerByIdType<
-  RT extends ResourceTypes,
-  Covered extends ResourceTypeName<RT>,
-  Validators extends AnyValidators = AnyValidators,
-  Params extends AnyParams = AnyParams,
-  ErrorType extends Error = Error,
->(
-  resourceTypes: RT,
-  producers: BulkProducersFor<RT, Covered, Validators, Params, ErrorType>,
-): CoveringBulkProducer<RT, Covered, Validators, Params, ErrorType> {
-  // SAFETY: see LooseProducer in wrapProducer.ts. A value is only read out of
-  // this record after classification succeeds and the key is confirmed to be
-  // the record's own, so each sub-producer's slice holds exactly the ids it
-  // declared. Snapshotted for the reason given on `coveredTypeSet`.
-  const looseProducers = { ...producers } as unknown as Readonly<
-    Record<string, LooseBulkProducer<RT, Validators, Params, ErrorType>>
-  >;
-  const coveredResourceTypes = Object.keys(looseProducers);
-
-  if (coveredResourceTypes.length === 0) {
-    throw new Error(
-      emptyProducersRecordMessage("bulkProducerByIdType", "wrapBulkProducer"),
-    );
-  }
-
-  // Computed once, here, rather than per classified id. Named for the registry
-  // it comes from: `entries` in this function's scope means a request group's.
-  const classifierEntries = registryEntries(resourceTypes);
-
-  type LooseRequest = LooseRequestFor<RT, Params>;
-  type LooseResult = LooseResultFor<RT, Validators, Params>;
-
-  const dispatchingProducer = async (reqs: readonly LooseRequest[]) => {
-    // Throws UnroutableIdError on the first id that doesn't classify to exactly
-    // one covered type -- before any sub-producer runs, so a batch with an
-    // unroutable element contacts no origin at all. Unreachable through the
-    // wrapper unless the registry here disagrees with the cache's; reachable
-    // whenever the returned producer is driven directly.
-    const classified = reqs.map((req, index) => ({
-      index,
-      req,
-      ...resolveCoveredSubProducer(
-        classifierEntries,
-        looseProducers,
-        coveredResourceTypes,
-        req.id,
-      ),
-    }));
-
-    // Sparse by design: only the slots a sub-producer actually returned get
-    // filled, so an under-return leaves holes for the wrapper to catch.
-    // oxlint-disable-next-line unicorn/no-new-array -- intentional sparse preallocation; filled by index below
-    const results: (LooseResult | Error)[] = new Array(reqs.length);
-
-    await Promise.all(
-      [...Map.groupBy(classified, (it) => it.resourceType).entries()].map(
-        async ([resourceType, entries]) => {
-          // Every member of a group resolved to the same resource type, hence
-          // to the same sub-producer. Non-null assertion is safe: Map.groupBy
-          // never makes an empty group.
-          const { subProducer } = entries[0]!;
-
-          const subResults = await subProducer(
-            entries.map((it) => it.req),
-          ).catch((error: unknown) => {
-            // Per-request error isolation survives the merge: this type's
-            // slots settle as Error elements instead of failing the whole
-            // invocation. A non-Error rejection is wrapped rather than stored
-            // raw, since a non-Error in a result slot would be read as a
-            // successful producer result; the original is kept as `cause`.
-            const asError =
-              error instanceof Error
-                ? error
-                : new Error(
-                    `bulkProducerByIdType: the "${resourceType}" producer rejected with a non-Error value`,
-                    { cause: error },
-                  );
-            return entries.map(() => asError);
-          });
-
-          entries.forEach((entry, j) => {
-            const result = subResults[j];
-            if (result !== undefined) {
-              results[entry.index] = result;
-            }
-          });
-        },
-      ),
-    );
-
-    return results;
-  };
-
-  // SAFETY: the dispatching function is id-erased internally (see
-  // LooseProducer in wrapProducer.ts), and the covered names are the record's
-  // own keys, so the declared set and the reachable sub-producers cannot
-  // disagree.
-  return Object.assign(dispatchingProducer, {
-    [coveredTypes]: coveredResourceTypes,
-  }) as unknown as CoveringBulkProducer<
-    RT,
-    Covered,
-    Validators,
-    Params,
-    ErrorType
-  >;
 }

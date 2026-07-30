@@ -16,16 +16,17 @@ import {
   UnroutableIdError,
   type ResourceTypes,
 } from "../index.js";
-import { bulkProducerByIdType, producerByIdType } from "./producerByIdType.js";
+import { producerByIdType } from "./producerByIdType.js";
 import wrapProducer from "./wrapProducer.js";
-import { wrapBulkProducer } from "./wrapBulkProducer.js";
 
 /**
- * The by-id-type helpers own two contracts of their own, independent of the
- * wrappers they feed: an empty record is unconstructible, and routing needs only
- * the resource-type registry -- no `Cache` -- so a by-id-type producer is a
- * value in its own right. Coverage *enforcement* by the wrappers lives in
- * `coverageRuntime.test.ts`.
+ * `producerByIdType` owns two contracts of its own, independent of the wrapper
+ * it feeds: an empty record is unconstructible, and routing needs only the
+ * resource-type registry -- no `Cache` -- so a by-id-type producer is a value in
+ * its own right. The `UnroutableIdError` cases below cover the routing that the
+ * bulk helper imports from here, so they are not repeated in
+ * `bulkProducerByIdType.test.ts`. Coverage *enforcement* by the wrappers lives
+ * in `coverageRuntime.test.ts`.
  *
  * These registries are deliberately local copies rather than shared fixtures:
  * they are free to diverge from any other suite's.
@@ -41,7 +42,7 @@ const threeTypeRegistry = {
   extra_blob: resourceType<string>()({ matches: idStartsWith("extra:") }),
 } satisfies ResourceTypes;
 
-describe("producerByIdType / bulkProducerByIdType", () => {
+describe("producerByIdType", () => {
   it("producerByIdType: an empty record throws at construction time, while a bare producer function is a legal whole-registry producer", async () => {
     const cache = new Cache({
       store: new MemoryStore(),
@@ -61,25 +62,6 @@ describe("producerByIdType / bulkProducerByIdType", () => {
       }));
       expect(await bare({ id: "site:1" })).to.include({ content: "x" });
       expect(await bare({ id: "biz:1" })).to.include({ content: "x" });
-    } finally {
-      await cache.close();
-    }
-  });
-  it("bulkProducerByIdType: an empty record throws at construction time, while a bare bulk producer function is a legal whole-registry producer", async () => {
-    const cache = new Cache({
-      store: new MemoryStore(),
-      name: uniqueCacheName("construct-bulk"),
-      resourceTypes: registry,
-    });
-    try {
-      expect(() => bulkProducerByIdType(registry, {})).to.throw();
-      const bare = wrapBulkProducer(cache, {}, async (reqs) =>
-        reqs.map(() => ({ content: "x", directives: freshFor100 })),
-      );
-      const results = await bare([{ id: "site:1" }, { id: "biz:1" }]);
-      expect(
-        results.map((it) => (it instanceof Error ? it : it.content)),
-      ).to.deep.equal(["x", "x"]);
     } finally {
       await cache.close();
     }
@@ -126,32 +108,6 @@ describe("producerByIdType / bulkProducerByIdType", () => {
       } finally {
         await cache.close();
       }
-    });
-
-    it("bulkProducerByIdType: splits a mixed batch with no Cache in existence", async () => {
-      const producer = bulkProducerByIdType(registry, {
-        site_day: async (reqs) =>
-          reqs.map((req) => ({
-            content: `site-${req.id}`,
-            directives: freshFor100,
-          })),
-        business_slice: async (reqs) =>
-          reqs.map((req) => ({
-            content: `biz-${req.id}`,
-            directives: freshFor100,
-          })),
-      });
-
-      // Interleaved so a positional-reassembly bug can't pass: each result must
-      // land back on its OWN request's index.
-      const results = await producer([
-        { ...emptyRequest, id: "site:1" },
-        { ...emptyRequest, id: "biz:1" },
-        { ...emptyRequest, id: "site:2" },
-      ]);
-      expect(
-        results.map((it) => (it instanceof Error ? it.message : it.content)),
-      ).to.deep.equal(["site-site:1", "biz-biz:1", "site-site:2"]);
     });
 
     it("driven directly, an id it cannot route throws UnroutableIdError -- cache-free, with the reason", async () => {

@@ -20,13 +20,9 @@ import {
   type AnyParamValue,
   type AnyValidators,
   type CacheSpec,
-  classifyIdAgainst,
   type ConsumerDirectives,
   type Logger,
   type ProducerResultResource,
-  type RegistryEntries,
-  registryEntries,
-  resourceType,
   type ResourceTypeName,
   type ResourceTypes,
   type ResourceTypeSpec,
@@ -37,6 +33,12 @@ import {
   type StoreEntryResult,
   type Vary,
 } from "./types/index.js";
+import {
+  classifyIdAgainst,
+  registryEntries,
+  resourceType,
+  type ResourceTypesEntries,
+} from "./resourceTypeClassification.js";
 import { type Bind1 } from "./types/utils.js";
 import {
   normalizeParams,
@@ -246,7 +248,7 @@ export default class Cache<
   #closed = false;
   readonly #onGetAfterClose: "throw" | "act-empty";
   readonly #onStoreAfterClose: "throw" | "no-op";
-  readonly #resourceTypeEntries: RegistryEntries<RT>;
+  readonly #resourceTypeEntries: ResourceTypesEntries<RT>;
 
   /**
    * Names this cache instance (≈ the backing table) in every diagnostics

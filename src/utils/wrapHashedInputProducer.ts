@@ -26,13 +26,17 @@ import {
   type HashedInputProducerMeta,
   type LooseBranch,
 } from "./hashedInputProducerByInputType.js";
-import { bulkProducerByIdType, producerByIdType } from "./producerByIdType.js";
+import {
+  bulkProducerByIdType,
+  type BulkProducersFor,
+} from "./bulkProducerByIdType.js";
+import { producerByIdType } from "./producerByIdType.js";
 import { zip2 } from "./utils.js";
 import wrapProducer, {
   type ProducersFor,
   type WrapProducerOptions,
 } from "./wrapProducer.js";
-import { wrapBulkProducer, type BulkProducersFor } from "./wrapBulkProducer.js";
+import { wrapBulkProducer } from "./wrapBulkProducer.js";
 
 /**
  * ## Hashed-input producers vs. (plain) producers

@@ -3,19 +3,13 @@
 //
 // Those that are meant to be public are re-exported below.
 export type { CacheSpec, ContentForId, SpecForId } from "./00_CacheSpec.js";
-export {
-  classifyIdAgainst,
-  idStartsWith,
-  registryEntries,
-  resourceType,
-  type ContentOfResourceType,
-  type IdClassification,
-  type IdOfResourceType,
-  type RegistryEntries,
-  type ResourceTypeName,
-  type ResourceTypes,
-  type ResourceTypeSpec,
-  type SpecOf,
+export type {
+  ContentOfResourceType,
+  IdOfResourceType,
+  ResourceTypeName,
+  ResourceTypes,
+  ResourceTypeSpec,
+  SpecOf,
 } from "./00_ResourceTypes.js";
 export type { AnyParams, AnyParamValue } from "./01_Params.js";
 export type { AnyValidators } from "./02_Validators.js";
