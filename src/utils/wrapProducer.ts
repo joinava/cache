@@ -349,9 +349,9 @@ export function throwUnreachableAbort(signal: AbortSignal | undefined): never {
 }
 
 /**
- * Fundamentally, this function takes producers that return values (likely
+ * Fundamentally, this function takes a producer that returns values (likely
  * without the help of a cache), and returns a function that's a drop-in
- * replacement for them, except that it tries to lookup and reuse prior
+ * replacement for it, except that it tries to lookup and reuse prior
  * results from a cache, before calling the underlying user-provided producer.
  *
  * Exactly ONE producer function is passed, and it is the primitive:

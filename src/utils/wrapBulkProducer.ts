@@ -113,11 +113,11 @@ type WrappedBulkProducerFn<
 }>;
 
 /**
- * Fundamentally, this function takes bulk producers that return values for
+ * Fundamentally, this function takes a bulk producer that returns values for
  * multiple requests (likely without the help of a cache), and returns a
- * function that's a drop-in replacement for them, except that it tries to
+ * function that's a drop-in replacement for it, except that it tries to
  * lookup and reuse prior results from a cache using `Cache.getMany`, before
- * calling the underlying user-provided producers only for those requests that
+ * calling the underlying user-provided producer only for those requests that
  * could not be resolved from the cache (or that need revalidation later).
  *
  * Like {@link wrapProducer} (see its docs for the shared contracts: the single
