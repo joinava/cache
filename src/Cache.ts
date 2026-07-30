@@ -862,9 +862,9 @@ function calculateStoreFor(
 /**
  * The one-entry registry {@link singleTypeCacheOptions} builds. Keyed by an
  * index signature, because the name is a runtime value the caller asked not to
- * think about. Nothing is lost by that: \`SpecOf\` of this registry is exactly
- * \`CacheSpec<string, Content>\`, so the id space and the content type stay
- * precise. The only imprecision is the NAME -- \`classify()\` returns \`string\`
+ * think about. Nothing is lost by that: `SpecOf` of this registry is exactly
+ * `CacheSpec<string, Content>`, so the id space and the content type stay
+ * precise. The only imprecision is the NAME -- `classify()` returns `string`
  * on such a cache rather than the literal. Write the registry out by hand if
  * you want the literal.
  */
@@ -877,29 +877,29 @@ type SingleTypeRegistry<Content> = {
  * caller does not have to invent a name for that type or nest a one-entry
  * registry literal:
  *
- * \`\`\`ts
+ * ```ts
  * const cache = new Cache(singleTypeCacheOptions<Json>()({ store, name: "xyz-cache" }));
- * \`\`\`
+ * ```
  *
- * The resource type is named after the cache unless \`resourceTypeName\` says
+ * The resource type is named after the cache unless `resourceTypeName` says
  * otherwise. That name reaches diagnostics only -- it is never part of a store
  * key -- so naming it after the cache cannot invalidate entries, and it keeps
- * \`resourceType\` meaningful across caches instead of collapsing every
+ * `resourceType` meaningful across caches instead of collapsing every
  * sole-type cache into one shared literal. Spread the result to add anything
  * else {@link CacheOptions} accepts.
  *
- * Curried for the same reason {@link resourceType} is: \`Content\` cannot be
+ * Curried for the same reason {@link resourceType} is: `Content` cannot be
  * inferred from anything, so it must be given explicitly, and TS has no partial
  * type-argument inference.
  *
- * ## The id space here is always \`string\`
+ * ## The id space here is always `string`
  *
  * There is deliberately no way to narrow it. A narrower id space needs a real
  * runtime guard (see {@link soleResourceType} for why an asserted one is
- * unsound), and \`resourceType\` already expresses exactly that -- at which
+ * unsound), and `resourceType` already expresses exactly that -- at which
  * point naming the entry is the smaller half of the job:
  *
- * \`\`\`ts
+ * ```ts
  * new Cache({
  *   store,
  *   name: "tickets",
@@ -907,13 +907,13 @@ type SingleTypeRegistry<Content> = {
  *     tickets: resourceType<Schema>()({ matches: idStartsWith("ticket:") }),
  *   },
  * });
- * \`\`\`
+ * ```
  *
- * A \`validateId\` option was tried here and dropped. It made the guard a second
- * inference site alongside \`store\`, and an untyped \`new MemoryStore()\` won --
- * silently collapsing the id space back to \`string\`, i.e. reintroducing the
+ * A `validateId` option was tried here and dropped. It made the guard a second
+ * inference site alongside `store`, and an untyped `new MemoryStore()` won --
+ * silently collapsing the id space back to `string`, i.e. reintroducing the
  * asserted-but-unenforced narrowing this change exists to remove. Forcing the
- * guard to win (\`NoInfer\`) then made every caller spell out the store spec,
+ * guard to win (`NoInfer`) then made every caller spell out the store spec,
  * which is a worse common case in exchange for a rare one the two lines above
  * already serve.
  */
@@ -925,7 +925,7 @@ export function singleTypeCacheOptions<Content>(): <
     CacheOptions<SingleTypeRegistry<Content>, Validators, Params>,
     "resourceTypes"
   > & {
-    /** Defaults to the cache own \`name\`. */
+    /** Defaults to the cache's own `name`. */
     resourceTypeName?: string;
   },
 ) => CacheOptions<SingleTypeRegistry<Content>, Validators, Params> {
