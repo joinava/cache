@@ -220,6 +220,107 @@ export type HashedInputProducerBuilder<
 };
 
 /**
+ * One `.when` argument, type-erased the way {@link LooseBranch} is: the public
+ * signature has already checked the branch against its own variant at the call
+ * site, so all the chain itself needs is that the fields are there.
+ */
+type LooseBranchArg = {
+  readonly name: string;
+  readonly hashInput: LooseBranch<never>["hashInput"];
+  /**
+   * Erased further than the rest, because this chain serves both entry points
+   * and their `produce`s genuinely disagree: the single form returns one result,
+   * the bulk form an array of them. Which one a branch holds is known to the
+   * wrapper that reads it (`wrapBulkHashedInputProducer` re-reads the entries as
+   * its local `LooseBulkBranch`), never to the chain.
+   */
+  readonly produce: (input: never) => Promise<unknown>;
+};
+
+/**
+ * The internal, type-erased shape of the builder chain, shared by the single
+ * and bulk entry points.
+ *
+ * Deliberately NOT the public builder type: `.when` accumulates
+ * `Covered`/`MintedIds` into its own return type, which one runtime signature
+ * cannot express -- hence the erasing cast at each entry point. Everything
+ * else about the chain is checkable, though, and none of it was being checked
+ * while this function returned `unknown`: that both methods exist and are
+ * spelled the way the public type spells them, that `.when` returns another
+ * chain rather than (say) the entries array, that the duplicate-name guard
+ * reads a `name` that is really present, and that `build()` returns the
+ * {@link builtBranches} carrier the wrappers read.
+ */
+type LooseBuilderChain = {
+  when: (
+    matchesInput: (input: never) => boolean,
+    branch: LooseBranchArg,
+  ) => LooseBuilderChain;
+  build: () => {
+    readonly [builtBranches]: {
+      readonly entries: readonly (readonly [string, LooseBranch<never>])[];
+    };
+  };
+};
+
+/**
+ * The runtime behind both entry points' builders: an immutable chain that
+ * accumulates branches and hands them to the wrappers under
+ * {@link builtBranches}. `builderName` only names the thrower in errors.
+ */
+function makeBuilderChain(
+  builderName: string,
+  entries: readonly (readonly [string, LooseBranch<never>])[],
+): LooseBuilderChain {
+  return {
+    when: (matchesInput, branch) => {
+      if (entries.some(([name]) => name === branch.name)) {
+        // `Name extends Exclude<keyof V & string, Covered>` already rejects a
+        // repeat name, so reaching here took a cast -- and the duplicate would
+        // not merely be shadowed: dispatch takes the FIRST matching branch
+        // while the per-resource-type producer table keeps the LAST, so the
+        // second branch's content would be stored under the first branch's
+        // minted id.
+        throw new Error(
+          `${builderName}: \`.when\` was called twice for branch ` +
+            `"${branch.name}"; each variant may be covered only once.`,
+        );
+      }
+      return makeBuilderChain(builderName, [
+        ...entries,
+        [
+          branch.name,
+          {
+            hashInput: branch.hashInput,
+            // SAFETY: re-narrows the single-form `produce` this entries array
+            // declares. A bulk branch really does return an array here, which is
+            // why the bulk wrapper re-reads the entries as `LooseBulkBranch`.
+            produce: branch.produce as LooseBranch<never>["produce"],
+            // SAFETY (variance only): a guard is declared over its own variant's
+            // input at the call site, but `findBranch` has to call every branch's
+            // guard with an as-yet-unclassified input. `name` is deliberately not
+            // carried over: a stored branch is keyed by it, and `LooseBranch`
+            // never declared it.
+            matchesInput: matchesInput as NonNullable<
+              LooseBranch<never>["matchesInput"]
+            >,
+          },
+        ],
+      ]);
+    },
+    build: () => {
+      if (entries.length === 0) {
+        throw new Error(
+          `${builderName}: \`.build()\` was called with no \`.when\` branches, ` +
+            "so the producer could never produce anything.",
+        );
+      }
+      return { [builtBranches]: { entries } };
+    },
+  };
+}
+
+/**
  * Starts a {@link HashedInputProducerBuilder} over a declared variant map. Curried
  * because the map cannot be inferred from anything, and TS has no partial
  * type-argument inference.
@@ -245,47 +346,6 @@ export type HashedInputProducerBuilder<
  * `IdKeyedSpec`: pass a registry's `SpecOf` to return id-keyed supplementals
  * (see {@link BuiltBranchResult}).
  */
-function makeBuilderChain(
-  builderName: string,
-  entries: readonly (readonly [string, LooseBranch<never>])[],
-): unknown {
-  return {
-    when: (
-      matchesInput: (input: never) => boolean,
-      branch: { name: string; hashInput: unknown; produce: unknown },
-    ) => {
-      if (entries.some(([name]) => name === branch.name)) {
-        // `Name extends Exclude<keyof V & string, Covered>` already rejects a
-        // repeat name, so reaching here took a cast -- and the duplicate would
-        // not merely be shadowed: dispatch takes the FIRST matching branch
-        // while the per-resource-type producer table keeps the LAST, so the
-        // second branch's content would be stored under the first branch's
-        // minted id.
-        throw new Error(
-          `${builderName}: \`.when\` was called twice for branch ` +
-            `"${branch.name}"; each variant may be covered only once.`,
-        );
-      }
-      return makeBuilderChain(builderName, [
-        ...entries,
-        [
-          branch.name,
-          { ...branch, matchesInput } as unknown as LooseBranch<never>,
-        ],
-      ]);
-    },
-    build: () => {
-      if (entries.length === 0) {
-        throw new Error(
-          `${builderName}: \`.build()\` was called with no \`.when\` branches, ` +
-            "so the producer could never produce anything.",
-        );
-      }
-      return { [builtBranches]: { entries } };
-    },
-  };
-}
-
 export function hashedInputProducerByInputType<
   V extends AnyHashedInputVariants,
   Validators extends AnyValidators = AnyValidators,
