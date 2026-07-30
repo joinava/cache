@@ -20,6 +20,7 @@ import {
   type HashedInputVariant,
 } from "./hashedInputProducerByInputType.js";
 import {
+  MintedIdResourceTypeMismatchError,
   wrapBulkHashedInputProducer,
   wrapHashedInputProducer,
 } from "./wrapHashedInputProducer.js";
@@ -1027,9 +1028,20 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
         .build(),
     });
 
-    await assert.rejects(() => compute({ kind: "story", id: "9" }), {
-      name: "UnclassifiableIdError",
-      message: /branch "collection"/,
-    });
+    const thrown = await expectRejection(() =>
+      compute({ kind: "story", id: "9" }),
+    );
+    // Its own error, not a re-worded UnclassifiableIdError: the mint DID
+    // classify, to exactly one type -- just not this branch's. So the culprit is
+    // the branch's `hashInput`, not the registry's guards, and both facts needed
+    // to say so are fields rather than message text, which is what lets a
+    // handler route "a producer is wired to the wrong branch" apart from "this
+    // registry doesn't cover this id space".
+    assert.ok(thrown instanceof MintedIdResourceTypeMismatchError);
+    expect(thrown.branch).to.equal("collection");
+    expect(thrown.classifiedResourceType).to.equal("story");
+    expect(thrown.id).to.equal("extract:story:9");
+    expect(thrown.cacheName).to.equal(cache.name);
+    expect(thrown.message).to.include('branch "collection"');
   });
 });

@@ -87,15 +87,20 @@ import { wrapBulkProducer } from "./wrapBulkProducer.js";
  * its resource type's `matches` guard accepts. That is checked twice. At compile
  * time, wiring a hashed-input producer to a cache compares each branch's minted-id
  * type against its variant's `IdOfResourceType`. At runtime, each hashed id is
- * classified before it is used for anything, and a mismatch throws
- * `UnclassifiableIdError`/`AmbiguousResourceTypeError` naming the branch — the
- * backstop for a mint that reached the wrapper through a cast or an untyped
- * boundary. For accept-everything registries the runtime check is vacuous (the
+ * classified before it is used for anything — the backstop for a mint that
+ * reached the wrapper through a cast or an untyped boundary. Each way that can
+ * fail gets its own error, all naming the branch: the mint matched no resource
+ * type (`UnclassifiableIdError`), or several (`AmbiguousResourceTypeError`), or
+ * exactly one that isn't the branch's own
+ * ({@link MintedIdResourceTypeMismatchError} — a *successful* classification
+ * with the wrong answer, so it indicts the branch's `hashInput` rather than the
+ * registry's guards, and carries both the expected and the actual type as
+ * fields). For accept-everything registries the runtime check is vacuous (the
  * guard accepts every id), and the compile-time one carries the weight.
  *
  * The single-producer form declares no resource type, so there is no name to
  * check a mint against; classifying the id at all is the whole runtime check
- * there.
+ * there, and the mismatch case is unreachable.
  *
  * ## Supplemental resources: input-keyed or id-keyed
  *
@@ -336,15 +341,65 @@ type WrappedBulkHashedInputProducer<
 >;
 
 /**
+ * Thrown when a branch's `hashInput` minted an id that classifies to exactly
+ * one resource type -- just not the branch's own.
+ *
+ * Its own error rather than a re-worded {@link UnclassifiableIdError}, because
+ * it is a different fact with a different culprit. Classification did not fail
+ * here: it succeeded and returned a type the branch does not own, which points
+ * at that branch's `hashInput` rather than at the registry's `matches` guards.
+ * Both facts a handler needs to tell those apart -- the type the branch expected
+ * and the type the id actually classified to -- are therefore fields and not
+ * merely message text, so "a producer is wired to the wrong branch" can be
+ * routed separately from "this registry does not cover this id space".
+ *
+ * Only the multi-branch form raises it. The single-producer form declares no
+ * resource type, so there is no name to check a mint against and an
+ * unclassifiable mint is the only reachable mint failure (see
+ * {@link checkMintedId}).
+ */
+export class MintedIdResourceTypeMismatchError extends Error {
+  override readonly name = "MintedIdResourceTypeMismatchError";
+  readonly cacheName: string;
+  readonly id: string;
+  /** The branch -- i.e. the resource-type name -- whose `hashInput` minted `id`. */
+  readonly branch: string;
+  /** The resource type `id` actually classified to. Never equals `branch`. */
+  readonly classifiedResourceType: string;
+
+  constructor(args: {
+    cacheName: string;
+    id: string;
+    branch: string;
+    classifiedResourceType: string;
+  }) {
+    super(
+      `Cache "${args.cacheName}": \`hashInput\` for branch "${args.branch}" minted id ${JSON.stringify(args.id)}, which classifies to resource type "${args.classifiedResourceType}" instead of "${args.branch}"`,
+    );
+    this.cacheName = args.cacheName;
+    this.id = args.id;
+    this.branch = args.branch;
+    this.classifiedResourceType = args.classifiedResourceType;
+  }
+}
+
+/**
  * Checks that a branch's `hashInput` minted an id that classifies to that
- * branch's own resource type, rethrowing the classification errors with the
- * offending branch named. Runs before the id is used for anything (in
+ * branch's own resource type. Runs before the id is used for anything (in
  * particular, before any cache read). Vacuous for accept-everything
  * registries, whose guard accepts every id.
  *
+ * Three distinguishable failures, one per way the check can go wrong: the mint
+ * matched NO resource type ({@link UnclassifiableIdError}) or SEVERAL
+ * ({@link AmbiguousResourceTypeError}) -- both rethrown from `classify` with the
+ * offending branch named, since the fact is unchanged and only the message
+ * improves -- or it matched exactly one that isn't the branch's
+ * ({@link MintedIdResourceTypeMismatchError}).
+ *
  * `branchName` is absent for the single-producer form, which declares no
  * resource type to check against; there, classifying the id at all is the whole
- * check (an unclassifiable mint still fails loud, just without a name).
+ * check (an unclassifiable mint still fails loud, just without a name, and the
+ * mismatch case is unreachable).
  */
 function checkMintedId(
   cache: { readonly name: string; classify: (id: string) => string },
@@ -382,10 +437,11 @@ function checkMintedId(
   }
 
   if (branchName !== undefined && classified !== branchName) {
-    throw new UnclassifiableIdError({
+    throw new MintedIdResourceTypeMismatchError({
       cacheName: cache.name,
       id,
-      message: `Cache "${cache.name}": \`hashInput\` for branch "${branchName}" minted id ${JSON.stringify(id)}, which classifies to resource type "${classified}" instead of "${branchName}"`,
+      branch: branchName,
+      classifiedResourceType: classified,
     });
   }
 }

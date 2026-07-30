@@ -61,6 +61,7 @@ export {
   type CoveringBulkProducer,
 } from "./utils/wrapBulkProducer.js";
 export {
+  MintedIdResourceTypeMismatchError,
   wrapBulkHashedInputProducer,
   wrapHashedInputProducer,
   type HashedInputProducerResult,
