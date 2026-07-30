@@ -1,13 +1,9 @@
 import { expect } from "chai";
 import { describe, it } from "node:test";
+import type { IsEqual } from "type-fest";
 import type { JsonOf } from "type-party";
 
-import {
-  expectType,
-  memoryStoreFor,
-  uniqueCacheName,
-  type Equal,
-} from "../test/v2AcceptanceHelpers.js";
+import { expectType, uniqueCacheName } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
   bulkProducerByIdType,
@@ -44,7 +40,7 @@ import wrapProducer from "./utils/wrapProducer.js";
  * a one-entry registry's `Id` flows through everything.
  *
  * Follows the perIdTyping.test.ts conventions: compile-time assertions via
- * `expectType<Equal<...>>()`, `@ts-expect-error` fixtures (kept on ONE line
+ * `expectType<IsEqual<...>>()`, `@ts-expect-error` fixtures (kept on ONE line
  * so the error's reported position can't drift off the suppressed line), and
  * `if (false)` guards around calls that must typecheck (or fail to) without
  * running.
@@ -69,7 +65,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     // SpecOf computes the cache's Spec union from the registry, instead of a
     // parallel declaration that can drift.
     expectType<
-      Equal<
+      IsEqual<
         SpecOf<typeof registry>,
         | CacheSpec<SiteId, Visits>
         | CacheSpec<BizId, Visits>
@@ -77,24 +73,27 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       >
     >();
     expectType<
-      Equal<
+      IsEqual<
         ResourceTypeName<typeof registry>,
         "site_day" | "business_slice" | "extra_blob"
       >
     >();
     expectType<
-      Equal<IdOfResourceType<(typeof registry)["site_day"]>, SiteId>
+      IsEqual<IdOfResourceType<(typeof registry)["site_day"]>, SiteId>
     >();
     expectType<
-      Equal<ContentOfResourceType<(typeof registry)["extra_blob"]>, BlobContent>
+      IsEqual<
+        ContentOfResourceType<(typeof registry)["extra_blob"]>,
+        BlobContent
+      >
     >();
     expectType<
-      Equal<ContentOfResourceType<ResourceTypeSpec<string, Visits>>, Visits>
+      IsEqual<ContentOfResourceType<ResourceTypeSpec<string, Visits>>, Visits>
     >();
 
     // classify() returns the registry's name union.
     expectType<
-      Equal<
+      IsEqual<
         ReturnType<Cache<typeof registry>["classify"]>,
         "site_day" | "business_slice" | "extra_blob"
       >
@@ -110,7 +109,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         void new Cache(new MemoryStore());
         // @ts-expect-error `name` is required
         void new Cache({
-          store: memoryStoreFor(registry),
+          store: new MemoryStore(),
           resourceTypes: registry,
         });
         // @ts-expect-error `resourceTypes` is required
@@ -152,7 +151,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
   describe("wrapProducer: Covered inferred from producerByIdType's partial record (§6.3)", () => {
     it("bounds the wrapped function's ids to the covered types and narrows per-key", async () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("typing-partial"),
         resourceTypes: registry,
       });
@@ -163,7 +162,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           producerByIdType(cache.resourceTypes, {
             site_day: async (req) => {
               // Contextually typed per key -- narrowed, and NOT any.
-              expectType<Equal<typeof req.id, SiteId>>();
+              expectType<IsEqual<typeof req.id, SiteId>>();
               return {
                 content: { visits: [1] },
                 directives: freshFor1,
@@ -186,7 +185,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         );
 
         const res = await fetchSite({ id: "site:1" });
-        expectType<Equal<typeof res.content, Visits>>();
+        expectType<IsEqual<typeof res.content, Visits>>();
         expect(res.content).to.deep.equal({ visits: [1] });
 
         if (false as boolean) {
@@ -204,7 +203,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
 
     it("a two-key record covers the union (with per-id return narrowing); the third type stays uncovered", async () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("typing-two-key"),
         resourceTypes: registry,
       });
@@ -214,20 +213,20 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           {},
           producerByIdType(cache.resourceTypes, {
             site_day: async (req) => {
-              expectType<Equal<typeof req.id, SiteId>>();
+              expectType<IsEqual<typeof req.id, SiteId>>();
               return { content: { visits: [1, 2] }, directives: freshFor1 };
             },
             extra_blob: async (req) => {
-              expectType<Equal<typeof req.id, ExtraId>>();
+              expectType<IsEqual<typeof req.id, ExtraId>>();
               return { content: { blob: "b" }, directives: freshFor1 };
             },
           }),
         );
 
         const visits = await fetchTwo({ id: "site:1" });
-        expectType<Equal<typeof visits.content, Visits>>();
+        expectType<IsEqual<typeof visits.content, Visits>>();
         const blob = await fetchTwo({ id: "extra:1" });
-        expectType<Equal<typeof blob.content, BlobContent>>();
+        expectType<IsEqual<typeof blob.content, BlobContent>>();
         expect(visits.content).to.deep.equal({ visits: [1, 2] });
         expect(blob.content).to.deep.equal({ blob: "b" });
 
@@ -243,7 +242,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
 
     it("rejects non-registry keys, mismatched (branch id, content) pairs, and options the branch type does not declare", async () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("typing-rejections"),
         resourceTypes: registry,
       });
@@ -276,7 +275,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
 
     it("a record where the single producer belongs is rejected, as is a bare function typed for a strict subset; a whole-registry bare function covers everything", async () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("typing-never"),
         resourceTypes: registry,
       });
@@ -301,7 +300,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           // A function that accepts EVERY registry id is accepted, and its
           // wrapper takes every registry id.
           const whole = wrapProducer(cache, {}, async (req) => {
-            expectType<Equal<typeof req.id, SiteId | BizId | ExtraId>>();
+            expectType<IsEqual<typeof req.id, SiteId | BizId | ExtraId>>();
             return {
               content: { visits: [] as number[] },
               directives: freshFor1,
@@ -328,7 +327,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
 
     it("wrapBulkProducer: request elements are bounded per element by the covered types", async () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("typing-bulk"),
         resourceTypes: registry,
       });
@@ -338,7 +337,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
           {},
           bulkProducerByIdType(cache.resourceTypes, {
             site_day: async (reqs) => {
-              expectType<Equal<(typeof reqs)[number]["id"], SiteId>>();
+              expectType<IsEqual<(typeof reqs)[number]["id"], SiteId>>();
               return reqs.map(() => ({
                 content: { visits: [] as number[] },
                 directives: freshFor1,
@@ -356,7 +355,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         const results = await bulk([{ id: "site:1" }, { id: "biz:1" }]);
         const first = results[0];
         if (!(first instanceof Error)) {
-          expectType<Equal<typeof first.content, Visits>>();
+          expectType<IsEqual<typeof first.content, Visits>>();
         }
 
         if (false as boolean) {
@@ -418,11 +417,11 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     } satisfies ResourceTypes;
 
     // The narrowed Id flows through SpecOf...
-    expectType<Equal<TicketSpec["id"], `zendesk-ticket-schema:${string}`>>();
-    expectType<Equal<SpecOf<typeof brandedRegistry>["id"], SiteVisitsKey>>();
+    expectType<IsEqual<TicketSpec["id"], `zendesk-ticket-schema:${string}`>>();
+    expectType<IsEqual<SpecOf<typeof brandedRegistry>["id"], SiteVisitsKey>>();
     // ...while an accept-everything guard stays `string`, for caches whose
     // ids have no inspectable structure.
-    expectType<Equal<SpecOf<typeof defaultRegistry>["id"], string>>();
+    expectType<IsEqual<SpecOf<typeof defaultRegistry>["id"], string>>();
 
     it("singleTypeCacheOptions: keeps content and id types exact while giving up only the resource-type name", async () => {
       const defaultName = new Cache(
@@ -442,12 +441,15 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         // The helper trades away only the resource-type NAME's precision --
         // `classify()` returns `string` rather than the literal, which is the
         // point of not having to name it. What matters stays exact:
-        expectType<Equal<ReturnType<typeof defaultName.classify>, string>>();
+        expectType<IsEqual<ReturnType<typeof defaultName.classify>, string>>();
         expectType<
-          Equal<SpecOf<typeof defaultName.resourceTypes>["content"], number[]>
+          IsEqual<SpecOf<typeof defaultName.resourceTypes>["content"], number[]>
         >();
         expectType<
-          Equal<SpecOf<typeof explicitName.resourceTypes>["content"], number[]>
+          IsEqual<
+            SpecOf<typeof explicitName.resourceTypes>["content"],
+            number[]
+          >
         >();
 
         // Without `validateId` the sole type accepts every id, so the id space
@@ -476,7 +478,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       try {
         // `Id` came from the guard, and it reaches the cache's request type.
         expectType<
-          Equal<
+          IsEqual<
             SpecOf<typeof guarded.resourceTypes>["id"],
             `zendesk-ticket-schema:${string}`
           >
@@ -517,13 +519,13 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       );
       try {
         expectType<
-          Equal<
+          IsEqual<
             SpecOf<typeof narrowed.resourceTypes>["id"],
             `zendesk-ticket-schema:${string}`
           >
         >();
         expectType<
-          Equal<
+          IsEqual<
             SpecOf<typeof narrowed.resourceTypes>["content"],
             { fields: string[] }
           >
@@ -573,12 +575,12 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
 
     it("rejects bare-string ids at the type level (template-literal and branded), while the default form accepts any string", async () => {
       const zendeskCache = new Cache({
-        store: memoryStoreFor(zendeskRegistry),
+        store: new MemoryStore(),
         name: uniqueCacheName("typing-sole-tpl"),
         resourceTypes: zendeskRegistry,
       });
       const defaultCache = new Cache({
-        store: memoryStoreFor(defaultRegistry),
+        store: new MemoryStore(),
         name: uniqueCacheName("typing-sole-default"),
         resourceTypes: defaultRegistry,
       });
@@ -616,12 +618,12 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
 
     it("hashInput's return type is the (possibly narrowed) sole id", async () => {
       const zendeskCache = new Cache({
-        store: memoryStoreFor(zendeskRegistry),
+        store: new MemoryStore(),
         name: uniqueCacheName("typing-sole-hash"),
         resourceTypes: zendeskRegistry,
       });
       const defaultCache = new Cache({
-        store: memoryStoreFor(defaultRegistry),
+        store: new MemoryStore(),
         name: uniqueCacheName("typing-default-hash"),
         resourceTypes: defaultRegistry,
       });
@@ -705,7 +707,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
         .build();
 
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("typing-computing-built"),
         resourceTypes: registry,
       });
@@ -716,9 +718,9 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
 
       // The wrapped function accepts the union of the covered branches' inputs,
       // and returns the union of their contents.
-      expectType<Equal<Parameters<typeof compute>[0], BranchedInput>>();
+      expectType<IsEqual<Parameters<typeof compute>[0], BranchedInput>>();
       expectType<
-        Equal<Awaited<ReturnType<typeof compute>>["content"], Visits>
+        IsEqual<Awaited<ReturnType<typeof compute>>["content"], Visits>
       >();
 
       if (false as boolean) {
@@ -758,7 +760,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
 
     it("rejects, at the cache, a branch minting outside its variant's resource type and a variant name outside the registry", () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("typing-computing-registry"),
         resourceTypes: registry,
       });
@@ -856,7 +858,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
     // The public typed-channel objects carry the message and literal channel
     // name types through subscribe.
     expectType<
-      Equal<
+      IsEqual<
         Parameters<(typeof cacheReadChannel)["subscribe"]>[0],
         (message: CacheReadMessage, name: "@zingage/cache:read") => void
       >

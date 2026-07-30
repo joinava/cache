@@ -1,17 +1,14 @@
 import { expect } from "chai";
 import { describe, it } from "node:test";
+import type { IsEqual } from "type-fest";
 
-import {
-  expectType,
-  memoryStoreFor,
-  uniqueCacheName,
-  type Equal,
-} from "../test/v2AcceptanceHelpers.js";
+import { expectType, uniqueCacheName } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
   bulkProducerByIdType,
   coveredTypes,
   idStartsWith,
+  MemoryStore,
   producerByIdType,
   resourceType,
   wrapBulkProducer,
@@ -32,7 +29,7 @@ import {
  * types while leaving the wrapper's runtime coverage reading as the whole
  * registry.
  *
- * Follows the coverageTyping.test.ts conventions: `expectType<Equal<...>>()`,
+ * Follows the coverageTyping.test.ts conventions: `expectType<IsEqual<...>>()`,
  * `@ts-expect-error` fixtures kept on ONE line so the error's reported position
  * can't drift off the suppressed line, and `if (false)` guards around calls
  * that must typecheck (or fail to) without running.
@@ -61,7 +58,7 @@ const freshFor1 = { freshUntilAge: 1 };
 
 const makeCache = (label: string) =>
   new Cache({
-    store: memoryStoreFor(registry),
+    store: new MemoryStore(),
     name: uniqueCacheName(label),
     resourceTypes: registry,
   });
@@ -88,7 +85,9 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
         const fetchAny = wrapProducer(cache, {}, async (req) => {
           // `Covered` took its default, so the producer sees -- and must
           // handle -- every registry id. Not narrowed to one type, not `any`.
-          expectType<Equal<typeof req.id, StoryId | CollectionId | ExtraId>>();
+          expectType<
+            IsEqual<typeof req.id, StoryId | CollectionId | ExtraId>
+          >();
           return req.id.startsWith("story:")
             ? {
                 content: { title: `t-${req.id}` } satisfies Story,
@@ -108,15 +107,15 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
         // Every registry type's id is accepted by the wrapped function, and
         // each answer's content is narrowed to that id's own content type.
         const story = await fetchAny({ id: "story:1" });
-        expectType<Equal<typeof story.content, Story>>();
+        expectType<IsEqual<typeof story.content, Story>>();
         expect(story.content).to.deep.equal({ title: "t-story:1" });
 
         const collection = await fetchAny({ id: "collection:1" });
-        expectType<Equal<typeof collection.content, Collection>>();
+        expectType<IsEqual<typeof collection.content, Collection>>();
         expect(collection.content).to.deep.equal({ storyTitles: [] });
 
         const extra = await fetchAny({ id: "extra:1" });
-        expectType<Equal<typeof extra.content, Extra>>();
+        expectType<IsEqual<typeof extra.content, Extra>>();
         expect(extra.content).to.deep.equal({ blob: "b-extra:1" });
 
         if (false as boolean) {
@@ -134,7 +133,10 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
       try {
         const getBulk = wrapBulkProducer(cache, {}, async (reqs) => {
           expectType<
-            Equal<(typeof reqs)[number]["id"], StoryId | CollectionId | ExtraId>
+            IsEqual<
+              (typeof reqs)[number]["id"],
+              StoryId | CollectionId | ExtraId
+            >
           >();
           return reqs.map((req) =>
             req.id.startsWith("story:")
@@ -161,11 +163,11 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
         ]);
         const first = results[0];
         if (!(first instanceof Error)) {
-          expectType<Equal<typeof first.content, Story>>();
+          expectType<IsEqual<typeof first.content, Story>>();
         }
         const third = results[2];
         if (!(third instanceof Error)) {
-          expectType<Equal<typeof third.content, Extra>>();
+          expectType<IsEqual<typeof third.content, Extra>>();
         }
       } finally {
         await cache.close();
@@ -217,14 +219,14 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
           producerByIdType(cache.resourceTypes, {
             story: async (req) => {
               // Contextually narrowed per key, exactly as under the 2.0 record.
-              expectType<Equal<typeof req.id, StoryId>>();
+              expectType<IsEqual<typeof req.id, StoryId>>();
               return {
                 content: { title: `t-${req.id}` } satisfies Story,
                 directives: freshFor1,
               };
             },
             collection: async (req) => {
-              expectType<Equal<typeof req.id, CollectionId>>();
+              expectType<IsEqual<typeof req.id, CollectionId>>();
               return {
                 content: { storyTitles: [req.id] } satisfies Collection,
                 directives: freshFor1,
@@ -234,11 +236,11 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
         );
 
         const story = await fetchStoryOrCollection({ id: "story:1" });
-        expectType<Equal<typeof story.content, Story>>();
+        expectType<IsEqual<typeof story.content, Story>>();
         expect(story.content).to.deep.equal({ title: "t-story:1" });
 
         const collection = await fetchStoryOrCollection({ id: "collection:1" });
-        expectType<Equal<typeof collection.content, Collection>>();
+        expectType<IsEqual<typeof collection.content, Collection>>();
         expect(collection.content).to.deep.equal({
           storyTitles: ["collection:1"],
         });
@@ -261,14 +263,14 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
           {},
           bulkProducerByIdType(cache.resourceTypes, {
             story: async (reqs) => {
-              expectType<Equal<(typeof reqs)[number]["id"], StoryId>>();
+              expectType<IsEqual<(typeof reqs)[number]["id"], StoryId>>();
               return reqs.map((req) => ({
                 content: { title: `t-${req.id}` } satisfies Story,
                 directives: freshFor1,
               }));
             },
             collection: async (reqs) => {
-              expectType<Equal<(typeof reqs)[number]["id"], CollectionId>>();
+              expectType<IsEqual<(typeof reqs)[number]["id"], CollectionId>>();
               return reqs.map((req) => ({
                 content: { storyTitles: [req.id] } satisfies Collection,
                 directives: freshFor1,
@@ -283,7 +285,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
         ]);
         const first = results[0];
         if (!(first instanceof Error)) {
-          expectType<Equal<typeof first.content, Story>>();
+          expectType<IsEqual<typeof first.content, Story>>();
           expect(first.content).to.deep.equal({ title: "t-story:1" });
         }
 
@@ -326,7 +328,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
         );
 
         const story = await fetchStoryOnly({ id: "story:1" });
-        expectType<Equal<typeof story.content, Story>>();
+        expectType<IsEqual<typeof story.content, Story>>();
         expect(story.content).to.deep.equal({ title: "t-story:1" });
 
         if (false as boolean) {

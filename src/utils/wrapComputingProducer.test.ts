@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { setTimeout as delay } from "timers/promises";
 import type { ReadonlyDeep } from "type-fest";
@@ -9,7 +10,6 @@ import {
   idStartsWith,
   MemoryStore,
   resourceType,
-  UnclassifiableIdError,
   type ResourceTypes,
   type SpecOf,
 } from "../index.js";
@@ -600,11 +600,9 @@ describe("computing wrappers with heterogeneous branches", () => {
         .build(),
     });
 
-    const thrown = await expectRejection(() =>
-      compute({ kind: "story", id: "9" }),
-    );
-    expect(thrown).to.be.instanceOf(Error);
-    expect((thrown as Error).message).to.match(/no branch matched/);
+    await assert.rejects(() => compute({ kind: "story", id: "9" }), {
+      message: /no branch matched/,
+    });
   });
 
   // --- the bulk wrapper over several branches, end to end ---
@@ -807,11 +805,9 @@ describe("computing wrappers with heterogeneous branches", () => {
       makeStory("1"),
     );
 
-    const thrown = await expectRejection(() =>
-      compute({ kind: "story", id: "" }),
-    );
-    expect(thrown).to.be.instanceOf(Error);
-    expect((thrown as Error).message).to.match(/no branch matched/);
+    await assert.rejects(() => compute({ kind: "story", id: "" }), {
+      message: /no branch matched/,
+    });
     // Still 1: the rejected input was not produced, so nothing was stored
     // under the id its `hashInput` would have minted.
     expect(produce.mock.callCount()).to.eq(1);
@@ -836,14 +832,14 @@ describe("computing wrappers with heterogeneous branches", () => {
         .build(),
     });
 
-    const thrown = await expectRejection(() =>
-      computeAll([
-        { kind: "story", id: "1" },
-        { kind: "story", id: "" },
-      ]),
+    await assert.rejects(
+      () =>
+        computeAll([
+          { kind: "story", id: "1" },
+          { kind: "story", id: "" },
+        ]),
+      { message: /no branch matched/ },
     );
-    expect(thrown).to.be.instanceOf(Error);
-    expect((thrown as Error).message).to.match(/no branch matched/);
     // The whole batch is rejected during routing, before any production.
     expect(produce.mock.callCount()).to.eq(0);
   });
@@ -867,11 +863,9 @@ describe("computing wrappers with heterogeneous branches", () => {
       })),
     });
 
-    const thrown = await expectRejection(() =>
-      compute({ kind: "story", id: "9" }),
-    );
-    expect(thrown).to.be.instanceOf(Error);
-    expect((thrown as Error).message).to.match(/no branch matched/);
+    await assert.rejects(() => compute({ kind: "story", id: "9" }), {
+      message: /no branch matched/,
+    });
   });
 
   it("a guard that THROWS counts as a non-match, so a later branch still claims the input", async () => {
@@ -1031,10 +1025,9 @@ describe("computing wrappers with heterogeneous branches", () => {
         .build(),
     });
 
-    const thrown = await expectRejection(() =>
-      compute({ kind: "story", id: "9" }),
-    );
-    expect(thrown).to.be.instanceOf(UnclassifiableIdError);
-    expect((thrown as Error).message).to.match(/branch "collection"/);
+    await assert.rejects(() => compute({ kind: "story", id: "9" }), {
+      name: "UnclassifiableIdError",
+      message: /branch "collection"/,
+    });
   });
 });

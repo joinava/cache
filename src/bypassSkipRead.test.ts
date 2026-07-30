@@ -6,7 +6,6 @@ import {
   captureChannels,
   expectProducerPathFetch,
   expectProduceMessage,
-  memoryStoreFor,
   uniqueCacheName,
   waitUntil,
   TWO_TYPE_REGISTRY,
@@ -15,6 +14,7 @@ import {
 import Cache from "./Cache.js";
 import {
   bulkProducerByIdType,
+  MemoryStore,
   producerByIdType,
   wrapBulkProducer,
 } from "./index.js";
@@ -30,7 +30,7 @@ import wrapProducer from "./utils/wrapProducer.js";
 
 const makeHarness = (label: string) => {
   const name = uniqueCacheName(label);
-  const store = memoryStoreFor(TWO_TYPE_REGISTRY);
+  const store = new MemoryStore();
   const getSpy = mock.method(store, "get");
   const getManySpy = mock.method(store, "getMany");
   const cache = new Cache({

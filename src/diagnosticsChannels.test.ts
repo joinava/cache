@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import assert from "node:assert/strict";
 import { describe, it, mock } from "node:test";
 import { setTimeout as delay } from "timers/promises";
 
@@ -8,7 +9,6 @@ import {
   expectProducerPathFetch,
   expectProduceMessage,
   expectRejection,
-  memoryStoreFor,
   uniqueCacheName,
   V2_CHANNEL_NAMES,
   waitUntil,
@@ -25,7 +25,7 @@ import {
   cacheStoreEntryChannel,
   bulkProducerByIdType,
   idStartsWith,
-  NoProducerForResourceTypeError,
+  MemoryStore,
   producerByIdType,
   resourceType,
   wrapBulkProducer,
@@ -76,7 +76,7 @@ const ifErrorWindowDirectives = {
 
 const makeHarness = (label: string) => {
   const name = uniqueCacheName(label);
-  const store = memoryStoreFor(registry);
+  const store = new MemoryStore();
   const cache = new Cache({
     store: store,
     name,
@@ -356,7 +356,7 @@ describe("diagnostics channels (§6.5)", () => {
       // An act-empty read is still a lookup the
       // channel reports, and a no-op store returns an empty results array.
       const name = uniqueCacheName("read-after-close");
-      const store = memoryStoreFor(registry);
+      const store = new MemoryStore();
       const cache = new Cache({
         store: store,
         name,
@@ -856,8 +856,7 @@ describe("diagnostics channels (§6.5)", () => {
           "producer invoked",
         );
         controller.abort(new Error("caller-gone"));
-        const thrown = await expectRejection(pending);
-        expect((thrown as Error).message).to.equal("caller-gone");
+        await assert.rejects(pending, { message: "caller-gone" });
 
         // The aborted fetch settled before its invocation did (§6.5's
         // temporal decoupling): the producer is still running here (it takes
@@ -928,8 +927,7 @@ describe("diagnostics channels (§6.5)", () => {
         controller.abort(new Error("cancelled-during-read"));
         releaseStoreRead([]);
 
-        const thrown = await expectRejection(pending);
-        expect((thrown as Error).message).to.equal("cancelled-during-read");
+        await assert.rejects(pending, { message: "cancelled-during-read" });
 
         await waitUntil(
           () => capture.fetch.length === 1,
@@ -967,10 +965,10 @@ describe("diagnostics channels (§6.5)", () => {
       const controller = new AbortController();
       controller.abort(new Error("pre-aborted"));
       try {
-        const thrown = await expectRejection(() =>
-          getSite({ id: "site:a" }, { signal: controller.signal }),
+        await assert.rejects(
+          () => getSite({ id: "site:a" }, { signal: controller.signal }),
+          { message: "pre-aborted" },
         );
-        expect((thrown as Error).message).to.equal("pre-aborted");
 
         await waitUntil(
           () => capture.fetch.length === 1,
@@ -1316,7 +1314,7 @@ describe("diagnostics channels (§6.5)", () => {
     it("sole-type caches attribute every message to the sole resource type, even with the trivial guard", async () => {
       const name = uniqueCacheName("fetch-sole-type");
       const cache = new Cache({
-        store: memoryStoreFor(soleVisitsRegistry),
+        store: new MemoryStore(),
         name,
         resourceTypes: soleVisitsRegistry,
       });
@@ -1577,15 +1575,16 @@ describe("diagnostics channels (§6.5)", () => {
         }),
       );
       try {
-        const thrown = await expectRejection(() =>
-          getBulk([{ id: "site:a" }, { id: "biz:b" }, { id: "site:c" }]),
+        await assert.rejects(
+          () => getBulk([{ id: "site:a" }, { id: "biz:b" }, { id: "site:c" }]),
+          {
+            // `name` pins it to a plain Error, which is also the "not a
+            // coverage failure" check: NoProducerForResourceTypeError would
+            // carry its own name.
+            name: "Error",
+            message: /returned results for only 2 of 3 requests/,
+          },
         );
-        expect(thrown).to.be.instanceOf(Error);
-        expect((thrown as Error).message).to.match(
-          /returned results for only 2 of 3 requests/,
-        );
-        // Not a coverage failure: both types have a producer here.
-        expect(thrown).to.not.be.instanceOf(NoProducerForResourceTypeError);
         // The healthy slice still ran; it just doesn't get to deliver.
         expect(bizBulk.mock.callCount()).to.equal(1);
 
@@ -1942,7 +1941,7 @@ describe("diagnostics channels (§6.5)", () => {
   describe("§7 execution pattern: the golden end-to-end simulation", () => {
     it("walks the documented message stream: miss cascade, rider, slice hit, SWR revalidation, outage", async () => {
       const name = uniqueCacheName("golden-e2e");
-      const store = memoryStoreFor(registry);
+      const store = new MemoryStore();
       const cache = new Cache({
         store: store,
         name,

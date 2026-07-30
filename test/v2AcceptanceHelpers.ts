@@ -1,39 +1,17 @@
 import { expect } from "chai";
+import assert from "node:assert/strict";
 import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { setTimeout as delay } from "timers/promises";
 
 import {
   idStartsWith,
-  MemoryStore,
   resourceType,
   type CacheFetchMessage,
   type CacheProduceMessage,
   type CacheReadMessage,
   type CacheStoreEntryMessage,
   type ResourceTypes,
-  type SpecOf,
 } from "../src/index.js";
-
-/**
- * A MemoryStore whose Spec is pinned to the given registry's `SpecOf`. (A
- * bare `new MemoryStore()` held in a variable is typed over the wide default
- * `CacheSpec` and is NOT assignable to the `Store<SpecOf<RT>, ...>` that
- * `Cache`'s constructor requires for a narrow registry; passing the registry
- * value pins the store's Spec to exactly the required union.)
- */
-export const memoryStoreFor = <RT extends ResourceTypes>(
-  _registry: RT,
-): MemoryStore<SpecOf<RT>> => new MemoryStore<SpecOf<RT>>();
-
-/**
- * NOTE: there is deliberately no shared `makeHarness(registry, label)` here.
- * `CacheOptions.store` carries the store-covers-registry check as a conditional
- * type, and under an unresolved generic `RT` that conditional stays deferred --
- * so a generic factory cannot construct a `Cache` without a cast. Each suite's
- * own factory instantiates `Cache` at a concrete registry type, where the
- * conditional resolves and no cast is needed. That is what the per-suite
- * factories are buying.
- */
 
 /**
  * The standard two-resource-type registry the acceptance suites classify
@@ -63,20 +41,12 @@ export const ACCEPT_ANY_REGISTRY = {
 export const freshFor100 = { freshUntilAge: 100 };
 
 /**
- * Compile-time type equality. The two-function-wrapper form is what makes it
- * INVARIANT, so `Equal<string, any>` and `Equal<{a: string}, {a?: string}>`
- * are both `false` -- a mutually-assignable check would pass those and make
- * every fixture below a weaker gate than it reads as.
- */
-export type Equal<X, Y> =
-  (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2
-    ? true
-    : false;
-
-/**
  * Asserts its type argument is `true` at COMPILE time; the runtime body is
- * empty. `expectType<Equal<A, B>>()` fails to typecheck when A and B differ,
- * which is the whole gate -- these fixtures pass trivially at runtime.
+ * empty. `expectType<IsEqual<A, B>>()` (type-fest's `IsEqual`, which is the
+ * INVARIANT comparison -- `IsEqual<string, any>` and
+ * `IsEqual<{a: string}, {a?: string}>` are both `false`) fails to typecheck
+ * when A and B differ, which is the whole gate; these fixtures pass trivially
+ * at runtime.
  */
 export const expectType = <_T extends true>(): void => {};
 
@@ -189,9 +159,16 @@ export function uniqueCacheName(label: string): string {
 }
 
 /**
- * Awaits a promise (or a thunk producing one) that MUST reject, returning the
- * rejection reason. The thunk form also tolerates implementations that throw
+ * Awaits a promise (or a thunk producing one) that MUST reject, **returning the
+ * rejection reason**. The thunk form also tolerates implementations that throw
  * synchronously instead of rejecting. Throws if no failure occurs.
+ *
+ * Returning the reason is the only reason this exists: `assert.rejects` covers
+ * "must reject, and match this class / message / property bag" and should be
+ * used directly for those (it also spares the `as Error` cast a captured
+ * `unknown` needs). What it cannot do is hand the error back for assertions its
+ * matchers can't express -- an identity check against a specific instance, a
+ * sorted-array compare, or a walk into `cause`. Those are what remain here.
  */
 export async function expectRejection(
   input: Promise<unknown> | (() => unknown),
@@ -244,7 +221,7 @@ export async function waitUntil(
 export const sortByResourceId = <T extends { resourceId: string }>(
   messages: readonly T[],
 ): T[] =>
-  [...messages].sort((a, b) =>
+  messages.toSorted((a, b) =>
     a.resourceId < b.resourceId ? -1 : a.resourceId > b.resourceId ? 1 : 0,
   );
 
@@ -264,16 +241,16 @@ export function expectProducerPathFetch(
     directivesImpliedBypass: boolean;
   },
 ): void {
-  if (msg === undefined) {
-    throw new Error("expected a producer-path fetch message, got none");
-  }
+  assert.ok(msg, "expected a producer-path fetch message, got none");
   expect(msg).to.deep.equal(expected);
 }
 
 /**
  * Asserts a fetch message on the cache-read-path branch of the union. There
  * `directivesImpliedBypass` is typed `?: false`, and cache-read dispositions
- * omit the key entirely rather than publishing it as `false`.
+ * omit the key entirely rather than publishing it as `false` -- which the
+ * whole-message deep-equal below already enforces, since `expected` never
+ * carries the key.
  */
 export function expectCachePathFetch(
   msg: CacheFetchMessage | undefined,
@@ -288,10 +265,7 @@ export function expectCachePathFetch(
       | "served-stale-after-error";
   },
 ): void {
-  if (msg === undefined) {
-    throw new Error("expected a cache-path fetch message, got none");
-  }
-  expect(msg).to.not.have.property("directivesImpliedBypass");
+  assert.ok(msg, "expected a cache-path fetch message, got none");
   expect(msg).to.deep.equal(expected);
 }
 
@@ -317,9 +291,7 @@ export function expectProduceMessage(
     minDurationMs?: number;
   },
 ): void {
-  if (msg === undefined) {
-    throw new Error("expected a produce message, got none");
-  }
+  assert.ok(msg, "expected a produce message, got none");
   const { durationMs, requests, ...rest } = msg;
   expect(durationMs).to.be.a("number");
   expect(Number.isFinite(durationMs)).to.equal(true);

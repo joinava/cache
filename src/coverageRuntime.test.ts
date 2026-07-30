@@ -1,18 +1,18 @@
 import { expect } from "chai";
+import assert from "node:assert/strict";
 import { describe, it, mock } from "node:test";
 
 import {
   captureChannels,
   expectRejection,
-  expectSyncThrow,
   freshFor100,
-  memoryStoreFor,
   uniqueCacheName,
 } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
   bulkProducerByIdType,
   idStartsWith,
+  MemoryStore,
   NoProducerForResourceTypeError,
   producerByIdType,
   resourceType,
@@ -53,7 +53,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
   describe("construction throws on a keyless producers/branches record", () => {
     it("producerByIdType: an empty record throws at construction time, while a bare producer function is a legal whole-registry producer", async () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("construct-wrap"),
         resourceTypes: registry,
       });
@@ -77,7 +77,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("bulkProducerByIdType: an empty record throws at construction time, while a bare bulk producer function is a legal whole-registry producer", async () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("construct-bulk"),
         resourceTypes: registry,
       });
@@ -97,7 +97,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("wrapComputingProducer / wrapBulkComputingProducer: empty record and bare function both throw at construction time", async () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("construct-computing"),
         resourceTypes: registry,
       });
@@ -153,32 +153,36 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       // takes the first matching branch while the per-resource-type producer
       // table keeps the last, storing the second branch's content under the
       // first branch's minted id.
-      const duplicated = expectSyncThrow(() =>
-        (
-          hashingProducerByInputType<Variants>().when(
-            isSiteDay,
-            singleBranch,
-          ) as unknown as ReturnType<
-            typeof hashingProducerByInputType<Variants>
-          >
-        ).when(isSiteDay, singleBranch),
-      );
-      expect((duplicated as Error).message).to.match(
-        /hashingProducerByInputType: `\.when` was called twice for branch "site_day"/,
+      assert.throws(
+        () =>
+          (
+            hashingProducerByInputType<Variants>().when(
+              isSiteDay,
+              singleBranch,
+            ) as unknown as ReturnType<
+              typeof hashingProducerByInputType<Variants>
+            >
+          ).when(isSiteDay, singleBranch),
+        {
+          message:
+            /hashingProducerByInputType: `\.when` was called twice for branch "site_day"/,
+        },
       );
 
-      const bulkDuplicated = expectSyncThrow(() =>
-        (
-          bulkHashingProducerByInputType<Variants>().when(
-            isSiteDay,
-            bulkBranch,
-          ) as unknown as ReturnType<
-            typeof bulkHashingProducerByInputType<Variants>
-          >
-        ).when(isSiteDay, bulkBranch),
-      );
-      expect((bulkDuplicated as Error).message).to.match(
-        /bulkHashingProducerByInputType: `\.when` was called twice for branch "site_day"/,
+      assert.throws(
+        () =>
+          (
+            bulkHashingProducerByInputType<Variants>().when(
+              isSiteDay,
+              bulkBranch,
+            ) as unknown as ReturnType<
+              typeof bulkHashingProducerByInputType<Variants>
+            >
+          ).when(isSiteDay, bulkBranch),
+        {
+          message:
+            /bulkHashingProducerByInputType: `\.when` was called twice for branch "site_day"/,
+        },
       );
     });
   });
@@ -212,7 +216,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       // ...and the very same producer value goes on to feed a cache built
       // afterwards, serving the second call from the store.
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("cachefree-single"),
         resourceTypes: registry,
       });
@@ -268,11 +272,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
           id: "biz:1" as string as `site:${string}`,
         }),
       );
-      if (!(uncovered instanceof UnroutableIdError)) {
-        throw new Error(
-          `expected UnroutableIdError, got: ${String(uncovered)}`,
-        );
-      }
+      assert.ok(uncovered instanceof UnroutableIdError);
       expect(uncovered.detail).to.deep.equal({
         reason: "uncovered",
         resourceType: "business_slice",
@@ -289,11 +289,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
           id: "nope:1" as string as `site:${string}`,
         }),
       );
-      if (!(unclassifiable instanceof UnroutableIdError)) {
-        throw new Error(
-          `expected UnroutableIdError, got: ${String(unclassifiable)}`,
-        );
-      }
+      assert.ok(unclassifiable instanceof UnroutableIdError);
       expect(unclassifiable.detail.reason).to.equal("unclassifiable");
     });
 
@@ -313,7 +309,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
       const name = uniqueCacheName("divergent-registry");
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name,
         resourceTypes: registry,
       });
@@ -331,11 +327,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         // The cache classifies `site:1` to a covered type and dispatches; the
         // producer's own registry then can't route it.
         const thrown = await expectRejection(() => get({ id: "site:1" }));
-        if (!(thrown instanceof UnclassifiableIdError)) {
-          throw new Error(
-            `expected UnclassifiableIdError, got: ${String(thrown)}`,
-          );
-        }
+        assert.ok(thrown instanceof UnclassifiableIdError);
         // The point of the re-throw: the cache's name is back on the error.
         expect(thrown.cacheName).to.equal(name);
         expect(thrown.id).to.equal("site:1");
@@ -349,7 +341,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
   describe("NoProducerForResourceTypeError: ids outside the wrapper's coverage", () => {
     it("wrapProducer: throws (with the documented §6.2 fields) BEFORE any store read", async () => {
       const name = uniqueCacheName("noproducer-single");
-      const store = memoryStoreFor(threeTypeRegistry);
+      const store = new MemoryStore();
       const getSpy = mock.method(store, "get");
       const getManySpy = mock.method(store, "getMany");
       const cache = new Cache({
@@ -380,11 +372,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         const thrown = await expectRejection(() =>
           getCovered({ id: "extra:1" as string as `site:${string}` }),
         );
-        if (!(thrown instanceof NoProducerForResourceTypeError)) {
-          throw new Error(
-            `expected NoProducerForResourceTypeError, got: ${String(thrown)}`,
-          );
-        }
+        assert.ok(thrown instanceof NoProducerForResourceTypeError);
         expect(thrown.name).to.equal("NoProducerForResourceTypeError");
         expect(thrown.cacheName).to.equal(name);
         expect(thrown.resourceType).to.equal("extra_blob");
@@ -417,7 +405,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("wrapBulkProducer: an uncovered element rejects the call before any store read", async () => {
       const name = uniqueCacheName("noproducer-bulk");
-      const store = memoryStoreFor(registry);
+      const store = new MemoryStore();
       const getSpy = mock.method(store, "get");
       const getManySpy = mock.method(store, "getMany");
       const cache = new Cache({
@@ -444,11 +432,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
             { id: "biz:1" as string as `site:${string}` },
           ]),
         );
-        if (!(thrown instanceof NoProducerForResourceTypeError)) {
-          throw new Error(
-            `expected NoProducerForResourceTypeError, got: ${String(thrown)}`,
-          );
-        }
+        assert.ok(thrown instanceof NoProducerForResourceTypeError);
         expect(thrown.cacheName).to.equal(name);
         expect(thrown.resourceType).to.equal("business_slice");
         expect([...thrown.coveredResourceTypes]).to.deep.equal(["site_day"]);
@@ -474,7 +458,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     it("each wrapper serves only its own types; entries written by one (supplementals) are served by the other without producer contact", async () => {
       const name = uniqueCacheName("partial-wrappers");
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name,
         resourceTypes: registry,
       });
@@ -554,7 +538,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("single-branch: no matchesInput required; caches by the branch's hashInput", async () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("computing-single"),
         resourceTypes: registry,
       });
@@ -601,7 +585,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("multi-branch: dispatches by matchesInput; each branch mints and serves its own type's ids", async () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("computing-multi"),
         resourceTypes: registry,
       });
@@ -651,7 +635,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("an input that no covered branch's matchesInput accepts rejects", async () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("computing-unmatched"),
         resourceTypes: registry,
       });
@@ -677,10 +661,11 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
           .build(),
       });
       try {
-        const thrown = await expectRejection(() =>
-          compute({ kind: "neither", key: "x" } as unknown as BranchedInput),
+        await assert.rejects(
+          () =>
+            compute({ kind: "neither", key: "x" } as unknown as BranchedInput),
+          Error,
         );
-        expect(thrown).to.be.instanceOf(Error);
       } finally {
         await cache.close();
       }
@@ -689,7 +674,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     it("a branch whose hashInput mints an unclassifiable id throws UnclassifiableIdError naming the branch", async () => {
       const name = uniqueCacheName("computing-bad-hash");
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name,
         resourceTypes: registry,
       });
@@ -711,11 +696,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       });
       try {
         const thrown = await expectRejection(() => compute({ key: "a" }));
-        if (!(thrown instanceof UnclassifiableIdError)) {
-          throw new Error(
-            `expected UnclassifiableIdError, got: ${String(thrown)}`,
-          );
-        }
+        assert.ok(thrown instanceof UnclassifiableIdError);
         expect(thrown.cacheName).to.equal(name);
         expect(thrown.id).to.equal("unregistered:a");
         // §6.4: the mismatch error names the offending branch.
@@ -727,7 +708,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("a branch whose hashInput mints ANOTHER type's id (its own guard rejects it) throws", async () => {
       const cache = new Cache({
-        store: memoryStoreFor(registry),
+        store: new MemoryStore(),
         name: uniqueCacheName("computing-cross-type-hash"),
         resourceTypes: registry,
       });
@@ -749,8 +730,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
           .build(),
       });
       try {
-        const thrown = await expectRejection(() => compute({ key: "a" }));
-        expect(thrown).to.be.instanceOf(Error);
+        await assert.rejects(() => compute({ key: "a" }), Error);
       } finally {
         await cache.close();
       }

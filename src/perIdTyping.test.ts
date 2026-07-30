@@ -1,16 +1,14 @@
 import { expect } from "chai";
 import { describe, it } from "node:test";
+import type { IsEqual } from "type-fest";
 import type { JsonOf } from "type-party";
 import { jsonStringify } from "type-party/runtime/json.js";
 
-import {
-  expectType,
-  memoryStoreFor,
-  type Equal,
-} from "../test/v2AcceptanceHelpers.js";
+import { expectType } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import {
   idStartsWith,
+  MemoryStore,
   producerByIdType,
   resourceType,
   type ResourceTypes,
@@ -40,7 +38,7 @@ type StoriesCacheSpec = SpecOf<typeof storiesRegistry>;
 
 const makeStoriesCache = () =>
   new Cache({
-    store: memoryStoreFor(storiesRegistry),
+    store: new MemoryStore(),
     name: "per-id-typing-test",
     resourceTypes: storiesRegistry,
   });
@@ -48,14 +46,14 @@ const makeStoriesCache = () =>
 describe("Per-id content typing", () => {
   // --------------------------------------------------------------------
   // Pure type-level checks. Each `describe` below contains compile-time
-  // assertions (via `expectType<Equal<...>>()`) plus a tiny `it("compiles")`
+  // assertions (via `expectType<IsEqual<...>>()`) plus a tiny `it("compiles")`
   // marker so the suite shows up in test output. These run as no-ops at
   // runtime; their value is that they fail to *typecheck* if the public
   // surface of the per-id-typing machinery regresses.
   // --------------------------------------------------------------------
   describe("Type-level: SpecOf derivation matches the hand-written union", () => {
     expectType<
-      Equal<
+      IsEqual<
         StoriesCacheSpec,
         | CacheSpec<`story:${string}`, Story>
         | CacheSpec<`collection:${string}`, Story[]>
@@ -76,7 +74,7 @@ describe("Per-id content typing", () => {
         }),
       } satisfies ResourceTypes;
       const cache = new Cache({
-        store: memoryStoreFor(soleRegistry),
+        store: new MemoryStore(),
         name: "per-id-sole-type-test",
         resourceTypes: soleRegistry,
       });
@@ -105,9 +103,9 @@ describe("Per-id content typing", () => {
       if (isStory(id)) {
         // Inside the guarded block, `id` is narrowed to the `story:*`
         // constituent, NOT widened to `string`.
-        expectType<Equal<typeof id, `story:${string}`>>();
+        expectType<IsEqual<typeof id, `story:${string}`>>();
       } else {
-        expectType<Equal<typeof id, `collection:${string}`>>();
+        expectType<IsEqual<typeof id, `collection:${string}`>>();
       }
     });
 
@@ -157,15 +155,15 @@ describe("Per-id content typing", () => {
 
         // Compile-time: storyRes.usable.content is Story | undefined
         expectType<
-          Equal<typeof storyRes.usable, undefined> extends true
+          IsEqual<typeof storyRes.usable, undefined> extends true
             ? true
-            : Equal<NonNullable<typeof storyRes.usable>["content"], Story>
+            : IsEqual<NonNullable<typeof storyRes.usable>["content"], Story>
         >();
         // Compile-time: collectionRes.usable.content is Story[] | undefined
         expectType<
-          Equal<typeof collectionRes.usable, undefined> extends true
+          IsEqual<typeof collectionRes.usable, undefined> extends true
             ? true
-            : Equal<
+            : IsEqual<
                 NonNullable<typeof collectionRes.usable>["content"],
                 Story[]
               >
@@ -225,10 +223,10 @@ describe("Per-id content typing", () => {
         ] as const);
 
         expectType<
-          Equal<NonNullable<typeof storyRes.usable>["content"], Story>
+          IsEqual<NonNullable<typeof storyRes.usable>["content"], Story>
         >();
         expectType<
-          Equal<NonNullable<typeof collectionRes.usable>["content"], Story[]>
+          IsEqual<NonNullable<typeof collectionRes.usable>["content"], Story[]>
         >();
 
         expect(storyRes.usable?.content).to.deep.equal(story);
@@ -273,8 +271,8 @@ describe("Per-id content typing", () => {
         const collectionResult = await fetcher({ id: "collection:home" });
 
         // Compile-time: per-id content narrowing.
-        expectType<Equal<typeof storyResult.content, Story>>();
-        expectType<Equal<typeof collectionResult.content, Story[]>>();
+        expectType<IsEqual<typeof storyResult.content, Story>>();
+        expectType<IsEqual<typeof collectionResult.content, Story[]>>();
 
         expect(storyResult.content).to.deep.equal({
           id: "story:abc",
@@ -339,7 +337,7 @@ describe("Per-id content typing", () => {
           directives: {},
         });
         expectType<
-          Equal<NonNullable<typeof storyHit.usable>["content"], Story>
+          IsEqual<NonNullable<typeof storyHit.usable>["content"], Story>
         >();
         expect(storyHit.usable?.content).to.deep.equal(story1);
       } finally {
@@ -375,7 +373,7 @@ describe("Per-id content typing", () => {
 
     const makeBrandedCache = () =>
       new Cache({
-        store: memoryStoreFor(brandedRegistry),
+        store: new MemoryStore(),
         name: "per-id-branded-test",
         resourceTypes: brandedRegistry,
       });
@@ -383,8 +381,8 @@ describe("Per-id content typing", () => {
     // Compile-time only: confirm that the two branded ids are mutually
     // non-assignable. (If TS ever changed this, the rest of the per-id
     // narrowing for branded keys would be silently broken.)
-    expectType<Equal<StoryKey extends CollectionKey ? true : false, false>>();
-    expectType<Equal<CollectionKey extends StoryKey ? true : false, false>>();
+    expectType<IsEqual<StoryKey extends CollectionKey ? true : false, false>>();
+    expectType<IsEqual<CollectionKey extends StoryKey ? true : false, false>>();
 
     it("narrows the result content based on the branded request id", async () => {
       const cache = makeBrandedCache();
@@ -423,10 +421,10 @@ describe("Per-id content typing", () => {
 
         // Compile-time: branded id narrowing flows through to .content.
         expectType<
-          Equal<NonNullable<typeof storyRes.usable>["content"], Story>
+          IsEqual<NonNullable<typeof storyRes.usable>["content"], Story>
         >();
         expectType<
-          Equal<NonNullable<typeof collectionRes.usable>["content"], Story[]>
+          IsEqual<NonNullable<typeof collectionRes.usable>["content"], Story[]>
         >();
 
         expect(storyRes.usable?.content).to.deep.equal(story);
@@ -478,7 +476,7 @@ describe("Per-id content typing", () => {
           { collapseOverlappingRequestsTime: 0 },
           producerByIdType(cache.resourceTypes, {
             story: async (req) => {
-              expectType<Equal<typeof req.id, StoryKey>>();
+              expectType<IsEqual<typeof req.id, StoryKey>>();
               const parsed = JSON.parse(req.id) as { story: string };
               return {
                 content: {
@@ -489,7 +487,7 @@ describe("Per-id content typing", () => {
               };
             },
             collection: async (req) => {
-              expectType<Equal<typeof req.id, CollectionKey>>();
+              expectType<IsEqual<typeof req.id, CollectionKey>>();
               const parsed = JSON.parse(req.id) as { collection: string };
               return {
                 content: [
@@ -504,8 +502,8 @@ describe("Per-id content typing", () => {
         const storyResult = await fetcher({ id: storyId });
         const collectionResult = await fetcher({ id: collectionId });
 
-        expectType<Equal<typeof storyResult.content, Story>>();
-        expectType<Equal<typeof collectionResult.content, Story[]>>();
+        expectType<IsEqual<typeof storyResult.content, Story>>();
+        expectType<IsEqual<typeof collectionResult.content, Story[]>>();
 
         expect(storyResult.content).to.deep.equal({
           id: "abc",

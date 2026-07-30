@@ -1,5 +1,6 @@
 import { expect } from "chai";
 import fc from "fast-check";
+import assert from "node:assert/strict";
 import { describe, it, mock } from "node:test";
 import { setTimeout as delay } from "timers/promises";
 
@@ -11,7 +12,6 @@ import {
   captureChannels,
   expectRejection,
   expectSyncThrow,
-  memoryStoreFor,
   uniqueCacheName,
   type ChannelCapture,
   TWO_TYPE_REGISTRY,
@@ -55,11 +55,7 @@ const assertUnclassifiable = (
   thrown: unknown,
   expected: { cacheName: string; id: string },
 ): UnclassifiableIdError => {
-  if (!(thrown instanceof UnclassifiableIdError)) {
-    throw new Error(
-      `expected an UnclassifiableIdError, got: ${String(thrown)}`,
-    );
-  }
+  assert.ok(thrown instanceof UnclassifiableIdError);
   expect(thrown.name).to.equal("UnclassifiableIdError");
   expect(thrown.cacheName).to.equal(expected.cacheName);
   expect(thrown.id).to.equal(expected.id);
@@ -74,11 +70,7 @@ const assertAmbiguous = (
     matchedResourceTypes: readonly string[];
   },
 ): AmbiguousResourceTypeError => {
-  if (!(thrown instanceof AmbiguousResourceTypeError)) {
-    throw new Error(
-      `expected an AmbiguousResourceTypeError, got: ${String(thrown)}`,
-    );
-  }
+  assert.ok(thrown instanceof AmbiguousResourceTypeError);
   expect(thrown.name).to.equal("AmbiguousResourceTypeError");
   expect(thrown.cacheName).to.equal(expected.cacheName);
   expect(thrown.id).to.equal(expected.id);
@@ -112,7 +104,12 @@ const withCache = async <RT extends ResourceTypes, T>(
   }) => Promise<T>,
 ): Promise<T> => {
   const name = uniqueCacheName(label);
-  const store = memoryStoreFor(resourceTypes);
+  // The explicit type argument is load-bearing HERE and only here: under an
+  // unresolved `RT`, a bare `new MemoryStore()` infers the wide default
+  // `CacheSpec`, which is not assignable to the `MemoryStore<SpecOf<RT>>` the
+  // harness hands to `body`. At every concrete-registry site the bare form
+  // infers correctly on its own.
+  const store = new MemoryStore<SpecOf<RT>>();
   const cache = new Cache({ store, name, resourceTypes });
   try {
     return await body({ name, store, cache });
@@ -219,11 +216,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
           );
           // Both guards threw, so the cause aggregates both parse errors.
           const cause = thrown.cause;
-          if (!(cause instanceof AggregateError)) {
-            throw new Error(
-              `expected an AggregateError cause, got: ${String(cause)}`,
-            );
-          }
+          assert.ok(cause instanceof AggregateError);
           const errors: readonly unknown[] = cause.errors;
           expect(errors).to.have.lengthOf(2);
           errors.forEach((e) => expect(e).to.be.instanceOf(SyntaxError));
@@ -395,7 +388,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
     it("a closed cache still rejects unclassifiable ids with UnclassifiableIdError, not the closed error", async () => {
       const name = uniqueCacheName("closed-ordering");
       const cache = new Cache({
-        store: memoryStoreFor(TWO_TYPE_REGISTRY),
+        store: new MemoryStore(),
         name,
         resourceTypes: TWO_TYPE_REGISTRY,
         onGetAfterClose: "act-empty",
@@ -784,7 +777,7 @@ describe("a one-entry registry with a real guard rejects nonconforming ids", () 
   } satisfies ResourceTypes;
 
   it("throws UnclassifiableIdError before the store is touched, while the sugar's accept-everything form does not", async () => {
-    const store = memoryStoreFor(guardedRegistry);
+    const store = new MemoryStore();
     const getSpy = mock.method(store, "get");
     const name = uniqueCacheName("sole-guarded");
     const capture = captureChannels(name);

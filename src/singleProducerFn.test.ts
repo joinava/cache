@@ -6,7 +6,6 @@ import {
   captureChannels,
   expectProduceMessage,
   expectProducerPathFetch,
-  memoryStoreFor,
   uniqueCacheName,
   waitUntil,
   ACCEPT_ANY_REGISTRY,
@@ -85,7 +84,7 @@ const makeHarness = (label: string) => {
 const makeSoleHarness = (label: string) => {
   const name = uniqueCacheName(label);
   const cache = new Cache({
-    store: memoryStoreFor(ACCEPT_ANY_REGISTRY),
+    store: new MemoryStore(),
     name,
     resourceTypes: ACCEPT_ANY_REGISTRY,
   });
