@@ -246,6 +246,10 @@ misaligned pairing) fires exactly as it does today. Silently substituting an
 `Error` there would convert a contract violation into a per-request failure and
 hide the bug.
 
+> **Superseded in review — see §12.** The no-padding conclusion held, but
+> "leave holes for the wrapper to find" did not: the helper now rejects a count
+> mismatch in its own slice, in either direction.
+
 Throws at construction on an empty record — the check §6.3 put in
 `wrapProducer` moves here, which is now its only meaningful home.
 
@@ -600,3 +604,46 @@ the hashed-input wrappers' two internal uses. Four new runtime tests: cache-free
 single routing plus reuse against a later cache, cache-free bulk batch splitting,
 direct-drive `UnroutableIdError` for the uncovered and unclassifiable reasons, and
 the divergent-registry re-throw. No other contract changed.
+
+## 12. Post-implementation amendment: a count mismatch fails where it is dispatched
+
+Raised in review against §3.4's reassembly: the merge read `subResults[j]` and
+skipped the slot when it was `undefined`, which made `undefined` the "no result
+here" sentinel and left the diagnosis to `wrapBulkProducer`.
+
+**Is `undefined` a legal producer result?** No, and not accidentally.
+`RequestPairedProducerResult` distributes over the id union and every arm is an
+object type; the element union a bulk producer declares is
+`LooseResultFor<...> | ErrorType` with `ErrorType extends Error`. Neither arm
+admits `undefined`, so a hole is unambiguously a contract violation rather than a
+value. The sentinel was sound; it was merely resting on a premise it did not need.
+
+**Why change it anyway.** `wrapBulkProducer` only ever sees the *merged* batch, so
+the best error available to it is a batch total — "returned results for only 7 of
+10 requests" — with no way to name the sub-producer that broke its contract. The
+information needed to say which one is present only at the point of dispatch. So
+the helper now compares each sub-producer's result count against the slice it was
+given and throws, naming the resource type and both counts. A count comparison
+also needs no premise about which values are legal.
+
+**Both directions.** Over-return fails too, which is stricter than the wrapper —
+it still does not police a bare producer's over-return. Extras mean the sub-producer
+disagrees with the slice it was handed, so its positional pairing is no longer
+trustworthy — a stronger signal than a bare producer over-returning against a
+batch it received whole.
+
+**What does not change.** Per-type error *isolation* is untouched: a sub-producer
+that throws or rejects still settles only its own slots as `Error`s, and that path
+builds one element per request by construction, so it never trips the new check.
+Callers see the same outcome for a mismatch as before — a rejected invocation,
+nothing stored, `produce` reporting error — just raised earlier and named. The
+result array is now dense, so the filled-slots message ratified in §10 item 3 no
+longer has a producer that can reach it through the helper; the wrapper keeps it for
+bare producers, which remain able to return a short or explicitly-sparse array.
+
+**Test consequence.** The wrapper's own under-return check was covered *only*
+through the helper, which now intercepts it, so it would have gone silently
+untested. `diagnosticsChannels.test.ts` drives a bare producer for it; the
+cross-type blast-radius assertion that test also carried (a healthy sibling runs
+but does not get to deliver) moved to `bulkProducerByIdType.test.ts`, where the
+mismatch is now raised.
