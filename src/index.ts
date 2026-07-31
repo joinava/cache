@@ -16,7 +16,10 @@ export {
 } from "./Cache.js";
 export { default as MemoryStore } from "./stores/MemoryStore/MemoryStore.js";
 export { default as PostgresStore } from "./stores/PostgresStore/PostgresStore.js";
-export type { PostgresStoreSupportedParams } from "./stores/PostgresStore/PostgresStore.js";
+export type {
+  PostgresStoreCompatibleSpec,
+  PostgresStoreSupportedParams,
+} from "./stores/PostgresStore/PostgresStore.js";
 export {
   default as SqliteStore,
   type SqliteStoreCompatibleSpec,
@@ -35,7 +38,7 @@ export { default as collapsedTaskCreator } from "./utils/collapsedTaskCreator.js
 export { restoreInfinityInDirectives } from "./utils/normalization.js";
 export type { PartialConsumerRequest } from "./utils/requestPairedProducerUtils.js";
 export { naiveGetMany } from "./utils/utils.js";
-export type { JsonOf } from "type-party";
+export type { JsonOf, JSONWithUndefined } from "type-party";
 export { jsonParse, jsonStringify } from "type-party/runtime/json.js";
 export {
   NoProducerForResourceTypeError,
