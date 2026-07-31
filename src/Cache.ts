@@ -906,7 +906,7 @@ function calculateStoreFor(
  * longer checked against the registry (see `singleTypeCacheOptions`' docs).
  * Write the registry out by hand to get both back.
  */
-type SingleTypeRegistry<Id extends string, Content> = {
+export type SingleTypeRegistry<Id extends string, Content> = {
   readonly [name: string]: ResourceTypeSpec<Id, Content>;
 };
 
