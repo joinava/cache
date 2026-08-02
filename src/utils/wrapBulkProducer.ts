@@ -7,17 +7,16 @@ import {
   publishCacheProduce,
   type CacheFetchDisposition,
 } from "../diagnostics.js";
-import {
-  type IdOfResourceType,
-  type ResourceTypeName,
-  type ResourceTypes,
-  type SpecOf,
-} from "../types/00_ResourceTypes.js";
 import type {
   AnyParams,
   AnyValidators,
   EntryForId,
   Vary,
+  IdOfResourceType,
+  ResourceTypeName,
+  ResourceTypes,
+  SpecOf,
+  PartialReadonlyConsumerRequest,
 } from "../types/index.js";
 import {
   collapsedInvocationTaskCreator,
@@ -28,7 +27,6 @@ import {
   completeRequest,
   primaryNormalizedResultResourceFromRequestPairedProducerResult,
   requestPairedProducerResultToResources,
-  type PartialConsumerRequest,
 } from "./requestPairedProducerUtils.js";
 import {
   assertUnreachable,
@@ -92,7 +90,7 @@ type WrappedBulkProducerFn<
   Params extends AnyParams,
   ErrorType extends Error,
 > = <
-  const Reqs extends readonly PartialConsumerRequest<
+  const Reqs extends readonly PartialReadonlyConsumerRequest<
     Params,
     IdOfResourceType<RT[Covered]>
   >[],
@@ -199,39 +197,29 @@ export function wrapBulkProducer<
     logger = defaultLoggersByComponent["wrap-producer"],
   } = options;
 
-  // SAFETY: see LooseProducer in wrapProducer.ts.
-  const looseProducer = producer as unknown as LooseBulkProducer<
-    RT,
-    Validators,
-    Params,
-    ErrorType
-  >;
-
   const covered = coveredTypeSet(producer);
 
   const logTrace = logger.bind(null, "wrap-producer", "trace");
   const logWarning = logger.bind(null, "wrap-producer", "warn");
 
+  type CoveredRequest = Parameters<typeof producer>[0][number];
   type LooseRequest = LooseRequestFor<RT, Params>;
   type LooseResult = LooseResultFor<RT, Validators, Params>;
   type LooseEntry = LooseEntryFor<RT, Validators, Params>;
   type LooseLookupResult = LooseLookupResultFor<RT, Validators, Params>;
 
   const callProducerAndLog = async (
-    reqs: readonly LooseRequest[],
+    reqs: readonly CoveredRequest[],
   ): Promise<(LooseResult | ErrorType)[]> => {
     logTrace("contacting bulk producer", { reqs });
-    // A by-id-type producer routes ids itself and has no cache to name in its
-    // errors; this is where the cache's name is put back on (see
-    // rethrowUnroutableWithCacheName). Every other rejection passes through.
-    //
-    // try/catch rather than a `.catch()` on the returned promise, for the reason
-    // given in `wrapProducer`: a producer that fails SYNCHRONOUSLY never reaches
-    // a handler attached to its return value.
     let responses: (LooseResult | ErrorType)[];
     try {
-      responses = await looseProducer(reqs);
+      responses = await producer(reqs);
     } catch (error: unknown) {
+      // A by-id-type producer routes ids itself and may throw a special
+      // UnroutableIdError if the id can't be classified to a covered type.
+      // However, the producer has no cache to name in its errors, so this is
+      // where the cache's name is attached.
       rethrowUnroutableWithCacheName(cache.name, error);
     }
     logTrace("got responses from bulk producer", { responses });
@@ -255,38 +243,35 @@ export function wrapBulkProducer<
   // because `trigger` is in the key (it is not), but because their request
   // arrays differ, bypass carrying `maxAge: 0` directives.
   //
-  // The granularity is whole-batch, so two callers sharing a `story` sub-batch
-  // but differing on their `collection` parts share nothing. Finer, per-type
-  // collapsing is recoverable inside `bulkProducerByIdType` via the
-  // already-exported `collapsedTaskCreator`; it lives here at batch
-  // granularity because splitting it would relocate the complexity one layer
-  // down rather than remove it.
+  // TODO: Collapsing at this granularity isn't particularly useful -- two
+  // callers identical in the whole batch seems unlikely -- so we probably want
+  // to have the batch broken down and able to collapse with _multiple_ pending
+  // requests, with a producer request issued only for those resources that have
+  // no pending fetch.
   const collapsedCallProducerAndStore = collapsedInvocationTaskCreator(
     async (
       invocation: CollapsedInvocation,
-      reqs: readonly LooseRequest[],
       // Index-aligned with `reqs`; carried through so the produce message can
-      // attribute each element to its own type without re-classifying (the
-      // batch may now span resource types).
-      resourceTypes: readonly string[],
+      // attribute each element to its own type without re-classifying.
+      requestItems: readonly {
+        readonly req: CoveredRequest;
+        readonly resourceType: string;
+      }[],
     ) => {
       const start = performance.now();
 
       const publishProduce = (outcome: "success" | "error") => {
-        // O(batch-size), so it is especially worth not building when nobody is
-        // listening (`publish` would discard it, but the argument is evaluated
-        // regardless -- which is why every publish site tests for subscribers,
-        // not just this one).
+        // Building the arg for publishCacheProduce is O(batch-size), so it is
+        // especially worth not building when nobody is listening.
         if (!cacheProduceChannel.hasSubscribers) {
           return;
         }
         publishCacheProduce({
           cache: cache.name,
           trigger: invocation.trigger,
-          requests: reqs.map((req, i) => ({
-            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- index-aligned with `reqs`
-            resourceType: resourceTypes[i]!,
-            resourceId: req.id,
+          requests: requestItems.map((it) => ({
+            resourceType: it.resourceType,
+            resourceId: it.req.id,
           })),
           collapsedCallerCount: invocation.attachedCallerCount(),
           outcome,
@@ -294,6 +279,7 @@ export function wrapBulkProducer<
         });
       };
 
+      const reqs = requestItems.map((it) => it.req);
       let requestPairedProducerResults: (LooseResult | ErrorType)[];
       try {
         requestPairedProducerResults = await callProducerAndLog(reqs);
@@ -301,35 +287,26 @@ export function wrapBulkProducer<
         // given violated its contract, and the positional (result, request)
         // pairing is no longer trustworthy -- a dropped middle element would
         // silently pair later results with the wrong requests. So nothing is
-        // stored and the WHOLE invocation fails: these throws reject it,
+        // stored and the WHOLE invocation fails: this throw rejects it,
         // settling every waiting element's fetch as `producer-error` via the
         // group's rejection handler.
         //
-        // Over-return is checked separately rather than folded into the count
-        // below, because "how many requests were answered" is the wrong question
-        // for it: every request has a result, and the extras have no request to
-        // pair with at all, so that check would report the batch fully answered.
-        if (requestPairedProducerResults.length > reqs.length) {
+        // The `undefined` test catches a sparse array or an explicit
+        // `undefined` element hiding behind a correct `length`: `undefined` is
+        // never a legal result -- every `RequestPairedProducerResult` is an
+        // object and every `ErrorType` an `Error` -- so it is unambiguously a
+        // contract violation, not a value a producer meant to return.
+        if (
+          requestPairedProducerResults.length !== reqs.length ||
+          requestPairedProducerResults.some((r) => r === undefined)
+        ) {
+          const defined = requestPairedProducerResults.filter(
+            (r) => r !== undefined,
+          ).length;
           throw new Error(
-            `wrapBulkProducer: producer returned ${String(requestPairedProducerResults.length)} results for ${String(reqs.length)} requests (the extra results have no request to pair with)`,
-          );
-        }
-
-        // Tests FILLED slots rather than the array's `length`, which is not the
-        // same thing: a producer that hands back a sparse array, or one holding
-        // an explicit `undefined`, has the right `length` and still answered
-        // nothing at those positions. `undefined` is never a legal result --
-        // every `RequestPairedProducerResult` is an object and every `ErrorType`
-        // an `Error` -- so a hole is unambiguously a contract violation and
-        // never a value a producer meant to return. `every` short-circuits on
-        // the first hole, and the count for the message is only worth walking
-        // the batch for once we know it will be reported.
-        const isAnswered = (_: unknown, i: number) =>
-          requestPairedProducerResults[i] !== undefined;
-        if (!reqs.every(isAnswered)) {
-          const answered = reqs.filter(isAnswered).length;
-          throw new Error(
-            `wrapBulkProducer: producer returned results for only ${String(answered)} of ${String(reqs.length)} requests (every request must receive a result or an Error element)`,
+            `wrapBulkProducer: producer returned ${String(defined)} ` +
+              `results for ${String(reqs.length)} requests. Every request must receive exactly ` +
+              `one result or an Error element.`,
           );
         }
       } catch (error) {
@@ -372,14 +349,14 @@ export function wrapBulkProducer<
     },
     collapseOverlappingRequestsTime * 1000,
     // See the COLLAPSE GRANULARITY note above.
-    ([reqs]) => stableStringify(reqs),
+    ([requestItems]) => stableStringify(requestItems.map((it) => it.req)),
   );
 
   const normalizeVaryBound = (vary: Vary<Params>) =>
     normalizeVary(cache.normalizeParamName, cache.normalizeParamValue, vary);
 
   const wrappedBulkProducer = async function (
-    reqs: readonly PartialConsumerRequest<Params, SpecOf<RT>["id"]>[],
+    reqs: readonly PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>[],
     callOptions?: { signal?: AbortSignal },
   ): Promise<(LooseEntry | ErrorType)[]> {
     const signal = callOptions?.signal;
@@ -401,25 +378,55 @@ export function wrapBulkProducer<
       req: LooseRequest;
       resourceType: string;
       directivesImpliedBypass: boolean;
-      /** This element's own if-error fallback, once the cache read has run. */
-      usableIfError?: LooseEntry;
       /**
-       * Set to true when this element's fetch message has been published, so
-       * each logical request settles on the fetch channel exactly once (its
-       * answer and an abort can race).
+       * Publish the element's fetch message exactly once (its answer and an
+       * abort can race).
        */
-      settled: boolean;
+      settleFetchOnce: (
+        collapsed: boolean,
+        disposition: CacheFetchDisposition,
+      ) => void;
+      /**
+       * Mark the element's fetch settled WITHOUT publishing, for when the call
+       * abandons the element mid-flight (cache-read failure with `"throw"`): no
+       * disposition truthfully describes such an element, and the invocation's
+       * later settlement must not publish one for an answer this call never
+       * delivered.
+       */
+      suppressFetch: () => void;
     };
+
     const items: RequestItem[] = reqs.map((req, index) => {
-      const finalRequest = completeRequest(req) as LooseRequest;
+      const finalRequest = completeRequest(req);
+      const resourceType = cache.classify(finalRequest.id);
+      let fetchSettled = false;
+
       return {
         index,
         req: finalRequest,
-        resourceType: cache.classify(finalRequest.id),
+        resourceType,
         directivesImpliedBypass: isRequestingCacheBypass(
           finalRequest.directives,
         ),
-        settled: false,
+        settleFetchOnce: (
+          collapsed: boolean,
+          disposition: CacheFetchDisposition,
+        ) => {
+          if (fetchSettled) {
+            return;
+          }
+          fetchSettled = true;
+          publishCacheFetch({
+            cache: cache.name,
+            resourceType: resourceType,
+            resourceId: req.id,
+            collapsed,
+            ...disposition,
+          });
+        },
+        suppressFetch: () => {
+          fetchSettled = true;
+        },
       };
     });
 
@@ -438,24 +445,6 @@ export function wrapBulkProducer<
       });
     }
 
-    const settleFetch = (
-      item: RequestItem,
-      collapsed: boolean,
-      disposition: CacheFetchDisposition,
-    ) => {
-      if (item.settled) {
-        return;
-      }
-      item.settled = true;
-      publishCacheFetch({
-        cache: cache.name,
-        resourceType: item.resourceType,
-        resourceId: item.req.id,
-        collapsed,
-        ...disposition,
-      });
-    };
-
     // Every abort-caused rejection settles the still-unsettled elements as
     // `aborted` (elements whose answers arrived before the signal fired keep
     // their real dispositions).
@@ -463,7 +452,7 @@ export function wrapBulkProducer<
       waiting: readonly { item: RequestItem; rode: boolean }[],
     ): never => {
       waiting.forEach(({ item, rode }) => {
-        settleFetch(item, rode, {
+        item.settleFetchOnce(rode, {
           disposition: "aborted",
           directivesImpliedBypass: item.directivesImpliedBypass,
         });
@@ -494,6 +483,19 @@ export function wrapBulkProducer<
       handled: Promise<(LooseEntry | ErrorType)[]>;
     };
 
+    /**
+     * One element of an {@link attachGroups} batch: the request item plus the
+     * element's own serve-stale-if-error fallback from its cache read, when it
+     * had one. The fallback travels alongside the item (rather than on it)
+     * because it is a property of the READ RESULT, not of the request: only the
+     * miss group can carry one -- bypass elements skip the read entirely and
+     * revalidation elements were already served.
+     */
+    type ProducerBoundItem = {
+      item: RequestItem;
+      usableIfError?: LooseEntry | undefined;
+    };
+
     // Attaches a set of request items to a collapsed producer invocation:
     // `handled` settles each element's fetch message when the invocation
     // settles (unless an abort settled it first) and yields the per-item
@@ -501,51 +503,45 @@ export function wrapBulkProducer<
     // COLLAPSE GRANULARITY note above); it returns a list so its callers can
     // concatenate their trigger classes, and so an empty set attaches nothing.
     const attachGroups = (
-      groupItems: readonly RequestItem[],
+      groupItems: readonly ProducerBoundItem[],
       trigger: CollapsedInvocation["trigger"],
     ): AttachedGroup[] => {
       if (groupItems.length === 0) {
         return [];
       }
 
-      const attached = collapsedCallProducerAndStore(
-        trigger,
-        groupItems.map((item) => item.req),
-        groupItems.map((item) => item.resourceType),
-      );
+      const bareItems = groupItems.map(({ item }) => item);
+      const attached = collapsedCallProducerAndStore(trigger, bareItems);
 
-      const handled: Promise<(LooseEntry | ErrorType)[]> =
-        attached.promise.then(
-          (producerResults) =>
-            groupItems.map((item, i) => {
-              // Non-null assertion is safe: the invocation task validates
-              // result completeness before resolving (an under-return
-              // rejects the whole invocation, handled below), and riders
-              // share the initiator's exact request batch (it's the
-              // collapse key).
-              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-              const producerResult = producerResults[i]!;
-
+      const handled = attached.promise.then(
+        (producerResults): (LooseEntry | ErrorType)[] =>
+          // zip is safe: the invocation task validates result completeness
+          // before resolving (an under-return rejects the whole invocation,
+          // handled below)
+          zip2(groupItems, producerResults).map(
+            ([{ item, usableIfError }, producerResult], i) => {
               if (producerResult instanceof Error) {
-                const fallback = item.usableIfError;
+                const fallback = usableIfError;
                 if (fallback) {
                   logWarning(PRODUCER_ERROR_FALLBACK_WARNING, {
                     error: producerResult,
                     entry: fallback,
                   });
-                  settleFetch(item, attached.rode, {
+                  item.settleFetchOnce(attached.rode, {
                     disposition: "served-stale-after-error",
+                    vary: fallback.vary,
                   });
                   return fallback;
+                } else {
+                  item.settleFetchOnce(attached.rode, {
+                    disposition: "producer-error",
+                    directivesImpliedBypass: item.directivesImpliedBypass,
+                  });
+                  return producerResult;
                 }
-                settleFetch(item, attached.rode, {
-                  disposition: "producer-error",
-                  directivesImpliedBypass: item.directivesImpliedBypass,
-                });
-                return producerResult;
               }
 
-              settleFetch(item, attached.rode, {
+              item.settleFetchOnce(attached.rode, {
                 disposition: "served-from-producer",
                 directivesImpliedBypass: item.directivesImpliedBypass,
               });
@@ -555,29 +551,33 @@ export function wrapBulkProducer<
                 Params,
                 SpecOf<RT>["id"]
               >(normalizeVaryBound, producerResult, item.req.id);
-            }),
-          (error: unknown) => {
-            // The bulk producer itself rejected (it's supposed to return
-            // Error elements for per-request failures instead). There's no
-            // way to handle this per the wrapped function's contract except
-            // rethrowing (we don't know the thrown value is an `ErrorType`).
-            groupItems.forEach((item) => {
-              settleFetch(item, attached.rode, {
-                disposition: "producer-error",
-                directivesImpliedBypass: item.directivesImpliedBypass,
-              });
+            },
+          ),
+        (error: unknown) => {
+          // The bulk producer itself rejected (it's supposed to return
+          // Error elements for per-request failures instead). There's no
+          // way to handle this per the wrapped function's contract except
+          // rethrowing (we don't know the thrown value is an `ErrorType`).
+          groupItems.forEach(({ item }) => {
+            item.settleFetchOnce(attached.rode, {
+              disposition: "producer-error",
+              directivesImpliedBypass: item.directivesImpliedBypass,
             });
-            throw error;
-          },
-        );
+          });
+          throw error;
+        },
+      );
 
-      return [{ items: groupItems, rode: attached.rode, handled }];
+      return [{ items: bareItems, rode: attached.rode, handled }];
     };
 
     // Kick off the bypass requests' producer calls immediately (in parallel
     // with the cache read below): their directives guarantee producer
     // contact, so there's nothing to read first.
-    const bypassGroups = attachGroups(bypassItems, "bypass");
+    const bypassGroups = attachGroups(
+      bypassItems.map((item) => ({ item })),
+      "bypass",
+    );
     // Insurance against unhandled rejections if this call throws before
     // awaiting the groups (e.g., a cache-read failure below): observing the
     // rejection here doesn't consume it for the real await.
@@ -622,7 +622,7 @@ export function wrapBulkProducer<
                   // never received.
                   bypassGroups.forEach((group) => {
                     group.items.forEach((item) => {
-                      item.settled = true;
+                      item.suppressFetch();
                     });
                   });
                   throw e;
@@ -630,8 +630,8 @@ export function wrapBulkProducer<
                   // Pretend the cache returned no results so that we'll fall
                   // through to the producers.
                   return readItems.map(
-                    () => ({ validatable: [] }) satisfies LooseLookupResult,
-                  ) as LooseLookupResult[];
+                    (): LooseLookupResult => ({ validatable: [] }),
+                  );
                 default:
                   assertUnreachable(onCacheReadFailure);
               }
@@ -665,7 +665,7 @@ export function wrapBulkProducer<
         if (!entry) {
           return [];
         }
-        settleFetch(item, false, { disposition });
+        item.settleFetchOnce(false, { disposition, vary: entry.vary });
         orderedResults[item.index] = entry;
         return [item];
       });
@@ -682,16 +682,11 @@ export function wrapBulkProducer<
       ([, res]) => !(res.usable ?? res.usableWhileRevalidate),
     );
 
-    // Each element's own if-error fallback rides on the item, so the group
-    // machinery reads it without a parallel map.
-    itemsNeedingProducerNow.forEach(([item, res]) => {
-      if (res.usableIfError) {
-        item.usableIfError = res.usableIfError;
-      }
-    });
-
     const missGroups = attachGroups(
-      itemsNeedingProducerNow.map(([item]) => item),
+      itemsNeedingProducerNow.map(([item, res]) => ({
+        item,
+        usableIfError: res.usableIfError,
+      })),
       "miss",
     );
 
@@ -700,7 +695,10 @@ export function wrapBulkProducer<
     // background work. (These items' fetch messages already settled above, so
     // the shared group machinery publishes nothing for them.)
     if (revalidateItems.length > 0) {
-      attachGroups(revalidateItems, "revalidation").forEach((group) => {
+      attachGroups(
+        revalidateItems.map((item) => ({ item })),
+        "revalidation",
+      ).forEach((group) => {
         group.handled.catch(() => {
           logWarning(
             "error asynchronously requesting refreshed content from bulk producer",

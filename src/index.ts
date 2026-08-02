@@ -37,7 +37,6 @@ export {
 export * from "./types/index.js";
 export { default as collapsedTaskCreator } from "./utils/collapsedTaskCreator.js";
 export { restoreInfinityInDirectives } from "./utils/normalization.js";
-export type { PartialConsumerRequest } from "./utils/requestPairedProducerUtils.js";
 export { naiveGetMany } from "./utils/utils.js";
 export type { JsonOf, JSONWithUndefined } from "type-party";
 export { jsonParse, jsonStringify } from "type-party/runtime/json.js";
@@ -91,6 +90,8 @@ export {
   CACHE_READ_CHANNEL_NAME,
   cacheReadChannel,
   type CacheReadFound,
+  type CacheReadFoundWithEntry,
+  type CacheReadOutcome,
   type CacheReadMessage,
   CACHE_STORE_ENTRY_CHANNEL_NAME,
   cacheStoreEntryChannel,

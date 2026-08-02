@@ -16,8 +16,8 @@ export type { AnyValidators } from "./02_Validators.js";
 export type {
   ConsumerDirectives,
   ConsumerMaxStale,
-  ConsumerRequest,
   ReadonlyConsumerRequest,
+  PartialReadonlyConsumerRequest,
 } from "./03_ConsumerRequest.js";
 export type {
   ProducerDirectives,

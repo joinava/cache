@@ -4,28 +4,21 @@ import type {
   AnyParams,
   AnyValidators,
   ConsumerDirectives,
-  ConsumerRequest,
+  ReadonlyConsumerRequest,
   NormalizedVary,
   ProducerResultResource,
   RequestPairedProducerResult,
   Vary,
+  PartialReadonlyConsumerRequest,
 } from "../types/index.js";
-import type { MakeKeysOptional } from "../types/utils.js";
 import { normalizeProducerResultResource } from "./normalization.js";
-
-export type PartialConsumerRequest<
-  Params extends AnyParams,
-  Id extends string,
-> = ReadonlyDeep<
-  MakeKeysOptional<ConsumerRequest<Params, Id>, "directives" | "params">
->;
 
 /**
  * Replace undefined params + directives w/ empty objects
  */
 export function completeRequest<Params extends AnyParams, Id extends string>(
-  req: PartialConsumerRequest<Params, Id>,
-): ReadonlyDeep<ConsumerRequest<Params, Id>> {
+  req: PartialReadonlyConsumerRequest<Params, Id>,
+): ReadonlyConsumerRequest<Params, Id> {
   const {
     id,
     params = {} satisfies Partial<Params> as ReadonlyDeep<Partial<Params>>,

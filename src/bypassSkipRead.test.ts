@@ -108,6 +108,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
           resourceType: "site_day",
           resourceId: "site:a",
           found: "usable",
+          vary: {},
         },
       ]);
     } finally {

@@ -17,8 +17,6 @@
  *
  * @module
  */
-import type { ReadonlyDeep } from "type-fest";
-
 import type {
   IdOfResourceType,
   ResourceTypeName,
@@ -29,7 +27,7 @@ import { resourceTypesEntries } from "../resourceTypeClassification.js";
 import type {
   AnyParams,
   AnyValidators,
-  ConsumerRequest,
+  ReadonlyConsumerRequest,
   RequestPairedProducerResult,
 } from "../types/index.js";
 import { resolveCoveredSubProducer } from "./producerByIdType.js";
@@ -68,9 +66,7 @@ export type BulkResourceTypeProducer<
   Params extends AnyParams,
   ErrorType extends Error,
 > = (
-  reqs: readonly ReadonlyDeep<
-    ConsumerRequest<Params, IdOfResourceType<RT[K]>>
-  >[],
+  reqs: readonly ReadonlyConsumerRequest<Params, IdOfResourceType<RT[K]>>[],
 ) => Promise<
   (
     | RequestPairedProducerResult<

@@ -1,9 +1,10 @@
 import fc from "fast-check";
 import type tag from "tagged-tag";
+import type { ReadonlyDeep } from "type-fest";
 import type { AnyParams } from "../../src/types/01_Params.js";
 import type {
   ConsumerDirectives,
-  ConsumerRequest,
+  ReadonlyConsumerRequest,
 } from "../../src/types/03_ConsumerRequest.js";
 import { normalizeConsumerMaxStale } from "../../src/utils/normalization.js";
 
@@ -46,9 +47,9 @@ export const ConsumerRequestArb = <
   Params extends AnyParams = AnyParams,
   Id extends string = string,
 >(
-  paramsArb: fc.Arbitrary<Params>,
+  paramsArb: fc.Arbitrary<ReadonlyDeep<Partial<Params>>>,
   idArb: fc.Arbitrary<Id>,
-): fc.Arbitrary<ConsumerRequest<Params, Id>> => {
+): fc.Arbitrary<ReadonlyConsumerRequest<Params, Id>> => {
   return fc.record({
     id: idArb,
     params: paramsArb,

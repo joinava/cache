@@ -228,7 +228,11 @@ export const sortByResourceId = <T extends { resourceId: string }>(
 /**
  * Asserts a fetch message on the producer-path branch of the discriminated
  * union, where `directivesImpliedBypass` is REQUIRED. The deep-equal is over
- * the whole message, so extra/missing fields fail too.
+ * the whole message, so extra/missing fields fail too -- which is what pins
+ * `vary` ABSENT across this whole branch, `served-from-producer` included
+ * (it served an entry, but not out of a slot this request read; see
+ * `CacheFetchDisposition`). `expected` never carries the key, so a published
+ * `vary: {}` reads as an extra field and fails here.
  */
 export function expectProducerPathFetch(
   msg: CacheFetchMessage | undefined,
@@ -251,6 +255,13 @@ export function expectProducerPathFetch(
  * omit the key entirely rather than publishing it as `false` -- which the
  * whole-message deep-equal below already enforces, since `expected` never
  * carries the key.
+ *
+ * `vary` is the opposite: REQUIRED here, because every disposition on this
+ * branch was served out of an `(id, vary)` slot. It is not defaulted to `{}`
+ * -- the empty slot is the one a non-varying producer writes, so letting a
+ * caller omit it would make "the non-varying case" and "the caller didn't
+ * think about vary" indistinguishable, which is exactly the conflation the
+ * field exists to prevent.
  */
 export function expectCachePathFetch(
   msg: CacheFetchMessage | undefined,
@@ -263,6 +274,7 @@ export function expectCachePathFetch(
       | "served-from-cache"
       | "served-stale-while-revalidating"
       | "served-stale-after-error";
+    vary: Record<string, unknown>;
   },
 ): void {
   assert.ok(msg, "expected a cache-path fetch message, got none");
