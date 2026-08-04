@@ -519,7 +519,7 @@ export function wrapBulkProducer<
           // before resolving (an under-return rejects the whole invocation,
           // handled below)
           zip2(groupItems, producerResults).map(
-            ([{ item, usableIfError }, producerResult], i) => {
+            ([{ item, usableIfError }, producerResult]) => {
               if (producerResult instanceof Error) {
                 const fallback = usableIfError;
                 if (fallback) {

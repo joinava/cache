@@ -1,4 +1,3 @@
-import type { ReadonlyDeep } from "type-fest";
 import type { CacheSpec, ContentForId } from "./00_CacheSpec.js";
 import type { AnyParams } from "./01_Params.js";
 import type { AnyValidators } from "./02_Validators.js";
