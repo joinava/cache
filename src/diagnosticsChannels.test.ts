@@ -196,6 +196,7 @@ describe("diagnostics channels (§6.5)", () => {
             resourceType: "site_day",
             resourceId: "site:a",
             found: "usable",
+            vary: {},
           },
         ]);
       } finally {
@@ -228,6 +229,7 @@ describe("diagnostics channels (§6.5)", () => {
             resourceType: "site_day",
             resourceId: "site:a",
             found: "usable-while-revalidate",
+            vary: {},
           },
         ]);
       } finally {
@@ -260,6 +262,7 @@ describe("diagnostics channels (§6.5)", () => {
             resourceType: "site_day",
             resourceId: "site:a",
             found: "usable-if-error",
+            vary: {},
           },
         ]);
       } finally {
@@ -331,12 +334,14 @@ describe("diagnostics channels (§6.5)", () => {
             resourceType: "site_day",
             resourceId: "site:a",
             found: "usable",
+            vary: {},
           },
           {
             cache: name,
             resourceType: "site_day",
             resourceId: "site:a",
             found: "usable",
+            vary: {},
           },
         ]);
       } finally {
@@ -519,6 +524,7 @@ describe("diagnostics channels (§6.5)", () => {
           resourceId: "site:a",
           disposition: "served-from-cache",
           collapsed: false,
+          vary: {},
         });
         expect(capture.read).to.deep.equal([
           {
@@ -526,6 +532,7 @@ describe("diagnostics channels (§6.5)", () => {
             resourceType: "site_day",
             resourceId: "site:a",
             found: "usable",
+            vary: {},
           },
         ]);
         expect(capture.produce).to.deep.equal([]);
@@ -666,6 +673,7 @@ describe("diagnostics channels (§6.5)", () => {
           resourceId: "site:a",
           disposition: "served-stale-while-revalidating",
           collapsed: false,
+          vary: {},
         });
         expect(capture.read).to.deep.equal([
           {
@@ -673,6 +681,7 @@ describe("diagnostics channels (§6.5)", () => {
             resourceType: "site_day",
             resourceId: "site:a",
             found: "usable-while-revalidate",
+            vary: {},
           },
         ]);
 
@@ -761,6 +770,7 @@ describe("diagnostics channels (§6.5)", () => {
           resourceId: "site:a",
           disposition: "served-stale-while-revalidating",
           collapsed: false,
+          vary: {},
         });
       } finally {
         capture.stop();
@@ -797,6 +807,7 @@ describe("diagnostics channels (§6.5)", () => {
             resourceType: "site_day",
             resourceId: "site:a",
             found: "usable-if-error",
+            vary: {},
           },
         ]);
         expect(capture.fetch).to.have.lengthOf(1);
@@ -806,6 +817,7 @@ describe("diagnostics channels (§6.5)", () => {
           resourceId: "site:a",
           disposition: "served-stale-after-error",
           collapsed: false,
+          vary: {},
         });
         expectProduceMessage(capture.produce[0], {
           cache: name,
@@ -1125,6 +1137,7 @@ describe("diagnostics channels (§6.5)", () => {
             resourceId: "site:swr",
             disposition: "served-stale-while-revalidating",
             collapsed: false,
+            vary: {},
           });
         });
         expectProduceMessage(capture.produce[0], {
@@ -1317,6 +1330,390 @@ describe("diagnostics channels (§6.5)", () => {
           { resourceType: "visits", resourceId: "no-structure-at-all" },
         ]);
         expect(capture.storeEntry[0]?.resourceType).to.equal("visits");
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+  });
+
+  // The rest of the suite runs against non-varying producers, where every
+  // variant's vary is `{}` -- which cannot tell a publisher that reports the
+  // real vary apart from one that hardcodes `{}`. These cases use a producer
+  // that actually varies, so the variant is observable, and check the two
+  // things `{}` hides: that the value reported is the SERVED ENTRY's vary
+  // (not the request's params, which are a superset), and that "no entry"
+  // omits the key instead of falling back to `{}` -- which identifies a real
+  // variant.
+  describe("vary: per-variant attribution on read and fetch", () => {
+    /** Two variants of ONE id, plus a param neither variant varies on. */
+    const frVary = { locale: "fr" };
+    const enVary = { locale: "en" };
+    /** A request that matches the `fr` variant, with one extra param. */
+    const frRequestParams = { locale: "fr", tracking: "req-1" };
+
+    it("read reports the SELECTED variant's vary, so two variants of one id are distinguishable", async () => {
+      const { name, cache } = makeHarness("vary-read-variants");
+      await cache.store([
+        {
+          id: "site:a",
+          vary: frVary,
+          content: "bonjour",
+          directives: freshFor100,
+        },
+        {
+          id: "site:a",
+          vary: enVary,
+          content: "hello",
+          directives: freshFor100,
+        },
+      ]);
+      const capture = captureChannels(name);
+      try {
+        const fr = await cache.get({
+          id: "site:a",
+          params: { locale: "fr" },
+          directives: {},
+        });
+        const en = await cache.get({
+          id: "site:a",
+          params: { locale: "en" },
+          directives: {},
+        });
+        // Self-check of the fixture: two distinct variants really do exist.
+        expect(fr.usable?.content).to.equal("bonjour");
+        expect(en.usable?.content).to.equal("hello");
+
+        // Same cache, same id, same `found` -- only `vary` tells the two
+        // lookups apart, which is the whole point of the field.
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable",
+            vary: frVary,
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable",
+            vary: enVary,
+          },
+        ]);
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("the vary reported is the served entry's, NOT the request's params (which are a superset of it)", async () => {
+      const { name, cache } = makeHarness("vary-is-entrys-not-requests");
+      await cache.store([
+        {
+          id: "site:a",
+          vary: frVary,
+          content: "bonjour",
+          directives: freshFor100,
+        },
+      ]);
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => ({
+        content: "never",
+        directives: freshFor100,
+      }));
+      const getSite = wrapProducer(
+        { cache },
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
+      );
+      try {
+        // `tracking` is a param the stored entry does not vary on, so the
+        // entry still matches -- and reporting the request's params here
+        // would produce a key no store-entry message will ever carry.
+        const res = await getSite({ id: "site:a", params: frRequestParams });
+        expect(res.content).to.equal("bonjour");
+        expect(producer.mock.callCount()).to.equal(0);
+
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable",
+            vary: frVary,
+          },
+        ]);
+        expectCachePathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "served-from-cache",
+          collapsed: false,
+          vary: frVary,
+        });
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("getMany reports each request's own selected variant", async () => {
+      const { name, cache } = makeHarness("vary-getmany-variants");
+      await cache.store([
+        {
+          id: "site:a",
+          vary: frVary,
+          content: "bonjour",
+          directives: freshFor100,
+        },
+        {
+          id: "site:a",
+          vary: enVary,
+          content: "hello",
+          directives: freshFor100,
+        },
+      ]);
+      const capture = captureChannels(name);
+      try {
+        await cache.getMany([
+          { id: "site:a", params: { locale: "en" }, directives: {} },
+          { id: "site:a", params: { locale: "fr" }, directives: {} },
+          // No matching variant: `found: "none"`, and so no variant to identify.
+          { id: "site:a", params: { locale: "de" }, directives: {} },
+        ]);
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable",
+            vary: enVary,
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "usable",
+            vary: frVary,
+          },
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "none",
+          },
+        ]);
+        expect(capture.read[2]).to.not.have.property("vary");
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("stale dispositions report the STALE entry's variant: served-stale-while-revalidating and served-stale-after-error", async () => {
+      const { name, cache } = makeHarness("vary-stale-dispositions");
+      await cache.store([
+        {
+          id: "site:swr",
+          vary: frVary,
+          content: "stale-fr",
+          directives: swrWindowDirectives,
+          date: secondsAgo(1),
+        },
+        {
+          id: "site:if-error",
+          vary: enVary,
+          content: "stale-en",
+          directives: ifErrorWindowDirectives,
+          date: secondsAgo(1),
+        },
+      ]);
+      const capture = captureChannels(name);
+      const producer = mock.fn(async () => {
+        await delay(10);
+        throw new Error("origin down");
+      });
+      const getSite = wrapProducer(
+        { cache },
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
+      );
+      try {
+        const swr = await getSite({ id: "site:swr", params: frRequestParams });
+        expect(swr.content).to.equal("stale-fr");
+        expectCachePathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:swr",
+          disposition: "served-stale-while-revalidating",
+          collapsed: false,
+          vary: frVary,
+        });
+
+        const ifError = await getSite({
+          id: "site:if-error",
+          params: { locale: "en" },
+        });
+        expect(ifError.content).to.equal("stale-en");
+        expectCachePathFetch(capture.fetch[1], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:if-error",
+          disposition: "served-stale-after-error",
+          collapsed: false,
+          vary: enVary,
+        });
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("a varying producer's serves join to its stores on (resourceId, vary) -- the correlation the field exists for", async () => {
+      const { name, cache } = makeHarness("vary-store-correlation");
+      const capture = captureChannels(name);
+      const producer = mock.fn(
+        async (req: { readonly params: Readonly<Record<string, unknown>> }) => {
+          const locale = req.params["locale"] === "fr" ? "fr" : "en";
+          return {
+            content: `content-${locale}`,
+            directives: freshFor100,
+            vary: { locale },
+          };
+        },
+      );
+      const getSite = wrapProducer(
+        { cache },
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
+      );
+      try {
+        // One miss per locale, then two more serves out of the `fr` variant.
+        await getSite({ id: "site:a", params: { locale: "fr" } });
+        await getSite({ id: "site:a", params: { locale: "en" } });
+        await waitUntil(
+          () => capture.storeEntry.length === 2,
+          "both variants stored",
+        );
+        await getSite({ id: "site:a", params: frRequestParams });
+        await getSite({ id: "site:a", params: { locale: "fr" } });
+        expect(producer.mock.callCount()).to.equal(2);
+
+        // The stores landed in two distinct variants under ONE id.
+        expect(capture.storeEntry.map((m) => m.vary)).to.deep.equal([
+          frVary,
+          enVary,
+        ]);
+
+        // The two misses served from the producer, so they identify no variant...
+        const [frMiss, enMiss, ...hits] = capture.fetch;
+        [frMiss, enMiss].forEach((message) => {
+          expectProducerPathFetch(message, {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            disposition: "served-from-producer",
+            directivesImpliedBypass: false,
+            collapsed: false,
+          });
+          expect(message).to.not.have.property("vary");
+        });
+
+        // ...while both later hits credit the `fr` variant specifically. Keyed on
+        // resourceId alone these two would be indistinguishable from serves of
+        // the `en` value.
+        expect(hits).to.have.lengthOf(2);
+        hits.forEach((message) => {
+          expectCachePathFetch(message, {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            disposition: "served-from-cache",
+            collapsed: false,
+            vary: frVary,
+          });
+        });
+
+        // The join a subscriber would actually perform: every cache-served
+        // fetch matches a store-entry message on (resourceId, vary).
+        const storedSlots = capture.storeEntry.map(
+          (m) => `${m.resourceId}|${JSON.stringify(m.vary)}`,
+        );
+        hits.forEach((message) => {
+          expect(storedSlots).to.include(
+            `${message.resourceId}|${JSON.stringify(message.vary)}`,
+          );
+        });
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("dispositions with no served variant OMIT the key rather than reporting `{}` (a real variant)", async () => {
+      const { name, cache } = makeHarness("vary-absent-not-empty");
+      const capture = captureChannels(name);
+      const producerError = new Error("origin down");
+      const producer = mock.fn(async () => {
+        throw producerError;
+      });
+      const getSite = wrapProducer(
+        { cache },
+        producerByIdType(cache.resourceTypes, { site_day: producer }),
+      );
+      const controller = new AbortController();
+      controller.abort(new Error("pre-aborted"));
+      try {
+        // producer-error: the read found nothing and the producer failed.
+        const thrown = await expectRejection(() =>
+          getSite({ id: "site:a", params: { locale: "fr" } }),
+        );
+        expect(thrown).to.equal(producerError);
+        // aborted: the request never reached a value at all.
+        await assert.rejects(
+          () => getSite({ id: "site:a" }, { signal: controller.signal }),
+          { message: "pre-aborted" },
+        );
+
+        expect(capture.fetch).to.have.lengthOf(2);
+        capture.fetch.forEach((message) => {
+          expect(message).to.not.have.property("vary");
+        });
+        // Same for the miss on the read channel -- and note the request DID
+        // carry params, so `{}` would not even have been the honest answer.
+        expect(capture.read).to.have.lengthOf(1);
+        expect(capture.read[0]?.found).to.equal("none");
+        expect(capture.read[0]).to.not.have.property("vary");
+      } finally {
+        capture.stop();
+        await cache.close();
+      }
+    });
+
+    it("a read-failed message identifies no variant either (there is no lookup result to take one from)", async () => {
+      const { name, store, cache } = makeHarness("vary-read-failed");
+      const readError = new Error("store exploded");
+      store.get = async () => {
+        throw readError;
+      };
+      const capture = captureChannels(name);
+      try {
+        await expectRejection(() =>
+          cache.get({
+            id: "site:a",
+            params: { locale: "fr" },
+            directives: {},
+          }),
+        );
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "read-failed",
+            error: readError,
+          },
+        ]);
+        expect(capture.read[0]).to.not.have.property("vary");
       } finally {
         capture.stop();
         await cache.close();
@@ -1542,7 +1939,7 @@ describe("diagnostics channels (§6.5)", () => {
             // coverage failure" check: NoProducerForResourceTypeError would
             // carry its own name.
             name: "Error",
-            message: /returned results for only 1 of 3 requests/,
+            message: /returned 1 results for 3 requests/,
           },
         );
 
@@ -1680,6 +2077,7 @@ describe("diagnostics channels (§6.5)", () => {
           resourceId: "site:k1",
           disposition: "served-from-cache",
           collapsed: false,
+          vary: {},
         });
         expect(capture.produce).to.have.lengthOf(1);
         expect(capture.storeEntry).to.have.lengthOf(1);
@@ -1799,7 +2197,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("in-call same-slot duplicates still emit one message each; the losing duplicate's relationship is undefined", async () => {
+    it("in-call same-variant duplicates still emit one message each; the losing duplicate's relationship is undefined", async () => {
       const { name, cache } = makeHarness("store-entry-duplicates");
       const capture = captureChannels(name);
       try {
@@ -2083,6 +2481,7 @@ describe("diagnostics channels (§6.5)", () => {
             resourceType: "business_slice",
             resourceId: "biz:B1",
             found: "usable",
+            vary: {},
           },
         });
         expect(t1Messages[1]?.channel).to.equal("fetch");
@@ -2096,6 +2495,7 @@ describe("diagnostics channels (§6.5)", () => {
             resourceId: "biz:B1",
             disposition: "served-from-cache",
             collapsed: false,
+            vary: {},
           },
         );
 
@@ -2115,6 +2515,7 @@ describe("diagnostics channels (§6.5)", () => {
             resourceType: "site_day",
             resourceId: siteId,
             found: "usable-while-revalidate",
+            vary: {},
           },
         });
         const t2Fetch = capture.fetch.at(-1);
@@ -2124,6 +2525,7 @@ describe("diagnostics channels (§6.5)", () => {
           resourceId: siteId,
           disposition: "served-stale-while-revalidating",
           collapsed: false,
+          vary: {},
         });
 
         // The revalidation settles after the fetch already shipped...
@@ -2195,6 +2597,7 @@ describe("diagnostics channels (§6.5)", () => {
             resourceType: "site_day",
             resourceId: siteId,
             found: "usable-if-error",
+            vary: {},
           },
         });
         expectCachePathFetch(capture.fetch.at(-1), {
@@ -2203,6 +2606,7 @@ describe("diagnostics channels (§6.5)", () => {
           resourceId: siteId,
           disposition: "served-stale-after-error",
           collapsed: false,
+          vary: {},
         });
         expect(capture.produce).to.have.lengthOf(3);
         expectProduceMessage(capture.produce[2], {

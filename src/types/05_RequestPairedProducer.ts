@@ -1,8 +1,7 @@
-import type { ReadonlyDeep } from "type-fest";
 import type { CacheSpec, ContentForId } from "./00_CacheSpec.js";
 import type { AnyParams } from "./01_Params.js";
 import type { AnyValidators } from "./02_Validators.js";
-import type { ConsumerRequest } from "./03_ConsumerRequest.js";
+import type { ReadonlyConsumerRequest } from "./03_ConsumerRequest.js";
 import type {
   ProducerResultResource,
   ProducerResultResourceObject,
@@ -39,7 +38,7 @@ export type RequestPairedProducer<
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 > = <Id extends Spec["id"]>(
-  req: ReadonlyDeep<ConsumerRequest<Params, Id>>,
+  req: ReadonlyConsumerRequest<Params, Id>,
 ) => Promise<RequestPairedProducerResult<Spec, Validators, Params, Id>>;
 
 /**

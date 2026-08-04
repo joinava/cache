@@ -24,6 +24,23 @@ import type { StoreEntryRelationship } from "./types/06_Store.js";
  * `produce` carries them per element of `requests[]` instead): the cache
  * instance's `name` and the resource-type name from the cache's registry.
  *
+ * ## `vary`: the variant key shared by `read`, `fetch`, and `store-entry`
+ *
+ * A cache's unit of storage is the `(id, vary)` PAIR, where `vary` is the
+ * normalized paramName->value map that defines a VARIANT: a producer that
+ * varies on request params writes one entry per variant under the same id. So
+ * `resourceId` alone is not enough to line a serve up with the store that
+ * produced the value it served -- on a varying producer every variant's
+ * serves would be credited to whichever variant stored first. The three
+ * channels that can identify a variant therefore all report the same
+ * normalized `vary` object: `store-entry` for the entry written, and
+ * `read`/`fetch` for the entry a lookup SELECTED. Where no entry was selected
+ * the key is OMITTED, never published as `{}` -- `{}` identifies a real
+ * variant (the only one a non-varying producer ever writes), so conflating it
+ * with "unknown" would silently merge those two populations. `produce` has no
+ * `vary`: an invocation is a request to the origin, and which variant(s) its
+ * result occupies isn't known until it returns.
+ *
  * ## Why `fetch` and `produce` are two channels, not one
  *
  * They are the two spans of the same story with different subjects and
@@ -102,11 +119,24 @@ const typedChannel =
 export const CACHE_READ_CHANNEL_NAME = "@zingage/cache:read";
 
 /**
- * What a *completed* lookup found, evaluated against the request's directives:
+ * The lookup results that SELECTED a stored entry:
  * - "usable":                  satisfiable from cache alone
  * - "usable-while-revalidate": only usable if paired with a background refresh
  * - "usable-if-error":         only usable as a producer-failure fallback
- * - "none":                    nothing this request could use
+ *
+ * Split out of {@link CacheReadFound} because these are exactly the results
+ * that can identify a variant: a selected entry has a `vary`, and "none" has
+ * no entry to take one from.
+ */
+export type CacheReadFoundWithEntry =
+  | "usable"
+  | "usable-while-revalidate"
+  | "usable-if-error";
+
+/**
+ * What a *completed* lookup found, evaluated against the request's directives:
+ * either one of the entry-selecting results ({@link CacheReadFoundWithEntry})
+ * or "none" -- nothing this request could use.
  *
  * (Reserved for future conditional revalidation: entries that are merely
  * `validatable` report "none" today.)
@@ -115,11 +145,44 @@ export const CACHE_READ_CHANNEL_NAME = "@zingage/cache:read";
  * {@link CacheReadMessage}. Keeping the two apart lets the mapping from a
  * lookup result to a `found` value stay total.
  */
-export type CacheReadFound =
-  | "usable"
-  | "usable-while-revalidate"
-  | "usable-if-error"
-  | "none";
+export type CacheReadFound = CacheReadFoundWithEntry | "none";
+
+/**
+ * What a *completed* lookup contributes to its read message: the `found`
+ * value paired with the variant it identifies, if any.
+ *
+ * Exported because `Cache`'s lookup evaluation returns one and spreads it into
+ * the message -- the same reason {@link CacheFetchDisposition} is exported for
+ * the wrappers. Pairing the two fields in one value is what keeps "which
+ * `found` values carry a `vary`" stated once instead of re-derived at each of
+ * the four publish sites.
+ */
+export type CacheReadOutcome =
+  | {
+      found: CacheReadFoundWithEntry;
+      /**
+       * The SELECTED entry's (normalized) vary -- identifying the
+       * `(resourceId, vary)` variant this lookup matched, which is the same
+       * key `store-entry` reports for the write that put the value there (see
+       * {@link CacheStoreEntryMessage.vary}). Reads and stores can therefore
+       * be joined per variant rather than per id, which is the only way to
+       * get correct per-variant counts out of a varying producer.
+       *
+       * When more than one entry qualified, this is the one the lookup
+       * actually chose (the freshest), matching the entry handed back in the
+       * lookup result.
+       */
+      vary: Vary<AnyParams>;
+    }
+  | {
+      found: "none";
+      /**
+       * No entry was selected, so there is no variant to identify. Absent
+       * rather than `{}`, which identifies a real variant (see this file's
+       * overview).
+       */
+      vary?: undefined;
+    };
 
 /**
  * The message type published to the read diagnostics channel.
@@ -128,10 +191,11 @@ export type CacheReadFound =
  * `error` is present exactly when the read failed, so a subscriber that
  * narrows on `found === "read-failed"` gets the error without a non-null
  * assertion, and one that handles the result cases can't reach for an `error`
- * that isn't there.
+ * that isn't there. `vary` rides the same discriminant -- present exactly on
+ * the entry-selecting results.
  */
 export type CacheReadMessage = Attribution & { resourceId: string } & (
-    | { found: CacheReadFound }
+    | CacheReadOutcome
     | {
         /**
          * The store threw; no lookup result exists. The error still propagates
@@ -140,6 +204,8 @@ export type CacheReadMessage = Attribution & { resourceId: string } & (
         found: "read-failed";
         /** Whatever the store threw. Unknown by design -- stores may reject with anything. */
         error: unknown;
+        /** No lookup result, so no variant. Absent, never `{}`. */
+        vary?: undefined;
       }
   );
 
@@ -182,7 +248,9 @@ export const CACHE_FETCH_CHANNEL_NAME = "@zingage/cache:fetch";
  *
  * Note that publishers OMIT `directivesImpliedBypass` on the cache-read branch
  * rather than publishing it as `false`; it is typed `?: false` so subscribers
- * can still read the property uniformly across the union.
+ * can still read the property uniformly across the union. `vary` is the
+ * mirror image: present on the cache-read branch, omitted on the other, and
+ * typed `?: undefined` there so it too reads uniformly.
  */
 export type CacheFetchDisposition =
   | {
@@ -198,6 +266,21 @@ export type CacheFetchDisposition =
         | "served-stale-while-revalidating"
         | "served-stale-after-error";
       directivesImpliedBypass?: false;
+      /**
+       * The SERVED entry's (normalized) vary: identifying the
+       * `(resourceId, vary)` variant the value came from. It is the same key
+       * `store-entry` reports for the write that put it there (see
+       * {@link CacheStoreEntryMessage.vary}), so a subscriber can attribute
+       * serves to the exact stored variant -- e.g. count how many times one
+       * version was served before a newer one replaced it. Keying on
+       * `resourceId` alone gets that wrong the moment a producer varies:
+       * every variant's serves land on whichever variant stored first.
+       *
+       * Reported per the branch, not the request: these entries come back
+       * from the cache read already normalized, so publishing costs a property
+       * read and nothing else.
+       */
+      vary: Vary<AnyParams>;
     }
   | {
       disposition: "served-from-producer" | "producer-error" | "aborted";
@@ -210,6 +293,22 @@ export type CacheFetchDisposition =
        * from real misses.
        */
       directivesImpliedBypass: boolean;
+      /**
+       * Absent on the whole producer branch, including `served-from-producer`
+       * -- which DID hand the caller an entry. What this field identifies is
+       * the stored variant a value was served OUT OF, and a produced value
+       * came out of the origin: the variant it lands in belongs to the write,
+       * which is reported on `store-entry` when (and only if) the
+       * fire-and-forget store actually succeeds, and once per invocation
+       * rather than once per collapsed rider. Publishing a vary here would
+       * identify a variant this request never read, for a write that may
+       * still fail.
+       *
+       * `producer-error` and `aborted` have no entry at all. In every case
+       * the key is omitted rather than set to `{}`, which identifies a real
+       * variant (see this file's overview).
+       */
+      vary?: undefined;
     };
 
 /**
@@ -317,7 +416,7 @@ export function publishCacheProduce(message: CacheProduceMessage): void {
 /**
  * Name of the diagnostics channel that fires once per entry passed to
  * `Cache.store()`, reporting how the entry's value relates to what was
- * already stored for the same `(id, vary)` slot (see
+ * already stored for the same `(id, vary)` variant (see
  * {@link StoreEntryRelationship}) -- or `undefined` when the store didn't
  * report a relationship for the entry.
  *
@@ -336,17 +435,22 @@ export const CACHE_STORE_ENTRY_CHANNEL_NAME = "@zingage/cache:store-entry";
 export type CacheStoreEntryMessage = Attribution & {
   /** The stored entry's resource id */
   resourceId: string;
-  /** The stored entry's (normalized) vary object */
+  /**
+   * The stored entry's (normalized) vary object -- the second half of the
+   * `(resourceId, vary)` pair identifying the variant this write targeted,
+   * and the join key `read`/`fetch` report for the serves out of that
+   * variant (see this file's overview).
+   */
   vary: Vary<AnyParams>;
   /** The stored entry's validators, on which the comparison was keyed */
   validators: Partial<AnyValidators>;
   /**
-   * How the entry's value relates to what the slot previously held (see
+   * How the entry's value relates to what the variant previously held (see
    * {@link StoreEntryRelationship}), or `undefined` when the store
    * didn't report a relationship for this entry (it didn't perform the
    * check, the entry had empty validators so there was nothing to compare
    * on, or the entry was an in-call duplicate that lost to a newer entry for
-   * the same slot and so was never persisted).
+   * the same variant and so was never persisted).
    */
   relationshipToExistingStoredData: StoreEntryRelationship | undefined;
 };

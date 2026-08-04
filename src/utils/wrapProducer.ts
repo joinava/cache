@@ -25,13 +25,13 @@ import type {
   AnyParams,
   AnyValidators,
   ConsumerDirectives,
-  ConsumerRequest,
+  ReadonlyConsumerRequest,
   Entry,
   EntryForId,
   Logger,
-  ReadonlyConsumerRequest,
   RequestPairedProducerResult,
   Vary,
+  PartialReadonlyConsumerRequest
 } from "../types/index.js";
 import {
   collapsedInvocationTaskCreator,
@@ -42,7 +42,6 @@ import {
   completeRequest,
   primaryNormalizedResultResourceFromRequestPairedProducerResult,
   requestPairedProducerResultToResources,
-  type PartialConsumerRequest,
 } from "./requestPairedProducerUtils.js";
 import {
   assertUnreachable,
@@ -128,7 +127,7 @@ export type ResourceTypeProducer<
   Validators extends AnyValidators,
   Params extends AnyParams,
 > = (
-  req: ReadonlyDeep<ConsumerRequest<Params, IdOfResourceType<RT[K]>>>,
+  req: ReadonlyConsumerRequest<Params, IdOfResourceType<RT[K]>>,
 ) => Promise<
   RequestPairedProducerResult<
     SpecOf<RT>,
@@ -211,7 +210,6 @@ export type CoveringProducer<
 > = ResourceTypeProducer<RT, Covered, Validators, Params> &
   CoveredTypesCarrier<RT, Covered>;
 
-export type { PartialConsumerRequest };
 
 /**
  * The conditionally-required {@link coveredTypes} carrier: optional when
@@ -347,7 +345,7 @@ type WrappedProducerFn<
   Validators extends AnyValidators,
   Params extends AnyParams,
 > = <Id extends IdOfResourceType<RT[Covered]>>(
-  req: PartialConsumerRequest<Params, Id>,
+  req: PartialReadonlyConsumerRequest<Params, Id>,
   options?: { signal?: AbortSignal },
 ) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>>;
 
@@ -503,18 +501,14 @@ export default function wrapProducer<
 
   const callProducerAndLog = async (req: LooseRequest) => {
     logTrace("contacting producer", req);
-    // A by-id-type producer routes ids itself and has no cache to name in its
-    // errors; this is where the cache's name is put back on (see
-    // rethrowUnroutableWithCacheName). Every other rejection passes through.
-    //
-    // try/catch rather than a `.catch()` on the returned promise, so that a
-    // producer which fails SYNCHRONOUSLY (a non-async function that routes and
-    // throws before returning a promise) is mapped too -- a handler attached to
-    // the return value never runs for one of those.
     let resp: LooseResult;
     try {
       resp = await looseProducer(req);
     } catch (error: unknown) {
+      // A by-id-type producer routes ids itself and may throw a special
+      // UnroutableIdError if the id can't be classified to a covered type.
+      // However, the producer has no cache to name in its errors, so this is
+      // where the cache's name is attached.
       rethrowUnroutableWithCacheName(cache.name, error);
     }
     logTrace("got response from producer", resp);
@@ -650,7 +644,7 @@ export default function wrapProducer<
     normalizeVary(cache.normalizeParamName, cache.normalizeParamValue, vary);
 
   const wrappedProducer = async function (
-    req: PartialConsumerRequest<Params, SpecOf<RT>["id"]>,
+    req: PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>,
     callOptions?: { signal?: AbortSignal },
   ): Promise<LooseEntry> {
     const signal = callOptions?.signal;
@@ -733,6 +727,7 @@ export default function wrapProducer<
           });
           publishFetch(attached.rode, {
             disposition: "served-stale-after-error",
+            vary: usableIfError.vary,
           });
           return usableIfError;
         }
@@ -795,7 +790,10 @@ export default function wrapProducer<
 
     // We have ready-to-go content from the cache, w/ no refresh required.
     if (usable) {
-      publishFetch(false, { disposition: "served-from-cache" });
+      publishFetch(false, {
+        disposition: "served-from-cache",
+        vary: usable.vary,
+      });
       return usable;
     }
 
@@ -848,7 +846,10 @@ export default function wrapProducer<
           { id, params, directives },
         );
       });
-      publishFetch(false, { disposition: "served-stale-while-revalidating" });
+      publishFetch(false, {
+        disposition: "served-stale-while-revalidating",
+        vary: usableWhileRevalidate.vary,
+      });
       return usableWhileRevalidate;
     }
 

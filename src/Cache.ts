@@ -6,7 +6,7 @@ import {
   cacheStoreEntryChannel,
   publishCacheRead,
   publishCacheStoreEntry,
-  type CacheReadFound,
+  type CacheReadOutcome,
 } from "./diagnostics.js";
 import type { ReadonlyConsumerRequest } from "./types/03_ConsumerRequest.js";
 import {
@@ -471,7 +471,7 @@ export default class Cache<
         throw error;
       });
 
-    const { result, found } = this.#processCacheEntries(
+    const { result, outcome } = this.#processCacheEntries(
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
       cacheEntries as unknown as NormalizedProducerResultResource<
         SpecForId<SpecOf<RT>, Id>,
@@ -487,7 +487,7 @@ export default class Cache<
       cache: this.name,
       resourceType,
       resourceId: id,
-      found,
+      ...outcome,
     });
 
     return result;
@@ -534,14 +534,14 @@ export default class Cache<
     // the whole operation before we touch the store.
     const resourceTypes = mapNonEmpty(requests, (req) => this.classify(req.id));
 
-    const publishRead = (requestIndex: number, found: CacheReadFound) => {
+    const publishRead = (requestIndex: number, outcome: CacheReadOutcome) => {
       publishCacheRead({
         cache: this.name,
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         resourceType: resourceTypes[requestIndex]!,
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         resourceId: requests[requestIndex]!.id,
-        found,
+        ...outcome,
       });
     };
 
@@ -559,7 +559,7 @@ export default class Cache<
       );
 
       return mapNonEmpty(requests, (_req, i) => {
-        publishRead(i, "none");
+        publishRead(i, { found: "none" });
         return { validatable: [] };
       });
     }
@@ -609,7 +609,7 @@ export default class Cache<
 
     // Process each request and return results in the same order
     return mapNonEmpty(requests, (req, i) => {
-      const { result, found } = this.#processCacheEntries(
+      const { result, outcome } = this.#processCacheEntries(
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         cacheEntriesForRequests[
           i
@@ -622,7 +622,7 @@ export default class Cache<
         now,
         { requestIndex: i },
       );
-      publishRead(i, found);
+      publishRead(i, outcome);
       return result;
     });
   }
@@ -761,11 +761,12 @@ export default class Cache<
 
   /**
    * Processes cache entries for a single request, returning both the
-   * CacheLookupResult and the `found` value that describes it for the read
-   * channel. `found` is returned rather than re-derived from `result` because
-   * this is where the outcome is actually decided -- each branch below knows
-   * its own answer, so there is nothing to reconstruct. This is the core logic
-   * shared between get() and getMany().
+   * CacheLookupResult and the {@link CacheReadOutcome} that describes it for
+   * the read channel. The outcome is returned rather than re-derived from
+   * `result` because this is where it is actually decided -- each branch below
+   * knows its own answer, including which entry (if any) it selected and hence
+   * which slot to name, so there is nothing to reconstruct. This is the core
+   * logic shared between get() and getMany().
    */
   #processCacheEntries<Id extends SpecOf<RT>["id"]>(
     entries: readonly Entry<SpecForId<SpecOf<RT>, Id>, Validators, Params>[],
@@ -774,7 +775,7 @@ export default class Cache<
     context: { requestIndex: number },
   ): {
     result: CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>;
-    found: CacheReadFound;
+    outcome: CacheReadOutcome;
   } {
     const classifiedEntries = groupBy(entries, (it) =>
       entryUtils.classify(it, directives, now),
@@ -787,27 +788,25 @@ export default class Cache<
 
     const logAndReturn = (
       result: CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>,
-      found: CacheReadFound,
+      outcome: CacheReadOutcome,
     ) => {
       this.#logger("trace", "chose/returned this data for request", {
         requestIndex: context.requestIndex,
         res: result,
       });
-      return { result, found };
+      return { result, outcome };
     };
 
     const usableEntries =
       classifiedEntries[entryUtils.EntryClassification.Usable];
 
     if (usableEntries) {
+      // Non-null assertion is safe because of groupBy mechanics.
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const selected = Cache.bestEntry(usableEntries)!;
       return logAndReturn(
-        {
-          // Non-null assertion is safe because of groupBy mechanics.
-          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          usable: Cache.bestEntry(usableEntries)!,
-          validatable: [],
-        },
-        "usable",
+        { usable: selected, validatable: [] },
+        { found: "usable", vary: selected.vary },
       );
     }
 
@@ -817,34 +816,35 @@ export default class Cache<
       classifiedEntries[entryUtils.EntryClassification.UsableWhileRevalidate];
 
     if (usableWhileRevalidateEntries) {
+      // Non-null assertion is safe because of groupBy mechanics.
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const selected = Cache.bestEntry(usableWhileRevalidateEntries)!;
       return logAndReturn(
         {
-          // Non-null assertion is safe because of groupBy mechanics.
-          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          usableWhileRevalidate: Cache.bestEntry(usableWhileRevalidateEntries)!,
+          usableWhileRevalidate: selected,
           validatable: validatableEntries,
         },
-        "usable-while-revalidate",
+        { found: "usable-while-revalidate", vary: selected.vary },
       );
     }
 
     const usableIfErrorEntries =
       classifiedEntries[entryUtils.EntryClassification.UsableIfError];
 
-    return usableIfErrorEntries
-      ? logAndReturn(
-          {
-            // Non-null assertion is safe because of groupBy mechanics.
-            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-            usableIfError: Cache.bestEntry(usableIfErrorEntries)!,
-            validatable: validatableEntries,
-          },
-          "usable-if-error",
-        )
-      : logAndReturn(
-          { usableIfError: undefined, validatable: validatableEntries },
-          "none",
-        );
+    if (usableIfErrorEntries) {
+      // Non-null assertion is safe because of groupBy mechanics.
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const selected = Cache.bestEntry(usableIfErrorEntries)!;
+      return logAndReturn(
+        { usableIfError: selected, validatable: validatableEntries },
+        { found: "usable-if-error", vary: selected.vary },
+      );
+    }
+
+    return logAndReturn(
+      { usableIfError: undefined, validatable: validatableEntries },
+      { found: "none" },
+    );
   }
 }
 
