@@ -230,7 +230,7 @@ export const sortByResourceId = <T extends { resourceId: string }>(
  * union, where `directivesImpliedBypass` is REQUIRED. The deep-equal is over
  * the whole message, so extra/missing fields fail too -- which is what pins
  * `vary` ABSENT across this whole branch, `served-from-producer` included
- * (it served an entry, but not out of a slot this request read; see
+ * (it served an entry, but not out of a stored variant this request read; see
  * `CacheFetchDisposition`). `expected` never carries the key, so a published
  * `vary: {}` reads as an extra field and fails here.
  */
@@ -257,8 +257,9 @@ export function expectProducerPathFetch(
  * carries the key.
  *
  * `vary` is the opposite: REQUIRED here, because every disposition on this
- * branch was served out of an `(id, vary)` slot. It is not defaulted to `{}`
- * -- the empty slot is the one a non-varying producer writes, so letting a
+ * branch was served out of an `(id, vary)` variant. It is not defaulted to `{}`
+ * -- the empty vary identifies the only variant a non-varying producer ever
+ * writes, so letting a
  * caller omit it would make "the non-varying case" and "the caller didn't
  * think about vary" indistinguishable, which is exactly the conflation the
  * field exists to prevent.

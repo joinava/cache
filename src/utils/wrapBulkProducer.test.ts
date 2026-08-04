@@ -555,10 +555,36 @@ describe("wrapBulkProducer", () => {
       try {
         await assert.rejects(
           async () => wrappedBulkProducer([{ id: "a" }, { id: "b" }]),
-          /producer returned 3 results for 2 requests \(the extra results have no request to pair with\)/,
+          /producer returned 3 results for 2 requests/,
         );
         // Not even the two results that DO have requests are kept: the whole
         // batch is suspect, so nothing reaches the store.
+        assert.equal(storeMock.mock.callCount(), 0);
+      } finally {
+        await cache.close();
+      }
+    });
+
+    it("should reject the whole invocation, storing nothing, when a correct-length result array has an undefined element", async () => {
+      // `undefined` is never a legal result -- every result is an object and
+      // every error element an `Error` -- so a hole (or explicit `undefined`)
+      // hiding behind a correct `length` is the same contract violation as a
+      // short array, and must not slip past a length-only check. The message
+      // counts DEFINED results, so it can't read "returned 2 results for 2
+      // requests".
+      const { store, cache } = makeTestStoreAndCache();
+      const storeMock = mock.method(store, "store");
+      const bulkProducer = mock.fn(async () => [
+        { content: "ok-a", directives: { freshUntilAge: 100 } },
+        undefined as never,
+      ]);
+      const wrappedBulkProducer = wrapBulkProducer({ cache }, bulkProducer);
+
+      try {
+        await assert.rejects(
+          async () => wrappedBulkProducer([{ id: "a" }, { id: "b" }]),
+          /producer returned 1 results for 2 requests/,
+        );
         assert.equal(storeMock.mock.callCount(), 0);
       } finally {
         await cache.close();

@@ -1337,14 +1337,15 @@ describe("diagnostics channels (§6.5)", () => {
     });
   });
 
-  // The rest of the suite runs against non-varying producers, where every slot
-  // is `{}` -- which cannot tell a publisher that reports the real vary apart
-  // from one that hardcodes `{}`. These cases use a producer that actually
-  // varies, so the slot is observable, and check the two things `{}` hides:
-  // that the value reported is the SERVED ENTRY's vary (not the request's
-  // params, which are a superset), and that "no entry" omits the key instead
-  // of falling back to `{}` -- a real slot value.
-  describe("vary: per-slot attribution on read and fetch", () => {
+  // The rest of the suite runs against non-varying producers, where every
+  // variant's vary is `{}` -- which cannot tell a publisher that reports the
+  // real vary apart from one that hardcodes `{}`. These cases use a producer
+  // that actually varies, so the variant is observable, and check the two
+  // things `{}` hides: that the value reported is the SERVED ENTRY's vary
+  // (not the request's params, which are a superset), and that "no entry"
+  // omits the key instead of falling back to `{}` -- which identifies a real
+  // variant.
+  describe("vary: per-variant attribution on read and fetch", () => {
     /** Two variants of ONE id, plus a param neither variant varies on. */
     const frVary = { locale: "fr" };
     const enVary = { locale: "en" };
@@ -1379,7 +1380,7 @@ describe("diagnostics channels (§6.5)", () => {
           params: { locale: "en" },
           directives: {},
         });
-        // Self-check of the fixture: two distinct slots really do exist.
+        // Self-check of the fixture: two distinct variants really do exist.
         expect(fr.usable?.content).to.equal("bonjour");
         expect(en.usable?.content).to.equal("hello");
 
@@ -1457,7 +1458,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("getMany reports each request's own selected slot", async () => {
+    it("getMany reports each request's own selected variant", async () => {
       const { name, cache } = makeHarness("vary-getmany-variants");
       await cache.store([
         {
@@ -1478,7 +1479,7 @@ describe("diagnostics channels (§6.5)", () => {
         await cache.getMany([
           { id: "site:a", params: { locale: "en" }, directives: {} },
           { id: "site:a", params: { locale: "fr" }, directives: {} },
-          // No matching variant: `found: "none"`, and so no slot to name.
+          // No matching variant: `found: "none"`, and so no variant to identify.
           { id: "site:a", params: { locale: "de" }, directives: {} },
         ]);
         expect(capture.read).to.deep.equal([
@@ -1510,7 +1511,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("stale dispositions report the STALE entry's slot: served-stale-while-revalidating and served-stale-after-error", async () => {
+    it("stale dispositions report the STALE entry's variant: served-stale-while-revalidating and served-stale-after-error", async () => {
       const { name, cache } = makeHarness("vary-stale-dispositions");
       await cache.store([
         {
@@ -1586,7 +1587,7 @@ describe("diagnostics channels (§6.5)", () => {
         producerByIdType(cache.resourceTypes, { site_day: producer }),
       );
       try {
-        // One miss per locale, then two more serves out of the `fr` slot.
+        // One miss per locale, then two more serves out of the `fr` variant.
         await getSite({ id: "site:a", params: { locale: "fr" } });
         await getSite({ id: "site:a", params: { locale: "en" } });
         await waitUntil(
@@ -1597,13 +1598,13 @@ describe("diagnostics channels (§6.5)", () => {
         await getSite({ id: "site:a", params: { locale: "fr" } });
         expect(producer.mock.callCount()).to.equal(2);
 
-        // The stores landed in two distinct slots under ONE id.
+        // The stores landed in two distinct variants under ONE id.
         expect(capture.storeEntry.map((m) => m.vary)).to.deep.equal([
           frVary,
           enVary,
         ]);
 
-        // The two misses served from the producer, so they name no slot...
+        // The two misses served from the producer, so they identify no variant...
         const [frMiss, enMiss, ...hits] = capture.fetch;
         [frMiss, enMiss].forEach((message) => {
           expectProducerPathFetch(message, {
@@ -1617,7 +1618,7 @@ describe("diagnostics channels (§6.5)", () => {
           expect(message).to.not.have.property("vary");
         });
 
-        // ...while both later hits credit the `fr` slot specifically. Keyed on
+        // ...while both later hits credit the `fr` variant specifically. Keyed on
         // resourceId alone these two would be indistinguishable from serves of
         // the `en` value.
         expect(hits).to.have.lengthOf(2);
@@ -1648,7 +1649,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("dispositions with no served slot OMIT the key rather than reporting `{}` (a real slot)", async () => {
+    it("dispositions with no served variant OMIT the key rather than reporting `{}` (a real variant)", async () => {
       const { name, cache } = makeHarness("vary-absent-not-empty");
       const capture = captureChannels(name);
       const producerError = new Error("origin down");
@@ -1688,7 +1689,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("a read-failed message names no slot either (there is no lookup result to take one from)", async () => {
+    it("a read-failed message identifies no variant either (there is no lookup result to take one from)", async () => {
       const { name, store, cache } = makeHarness("vary-read-failed");
       const readError = new Error("store exploded");
       store.get = async () => {
@@ -1938,7 +1939,7 @@ describe("diagnostics channels (§6.5)", () => {
             // coverage failure" check: NoProducerForResourceTypeError would
             // carry its own name.
             name: "Error",
-            message: /returned results for only 1 of 3 requests/,
+            message: /returned 1 results for 3 requests/,
           },
         );
 
@@ -2196,7 +2197,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("in-call same-slot duplicates still emit one message each; the losing duplicate's relationship is undefined", async () => {
+    it("in-call same-variant duplicates still emit one message each; the losing duplicate's relationship is undefined", async () => {
       const { name, cache } = makeHarness("store-entry-duplicates");
       const capture = captureChannels(name);
       try {
