@@ -32,7 +32,7 @@
     "dev": "pnpm run tsc:watch",
     "lint": "oxlint",
     "load-env": "dotenvx run --ignore=MISSING_ENV_FILE",
-    "prepublishOnly": "pnpm run build && pnpm run lint"
+    "prepublishOnly": "pnpm run build && cp dist.npmignore dist/src/.npmignore && pnpm run lint"
   },
   "dependencies": {
     "debug": "^4.4.1",
