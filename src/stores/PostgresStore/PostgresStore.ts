@@ -1,6 +1,10 @@
-import type { ColumnType, RawBuilder, SqlBool } from "kysely";
+import type {
+  ColumnType,
+  PostgresPool,
+  RawBuilder,
+  SqlBool,
+} from "kysely";
 import { Kysely, PostgresDialect, sql } from "kysely";
-import type { Pool } from "pg";
 import type { Tagged } from "type-fest";
 import type {
   DateString,
@@ -179,14 +183,17 @@ export default class PostgresStore<
   private readonly logWarn: Bind2<Logger, "postgres-store", "warn">;
 
   /**
-   * @param pool - The postgres pool to use
+   * @param pool - The postgres pool to use. Typed as Kysely's structural
+   *  `PostgresPool` rather than `pg`'s `Pool`, so that this package's
+   *  published declarations do not force consumers to install `@types/pg`.
+   *  A real `pg.Pool` satisfies it.
    * @param opts.schemaName - The name of the schema to use
    * @param opts.tableName - The name of the table to use
    * @param opts.logger - Optional custom logger to use. Defaults to using
    *  the debug module with the @zingage/cache:postgres-store namespace
    */
   constructor(
-    pool: Pool,
+    pool: PostgresPool,
     opts: {
       schemaName: string;
       tableName: string;

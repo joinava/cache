@@ -1,0 +1,24 @@
+# Keeps the compiled tests out of the published tarball. `prepublishOnly`
+# copies this file to dist/src/.npmignore; it is never used from here.
+#
+# It HAS to be nested inside dist/src. Do not "simplify" it, because the two
+# tidier-looking spellings both ship the tests without saying so:
+#
+#   - A negated `files` entry ("!dist/src/**/*.test.js"): npm honours it, pnpm
+#     ignores it outright. With it in place, `pnpm publish --dry-run` still
+#     lists every test file. This package publishes with the pnpm pinned in
+#     `packageManager`, so that spelling is a silent no-op.
+#   - A .npmignore at the repo root: ignored by BOTH npm and pnpm as soon as
+#     `files` exists in package.json, because `files` wins.
+#
+# Only a .npmignore INSIDE an included directory is honoured by both packers.
+# It strips these artifacts at every depth, and excludes itself from the
+# tarball too.
+#
+# If you change this, verify with `npm pack` AND `pnpm pack` and diff the file
+# lists. Reading the config is not enough -- that is exactly how the two
+# spellings above look correct while shipping 84 test files.
+*.test.js
+*.test.d.ts
+*.test.js.map
+*.test.d.ts.map

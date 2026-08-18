@@ -1,6 +1,6 @@
 {
   "name": "@zingage/cache",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "type": "module",
   "packageManager": "pnpm@10.26.1",
   "exports": {
@@ -32,17 +32,16 @@
     "dev": "pnpm run tsc:watch",
     "lint": "oxlint",
     "load-env": "dotenvx run --ignore=MISSING_ENV_FILE",
-    "prepublishOnly": "pnpm run build && pnpm run lint"
+    "prepublishOnly": "pnpm run build && cp dist.npmignore dist/src/.npmignore && pnpm run lint"
   },
   "dependencies": {
+    "debug": "^4.4.1",
     "es-toolkit": "^1.43.0",
     "kysely": "^0.28.3",
     "lru_map": "^0.4.1",
     "p-limit": "^6.2.0",
-    "pg": "^8.16.3",
     "piscina": "^5.1.4",
     "safe-stable-stringify": "^2.5.0",
-    "tagged-tag": "^1.0.0",
     "type-fest": "^5.4.1",
     "type-party": "^0.10.1"
   },
@@ -61,13 +60,14 @@
     "@types/node": "^25.0.8",
     "@types/pg": "^8.15.4",
     "chai": "^5.2.1",
-    "debug": "^4.4.1",
     "fast-check": "^4.2.0",
     "ioredis": "^5.9.1",
     "oxlint": "^1.62.0",
     "oxlint-tsgolint": "^0.22.1",
+    "pg": "^8.16.3",
     "pipeline-segment": "^0.0.6",
     "prettier": "^3.8.0",
+    "tagged-tag": "^1.0.0",
     "test-with-fixture": "^1.0.1",
     "typescript": "^5.9.3"
   },
