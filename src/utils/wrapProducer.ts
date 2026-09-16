@@ -37,7 +37,12 @@ import {
   collapsedInvocationTaskCreator,
   type CollapsedInvocation,
 } from "./collapsedTaskCreator.js";
-import { normalizeVary } from "./normalization.js";
+import {
+  normalizeParams,
+  normalizeProducerResultResource,
+  normalizeVary,
+} from "./normalization.js";
+import { PendingStores } from "./pendingStores.js";
 import {
   completeRequest,
   primaryNormalizedResultResourceFromRequestPairedProducerResult,
@@ -460,13 +465,52 @@ export function throwUnreachableAbort(signal: AbortSignal | undefined): never {
  *
  * Critically, bailing out does NOT prevent the producer's result from being
  * stored: the collapsed invocation always fires a (non-awaited)
- * `cache.store()` after the producer resolves, so the work is never wasted.
- * The trade-off is that the producer itself cannot observe the signal to
- * cancel its own in-progress work (e.g., an outgoing HTTP request).
- * Supporting that would require either (a) aborting the shared task only
- * when *all* callers have aborted, which adds significant complexity, or (b)
- * giving up request collapsing for callers that pass a signal, which would
- * defeat its purpose.
+ * `cache.store()` after the producer resolves (see the next section), so the
+ * work is never wasted. The trade-off is that the producer itself cannot
+ * observe the signal to cancel its own in-progress work (e.g., an outgoing
+ * HTTP request). Supporting that would require either (a) aborting the shared
+ * task only when *all* callers have aborted, which adds significant
+ * complexity, or (b) giving up request collapsing for callers that pass a
+ * signal, which would defeat its purpose.
+ *
+ * ## The store is fire-and-forget; in-flight writes still count as hits
+ *
+ * The returned function resolves as soon as the producer has a value; the
+ * `cache.store()` of that value (primary and supplemental resources alike) is
+ * fired but NOT awaited, so a caller never waits on a store round trip and a
+ * failed write never fails the call (it is logged and dropped). The precise
+ * guarantee about repeated calls is then:
+ *
+ * - Identical calls that overlap the producer invocation share it (request
+ *   collapsing, above).
+ * - A call that arrives after the producer resolved but before its
+ *   `cache.store()` settled is answered from the wrapper's own in-memory
+ *   overlay of in-flight writes -- consulted before the cache read, and
+ *   honoring the request's params against each entry's `vary` and the
+ *   caller's directives exactly as a stored entry would be -- provided the
+ *   entry would be a fresh hit had the write landed. So a plain sequential
+ *   repeat (`await f(x); await f(x)`) runs the producer once, whatever the
+ *   store's write latency. Such a serve reports `served-from-cache` on the
+ *   fetch channel and, like a bypass request, emits no `read` message (no
+ *   store read happened).
+ * - Once the store call settles the overlay forgets the entry, on success
+ *   (the store answers for it now) and on failure alike: a failed write is
+ *   never pinned, so the next call reads the store, misses, and runs the
+ *   producer again.
+ * - The overlay is per wrapper instance and in-process. It does not cover a
+ *   different wrapper over the same cache, a different process, or the
+ *   stale-while-revalidate / stale-if-error paths (a pending entry that is
+ *   already stale falls through to the store read, as before).
+ *
+ * The point at which a value is DURABLE is therefore not the wrapped call's
+ * resolution but the settlement of its store call, which the wrapper does not
+ * expose per call. `await cache.close()` is the flush: every store call the
+ * wrapper has fired has already been handed to the backing store by the time
+ * the wrapped call resolves, and the bundled stores' `close()` drains their
+ * pending writes before resolving. A short-lived process (a script, a
+ * one-shot job) that skips `close()` can lose its last writes; that is a
+ * property of the stores, not of the wrappers, but it is the one place a
+ * wrapper user has to think about it.
  *
  * @param options - The cache to wrap, plus the wrapping behaviour; see
  *   {@link WrapProducerOptions}. `options.cache` is where values returned by
@@ -513,6 +557,19 @@ export default function wrapProducer<
   type LooseResult = LooseResultFor<RT, Validators, Params>;
   type LooseEntry = LooseEntryFor<RT, Validators, Params>;
   type LooseLookupResult = LooseLookupResultFor<RT, Validators, Params>;
+
+  const normalizeVaryBound = (vary: Vary<Params>) =>
+    normalizeVary(cache.normalizeParamName, cache.normalizeParamValue, vary);
+  const normalizeParamsBound = (params: LooseRequest["params"]) =>
+    normalizeParams(
+      cache.normalizeParamName,
+      cache.normalizeParamValue,
+      params,
+    );
+
+  // Entries whose cache.store() is still in flight, consulted before every
+  // cache read; see the function docs and PendingStores.
+  const pendingStores = new PendingStores<SpecOf<RT>, Validators, Params>();
 
   const callProducerAndLog = async (req: LooseRequest) => {
     logTrace("contacting producer", req);
@@ -598,6 +655,13 @@ export default function wrapProducer<
   // ensuring it isn't wasted even when the caller that triggered it has
   // aborted.
   //
+  // Because the store is not awaited, the collapse map alone leaves a window
+  // -- from the producer resolving until the write lands -- in which an
+  // identical call would read the store, miss, and run the producer again.
+  // The entries handed to cache.store() are therefore also held in
+  // `pendingStores` until that store call settles (see PendingStores), and
+  // the wrapped function consults that overlay before reading the store.
+  //
   // It also publishes the invocation's `produce` diagnostics message when the
   // producer settles (one message per actual invocation; collapsed callers
   // share one).
@@ -636,10 +700,31 @@ export default function wrapProducer<
       publishProduce("success");
 
       logTrace(`attempting to store response.`);
-      const stored = Promise.try(() => cache.store(
-        requestPairedProducerResultToResources(requestPairedResult, req.id),
-      )).then(() => { logTrace(`successfully stored producer's response`); });
-      void stored.catch((error: unknown) => { logTrace(`error storing producer's response`, error); });
+      const resources = requestPairedProducerResultToResources(
+        requestPairedResult,
+        req.id,
+      );
+      const stored = Promise.try(() => cache.store(resources)).then(() => {
+        logTrace(`successfully stored producer's response`);
+      });
+      void stored.catch((error: unknown) => {
+        logTrace(`error storing producer's response`, error);
+      });
+
+      // Normalize pending entries as Cache.store does. Invalid resources must
+      // fail persistence without changing a successful producer result.
+      try {
+        const now = new Date();
+        pendingStores.track(
+          resources.map((it) =>
+            normalizeProducerResultResource(normalizeVaryBound, it, now),
+          ),
+          stored,
+          now,
+        );
+      } catch (error) {
+        logTrace(`not holding producer's response as pending: normalization failed`, error);
+      }
 
       return { result: requestPairedResult, stored };
     },
@@ -648,9 +733,6 @@ export default function wrapProducer<
     // resourceType arg, which is derived from the id and so adds nothing.
     ([req]) => stableStringify(req),
   );
-
-  const normalizeVaryBound = (vary: Vary<Params>) =>
-    normalizeVary(cache.normalizeParamName, cache.normalizeParamValue, vary);
 
   const wrappedProducer = async function (
     req: PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>,
@@ -772,6 +854,28 @@ export default function wrapProducer<
         collapsedCallProducerAndStore("bypass", finalRequest, resourceType),
         undefined,
       );
+    }
+
+    // An entry this wrapper produced whose store() has not settled yet is a
+    // hit (see the function docs): it is what the store read would return had
+    // the write already landed, so it settles the fetch the same way.
+    const pendingEntry = pendingStores.findUsable(
+      id,
+      normalizeParamsBound(params),
+      directives,
+      new Date(),
+    );
+    if (pendingEntry !== undefined) {
+      logTrace(`serving an entry whose store is still in flight`, {
+        id,
+        params,
+      });
+      publishFetch(false, {
+        disposition: "served-from-cache",
+        vary: pendingEntry.entry.vary,
+      });
+      notifyStore([pendingEntry.stored], callOptions?.onStore);
+      return pendingEntry.entry;
     }
 
     logTrace(`asking the cache for a response`, { id, params });
