@@ -326,6 +326,8 @@ export default class PostgresStore<
         const id = requests[row.request_index]!.id;
         // SQL text binding can replace lone surrogates; never accept that
         // normalized collision, nor a mismatched ID in the entry payload.
+        // Every result slot starts as []; skipping a row leaves an explicit
+        // miss at that index, never undefined or a shorter result array.
         if (row.resource_id !== id) continue;
         const entry = this.deserializeEntry(row.entry);
         if (entry.id === id) results[row.request_index]!.push(entry);

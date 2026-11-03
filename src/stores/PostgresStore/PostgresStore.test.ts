@@ -264,6 +264,31 @@ describe(
       }
     });
 
+    it("keeps explicit empty slots for ID collisions among hits, misses, and duplicates", async () => {
+      const fixture = postgresStoreFixture();
+      try {
+        const store = fixture.postgresStore;
+        await store.store(
+          ["�x", "hit"].map((id) => ({
+            entry: makeEntry(id),
+            maxStoreForSeconds: 60,
+          })),
+        );
+        const ids = ["hit", "\ud800x", "missing", "�x", "\ud801x", "hit"];
+        const results = await store.getMany(
+          ids.map((id) => ({ id, params: noParams })),
+        );
+        assert.equal(results.length, ids.length);
+        assert.ok(results.every(Array.isArray));
+        assert.deepEqual(
+          results.map((entries) => entries.map(({ id }) => id)),
+          [["hit"], [], [], ["�x"], [], ["hit"]],
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+
     it("rejects with the abort reason when the signal aborts while the query runs", async () => {
       const controller = new AbortController();
       const reason = new Error("caller gave up");

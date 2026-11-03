@@ -1,4 +1,5 @@
 import pg from "pg";
+import { mock } from "node:test";
 
 import fc from "fast-check";
 import type { JSON } from "type-party";
@@ -196,14 +197,13 @@ export function postgresStoreFixture(options?: {
         const query = client.query.bind(client) as (
           ...args: unknown[]
         ) => unknown;
-        client.query = ((
-          text: unknown,
-          parameters: unknown,
-          ...rest: unknown[]
-        ) => {
-          onQuery(String(text), Array.isArray(parameters) ? parameters : []);
-          return query(text, parameters, ...rest);
-        }) as typeof client.query;
+        // Preserve pg's overloads at the boundary; all arguments are forwarded.
+        client.query = mock.fn(
+          (text: unknown, parameters?: unknown, ...rest: unknown[]) => {
+            onQuery(String(text), Array.isArray(parameters) ? parameters : []);
+            return query(text, parameters, ...rest);
+          },
+        ) as typeof client.query;
       });
     }
     // Use a new schema AND table name for each store instance so that tests
