@@ -69,6 +69,40 @@ describe(
     ? { timeout: 60_000 }
     : { skip: "Postgres environment variables are not configured" },
   () => {
+    it("keeps query mocks isolated between fixture calls", async () => {
+      const first = postgresStoreFixture();
+      const second = postgresStoreFixture();
+      try {
+        await Promise.all(
+          [first, second].map((fixture) =>
+            fixture.postgresStore.store([
+              { entry: makeEntry("a"), maxStoreForSeconds: 60 },
+            ]),
+          ),
+        );
+        assert.notEqual(first.queryMock, second.queryMock);
+        first.queryMock.mock.resetCalls();
+        second.queryMock.mock.resetCalls();
+        await first.postgresStore.getMany([{ id: "a", params: noParams }]);
+        assert.equal(first.queryMock.mock.callCount(), 1);
+        assert.equal(second.queryMock.mock.callCount(), 0);
+        const failure = new Error("first fixture only");
+        first.queryMock.mock.mockImplementationOnce((async () => {
+          throw failure;
+        }) as unknown as typeof first.queryMock);
+        const [failed, succeeded] = await Promise.allSettled([
+          first.postgresStore.getMany([{ id: "a", params: noParams }]),
+          second.postgresStore.getMany([{ id: "a", params: noParams }]),
+        ]);
+        assert.deepEqual(failed, { status: "rejected", reason: failure });
+        assert.equal(succeeded.status, "fulfilled");
+        assert.equal(first.queryMock.mock.callCount(), 2);
+        assert.equal(second.queryMock.mock.callCount(), 1);
+      } finally {
+        await Promise.all([first.cleanup(), second.cleanup()]);
+      }
+    });
+
     it("records queries from multiple pool connections in one mock", async () => {
       const fixture = postgresStoreFixture();
       try {

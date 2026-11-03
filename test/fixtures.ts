@@ -183,7 +183,7 @@ export function postgresStoreFixture() {
       password: process.env["DATABASE_PASSWORD"]!, // eslint-disable-line @typescript-eslint/no-non-null-assertion
     });
     // Keep the receiver: pg's query method uses `this` to reach the active
-    // connection. A shared, unbound mock records calls from every pool client.
+    // connection. Each fixture creates its own mock, shared only by that pool's clients.
     // eslint-disable-next-line typescript-eslint/unbound-method -- Installed as client.query below; mock.fn preserves the receiver.
     const queryMock = mock.fn(pg.Client.prototype.query);
     postgres.on("connect", (client) => {
