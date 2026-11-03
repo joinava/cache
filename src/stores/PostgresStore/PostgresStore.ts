@@ -1,10 +1,5 @@
 import { chunk } from "es-toolkit";
-import type {
-  ColumnType,
-  PostgresPool,
-  RawBuilder,
-  SqlBool,
-} from "kysely";
+import type { ColumnType, PostgresPool, RawBuilder, SqlBool } from "kysely";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import type { Tagged } from "type-fest";
 import type {
@@ -47,7 +42,7 @@ import {
   jsonStringify,
   keepMaxPerGroup,
 } from "../../utils/utils.js";
-import { variantsMatchingRequests } from "../../utils/varyHelpers.js";
+import { variantMatchesRequest } from "../../utils/varyHelpers.js";
 
 /**
  * The most unique ids that one `getMany` statement binds. Postgres allows
@@ -256,19 +251,24 @@ export default class PostgresStore<
 
     signal?.throwIfAborted();
 
-    const entries = result.map((it) =>
-      this.deserializeEntry(
-        it.entry satisfies TableEntry<
-          Spec,
-          Validators,
-          Params,
-          Spec["id"]
-        > as unknown as TableEntry<Spec, Validators, Params, Id>,
-      ),
-    );
+    const entries = result
+      .filter((row) => row.resource_id === id)
+      .map((it) =>
+        this.deserializeEntry(
+          it.entry satisfies TableEntry<
+            Spec,
+            Validators,
+            Params,
+            Spec["id"]
+          > as unknown as TableEntry<Spec, Validators, Params, Id>,
+        ),
+      );
 
-    this.logTrace("returning entries from postgres query", entries);
-    return entries;
+    // SQL text binding can replace lone surrogates. Accept only exact IDs,
+    // including the ID in the persisted entry.
+    const matchingEntries = entries.filter((entry) => entry.id === id);
+    this.logTrace("returning entries from postgres query", matchingEntries);
+    return matchingEntries;
   }
 
   /**
@@ -342,8 +342,14 @@ export default class PostgresStore<
       vary: row.vary,
       entry: this.deserializeEntry(row.entry),
     }));
-    const results = variantsMatchingRequests(variants, requests).map(
-      (matches) => matches.map(({ entry }) => entry),
+    const variantsById = Map.groupBy(variants, ({ id }) => id);
+    const results = requests.map(({ id, params }) =>
+      (variantsById.get(id) ?? [])
+        .filter(
+          ({ entry, vary }) =>
+            entry.id === id && variantMatchesRequest(vary, params),
+        )
+        .map(({ entry }) => entry),
     );
 
     this.logTrace("returning entries from postgres getMany query", {

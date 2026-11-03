@@ -19,7 +19,6 @@ import type { StoreEntryResult } from "../../types/06_Store.js";
 import { validatorsEqual } from "../../utils/normalizedProducerResultResourceHelpers.js";
 import {
   variantMatchesRequest,
-  variantsMatchingRequests,
   type VariantKey,
 } from "../../utils/varyHelpers.js";
 
@@ -377,7 +376,11 @@ function getMatchingEntryJson(
 ): WorkerEntryJson[] {
   const rows = context.selectById(id);
   return rows
-    .filter((it) => variantMatchesRequest(jsonParse(it.vary), params))
+    .filter(
+      (it) =>
+        it.resource_id === id &&
+        variantMatchesRequest(jsonParse(it.vary), params),
+    )
     .map((row) => row.entry);
 }
 
@@ -395,10 +398,12 @@ function getManyMatchingEntryJson(
       entry: row.entry,
     }));
 
-  return variantsMatchingRequests<AnyParams, (typeof variants)[number]>(
-    variants,
-    requests,
-  ).map((matches) => matches.map(({ entry }) => entry));
+  const variantsById = Map.groupBy(variants, ({ id }) => id);
+  return requests.map(({ id, params }) =>
+    (variantsById.get(id) ?? [])
+      .filter(({ vary }) => variantMatchesRequest(vary, params))
+      .map(({ entry }) => entry),
+  );
 }
 
 /**

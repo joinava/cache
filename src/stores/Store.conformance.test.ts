@@ -199,10 +199,11 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
             { nil: undefined },
           ),
         )
-        .map(([value, nested]): TestContent =>
-          nested !== undefined
-            ? { value, nested: reparent(nested) }
-            : { value },
+        .map(
+          ([value, nested]): TestContent =>
+            nested !== undefined
+              ? { value, nested: reparent(nested) }
+              : { value },
         );
 
       const validatorsArb = fc
@@ -274,7 +275,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       assert.equal(result.length, 1);
       assert.equal(result[0]?.directives.freshUntilAge, Infinity);
       assert.equal(result[0]?.directives.storeFor, Infinity);
-      assert.equal(result[0]?.directives.maxStale?.withoutRevalidation, Infinity);
+      assert.equal(
+        result[0]?.directives.maxStale?.withoutRevalidation,
+        Infinity,
+      );
       assert.equal(result[0]?.directives.maxStale?.whileRevalidate, Infinity);
       assert.equal(result[0]?.directives.maxStale?.ifError, Infinity);
     });
@@ -380,7 +384,9 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       // e.g. "constructor" to the inherited function and fail to match here.
       const noParams = {} as NormalizedParams<TestParams>;
       assert.deepEqual(
-        (await store.get("id", noParams)).map(({ content }) => content.value).sort(),
+        (await store.get("id", noParams))
+          .map(({ content }) => content.value)
+          .sort(),
         ["all-absent", "empty"],
       );
 
@@ -388,7 +394,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       // longer matches the "must be absent" variant -- only the empty one.
       const withConstructorParam = {
         ["constructor"]: "anything",
-      } satisfies Record<string, string> as unknown as NormalizedParams<TestParams>;
+      } satisfies Record<
+        string,
+        string
+      > as unknown as NormalizedParams<TestParams>;
       assert.deepEqual(
         (await store.get("id", withConstructorParam)).map(
           ({ content }) => content.value,
@@ -429,24 +438,131 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
     });
   });
 
-  it("finds, through getMany, the entries that get finds for a lone-surrogate id", async () => {
+  it("never returns a normalized ID collision as a hit", async () => {
     await withStore(createFixture, async (store) => {
-      // A driver that sends text as UTF-8 cannot send a lone UTF-16
-      // surrogate, so a SQL store holds "\ud800x" as "�x", and `get` for
-      // either spelling finds the row. `getMany` must agree with `get`.
       await store.store([
         {
-          entry: makeEntry("�x", "replaced", emptyVary),
+          entry: makeEntry("�x", "replacement", emptyVary),
           maxStoreForSeconds: 60,
         },
       ]);
+      for (const id of ["\ud800x", "\ud801x", "\udc00x"]) {
+        assert.deepEqual(await store.get(id, matchingParams), []);
+        assert.deepEqual(
+          await store.getMany([{ id, params: matchingParams }]),
+          [[]],
+        );
+      }
+      assert.equal(
+        (await store.get("�x", matchingParams))[0]?.content.value,
+        "replacement",
+      );
+    });
+  });
 
-      const viaGet = await store.get("\ud800x", matchingParams);
-      const [viaGetMany] = await store.getMany([
-        { id: "\ud800x", params: matchingParams },
-      ] as const);
+  it("never serves an ill-formed stored ID under a colliding ID", async () => {
+    await withStore(createFixture, async (store) => {
+      // Postgres rejects this JSONB entry; SQLite and MemoryStore preserve its
+      // original ID in the entry. Either rejection or exact hits/misses is safe.
+      try {
+        await store.store([
+          {
+            entry: makeEntry("\ud800x", "original", emptyVary),
+            maxStoreForSeconds: 60,
+          },
+        ]);
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          !("code" in error) ||
+          error.code !== "22P02"
+        )
+          throw error;
+      }
+      for (const id of ["�x", "\ud801x", "\ud800x"]) {
+        const single = await store.get(id, matchingParams);
+        const [bulk] = await store.getMany([{ id, params: matchingParams }]);
+        assert.ok(single.every((entry) => entry.id === id));
+        assert.ok(bulk!.every((entry) => entry.id === id));
+        if (id !== "\ud800x") {
+          assert.deepEqual(single, []);
+          assert.deepEqual(bulk, []);
+        }
+      }
+    });
+  });
 
-      assert.deepEqual(viaGetMany, viaGet);
+  it("never normalizes string vary values into false matches", async () => {
+    await withStore(createFixture, async (store) => {
+      await store.store([
+        {
+          entry: makeEntry("vary-unicode", "replacement", {
+            format: "�",
+          } as NormalizedVary<TestParams>),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      for (const format of ["\ud800", "\ud801", "\udc00"]) {
+        const params = { format } as NormalizedParams<TestParams>;
+        // Postgres get rejects ill-formed JSONB params; bulk reads match in JS.
+        try {
+          assert.deepEqual(await store.get("vary-unicode", params), []);
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !("code" in error) ||
+            error.code !== "22P02"
+          )
+            throw error;
+        }
+        assert.deepEqual(
+          await store.getMany([{ id: "vary-unicode", params }]),
+          [[]],
+        );
+      }
+    });
+  });
+
+  it("preserves persisted ill-formed vary values or rejects them without false hits", async () => {
+    await withStore(createFixture, async (store) => {
+      for (const format of ["\ud800", "\ud801", "\udc00"]) {
+        try {
+          await store.store([
+            {
+              entry: makeEntry("stored-vary-unicode", format, {
+                format,
+              } as NormalizedVary<TestParams>),
+              maxStoreForSeconds: 60,
+            },
+          ]);
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !("code" in error) ||
+            error.code !== "22P02"
+          )
+            throw error;
+          continue;
+        }
+        for (const requestedFormat of ["�", "\ud800", "\ud801", "\udc00"]) {
+          const params = {
+            format: requestedFormat,
+          } as NormalizedParams<TestParams>;
+          const single = await store.get("stored-vary-unicode", params);
+          const [bulk] = await store.getMany([
+            { id: "stored-vary-unicode", params },
+          ]);
+          for (const entry of [...single, ...bulk!]) {
+            assert.equal(entry.id, "stored-vary-unicode");
+            assert.equal(entry.vary.format, requestedFormat);
+            assert.equal(entry.content.value, requestedFormat);
+          }
+          if (requestedFormat === "�") {
+            assert.deepEqual(single, []);
+            assert.deepEqual(bulk, []);
+          }
+        }
+      }
     });
   });
 

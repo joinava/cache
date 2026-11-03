@@ -161,7 +161,11 @@ export default class SqliteStore<
 
     options?.signal?.throwIfAborted();
     this.#scheduleLazyCleanup();
-    return entries.map((entry) => this.#deserializeEntry<Id>(entry));
+    // The SQL key can lose lone surrogates, while entry JSON preserves them.
+    // Check the persisted ID too, so a colliding well-formed ID cannot hit.
+    return entries
+      .map((entry) => this.#deserializeEntry<Id>(entry))
+      .filter((entry) => entry.id === id);
   }
 
   public async getMany<
@@ -179,8 +183,10 @@ export default class SqliteStore<
 
     options?.signal?.throwIfAborted();
     this.#scheduleLazyCleanup();
-    return entries.map((requestEntries) =>
-      requestEntries.map((entry) => this.#deserializeEntry<Spec["id"]>(entry)),
+    return entries.map((requestEntries, index) =>
+      requestEntries
+        .map((entry) => this.#deserializeEntry<Spec["id"]>(entry))
+        .filter((entry) => entry.id === requests[index]!.id),
     ) satisfies EntryForId<Spec, Validators, Params, Spec["id"]>[][] as {
       -readonly [K in keyof Reqs]: EntryForId<
         Spec,

@@ -155,6 +155,8 @@ await Promise.all(visitIds.map((id) => getVisit({ id })));
 
 Batching only saves round trips when the store's `getMany` reads all of its requests in one operation. `PostgresStore` and `SqliteStore` do. A custom store that implements `getMany` with `naiveGetMany` still runs one `get` per request; see ["Guidelines for Authoring a Store"](./docs/implementing-a-store.md). `PostgresStore.getMany` loads every stored variant of each requested id, so do not batch the reads of a cache whose producers vary on a high-cardinality param, such as one variant per user.
 
+SQL text bindings replace lone UTF-16 surrogates in IDs with U+FFFD. Both SQL stores compare returned IDs exactly with the original request, so ill-formed IDs produce misses rather than hits for a different ID. SQLite also checks the ID preserved in entry JSON: an ill-formed stored ID cannot be served under its well-formed replacement. Such writes can collide at the SQL key and evict another entry. MemoryStore preserves IDs exactly. SQLite preserves string vary keys and values through JSON and compares them exactly; Postgres rejects ill-formed strings in persisted JSONB and in single-read JSONB params. Bulk Postgres matching compares params exactly in JavaScript. An unused request param does not prevent an otherwise valid match.
+
 ## Key Files
 
 - [`Cache.ts`](./src/Cache.ts): this defines the basic cache class. Note that the class's job is just to return whether/which previously-stored responses are usable to satisfy an incoming request. It does not handle things like making requests to the producer for new responses when no cached response is usable.
