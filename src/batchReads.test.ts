@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import assert from "node:assert/strict";
 import { describe, it, mock } from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
@@ -283,6 +284,67 @@ describe("Cache with batchReads", suiteOptions, () => {
     } finally {
       capture.stop();
     }
+  });
+
+  it("preserves each batch's first reader context when close forces dispatch", async () => {
+    const context = new AsyncLocalStorage<string>();
+    const observed: (string | undefined)[] = [];
+    const scheduled: (() => void)[] = [];
+    const { store, getManyRequestCounts } = spiedStore({
+      beforeGetMany: async () => {
+        observed.push(context.getStore());
+      },
+    });
+    const cache = new Cache({
+      store,
+      name: uniqueCacheName("context"),
+      resourceTypes: ACCEPT_ANY_REGISTRY,
+      batchReads: {
+        maxBatchSize: 1,
+        batchScheduleFn: (dispatch) => {
+          scheduled.push(dispatch);
+        },
+      },
+    });
+    const a = context.run("reader-a", () => cache.get(lookup("a")));
+    const b = context.run("reader-b", () => cache.get(lookup("b")));
+    await context.run("closer", () => cache.close());
+    await Promise.all([a, b]);
+    assert.deepEqual(observed, ["reader-a", "reader-b"]);
+    // The scheduled callbacks still exist after a forced flush; neither a
+    // second close nor invoking those callbacks may execute a batch twice.
+    await cache.close();
+    context.run("scheduler", () => scheduled.forEach((dispatch) => dispatch()));
+    assert.deepEqual(getManyRequestCounts(), [1, 1]);
+  });
+
+  it("keeps result positions when the middle read aborts before dispatch", async () => {
+    const { store } = spiedStore();
+    const cache = batchedCacheOver(store);
+    await cache.store(
+      ["a", "b", "c"].map((id) => ({
+        id,
+        content: id,
+        directives: freshFor100,
+      })),
+    );
+    const controller = new AbortController();
+    const pending = [
+      cache.get(lookup("a")),
+      cache.get(lookup("b"), { signal: controller.signal }),
+      cache.get(lookup("c")),
+    ];
+    controller.abort();
+    const results = await Promise.allSettled(pending);
+    assert.equal(
+      results[0]?.status === "fulfilled" && results[0].value.usable?.content,
+      "a",
+    );
+    assert.equal(results[1]?.status, "rejected");
+    assert.equal(
+      results[2]?.status === "fulfilled" && results[2].value.usable?.content,
+      "c",
+    );
   });
 
   it("starts queued reads before close() closes the store", async () => {

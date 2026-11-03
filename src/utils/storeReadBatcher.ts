@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import DataLoader from "dataloader";
 import type { CacheSpec } from "../types/00_CacheSpec.js";
 import type { AnyParams } from "../types/01_Params.js";
@@ -35,12 +36,16 @@ export class StoreReadBatcher<
       async (reads) => {
         const live = reads.filter(({ signal }) => !signal?.aborted);
         if (live.length === 0) return reads.map(() => []);
+        // Let a rejection propagate: DataLoader rejects every load in this
+        // batch, and Cache.get reports each non-aborted read failure.
         const results = await store.getMany(live.map(({ request }) => request));
         if (results.length !== live.length) {
           throw new Error(
             `store.getMany() returned ${results.length} results for ${live.length} requests; it must return one result per request`,
           );
         }
+        // Results cover only live reads; DataLoader needs one slot for every
+        // original load, including reads aborted before dispatch.
         const entriesByRead = new Map(
           live.map((read, index) => [read, results[index]!]),
         );
@@ -50,9 +55,12 @@ export class StoreReadBatcher<
         cache: false,
         maxBatchSize: options.maxBatchSize ?? 50,
         batchScheduleFn: (callback) => {
-          const dispatch = () => {
+          // Bind the first reader's context even when close() forces dispatch
+          // from a different context. The guard makes a later scheduled callback
+          // harmless after flushNow(), and removes completed batches from the set.
+          const dispatch = AsyncLocalStorage.bind(() => {
             if (this.#scheduled.delete(dispatch)) callback();
-          };
+          });
           this.#scheduled.add(dispatch);
           if (options.batchScheduleFn) options.batchScheduleFn(dispatch);
           // DataLoader's Node scheduler: dispatch after Promise continuations.
