@@ -301,7 +301,7 @@ export default class PostgresStore<
       resource_id: string;
       entry: TableEntry<Spec, Validators, Params>;
     };
-    const rows: RequestRow[] = [];
+    const rowBatches: RequestRow[][] = [];
     for (const [batchIndex, requestsChunk] of chunk(
       requests,
       MAX_REQUESTS_PER_GET_MANY_QUERY,
@@ -322,8 +322,9 @@ export default class PostgresStore<
         where ${varyMatchesParamsSql(sql.ref("t.vary"), sql.ref("r.params"))}
       `.execute(this.db);
       signal?.throwIfAborted();
-      rows.push(...batch.rows);
+      rowBatches.push(batch.rows);
     }
+    const rows = rowBatches.flat();
 
     // SQL text binding can replace lone surrogates. Require exact IDs in
     // both the SQL key and persisted entry before grouping the matches.
