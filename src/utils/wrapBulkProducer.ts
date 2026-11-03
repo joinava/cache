@@ -1,5 +1,10 @@
-import { partition } from "es-toolkit";
-import stableStringify from "safe-stable-stringify";
+import {
+  forEachCooperatively,
+  mapCooperatively,
+  flatMapCooperatively,
+  stableStringifyArrayCooperatively,
+} from "./cooperative.js";
+
 import { rethrowUnroutableWithCacheName } from "./producer-errors.js";
 import {
   cacheProduceChannel,
@@ -257,10 +262,11 @@ export function wrapBulkProducer<
         readonly req: CoveredRequest;
         readonly resourceType: string;
       }[],
+      _collapseKey: string,
     ) => {
       const start = performance.now();
 
-      const publishProduce = (outcome: "success" | "error") => {
+      const publishProduce = async (outcome: "success" | "error") => {
         // Building the arg for publishCacheProduce is O(batch-size), so it is
         // especially worth not building when nobody is listening.
         if (!cacheProduceChannel.hasSubscribers) {
@@ -269,7 +275,7 @@ export function wrapBulkProducer<
         publishCacheProduce({
           cache: cache.name,
           trigger: invocation.trigger,
-          requests: requestItems.map((it) => ({
+          requests: await mapCooperatively(requestItems, (it) => ({
             resourceType: it.resourceType,
             resourceId: it.req.id,
           })),
@@ -279,7 +285,10 @@ export function wrapBulkProducer<
         });
       };
 
-      const reqs = requestItems.map((it) => it.req);
+      const reqs =
+        requestItems.length <= 32
+          ? requestItems.map((it) => it.req)
+          : await mapCooperatively(requestItems, (it) => it.req);
       let requestPairedProducerResults: (LooseResult | ErrorType)[];
       try {
         requestPairedProducerResults = await callProducerAndLog(reqs);
@@ -296,13 +305,14 @@ export function wrapBulkProducer<
         // never a legal result -- every `RequestPairedProducerResult` is an
         // object and every `ErrorType` an `Error` -- so it is unambiguously a
         // contract violation, not a value a producer meant to return.
+        let defined = 0;
+        await forEachCooperatively(requestPairedProducerResults, (result) => {
+          if (result !== undefined) defined += 1;
+        });
         if (
           requestPairedProducerResults.length !== reqs.length ||
-          requestPairedProducerResults.some((r) => r === undefined)
+          defined !== reqs.length
         ) {
-          const defined = requestPairedProducerResults.filter(
-            (r) => r !== undefined,
-          ).length;
           throw new Error(
             `wrapBulkProducer: producer returned ${String(defined)} ` +
               `results for ${String(reqs.length)} requests. Every request must receive exactly ` +
@@ -310,22 +320,23 @@ export function wrapBulkProducer<
           );
         }
       } catch (error) {
-        publishProduce("error");
+        await publishProduce("error");
         throw error;
       }
-      publishProduce("success");
+      await publishProduce("success");
 
       // Extract all resources to store (main resources + supplemental resources),
       // but NOT requests that failed.
-      const resourcesToStore = zip2(requestPairedProducerResults, reqs).flatMap(
-        ([result, req]) =>
+      const resourcesToStore = await flatMapCooperatively(
+        requestPairedProducerResults,
+        (result, index) =>
           result instanceof Error
             ? []
             : requestPairedProducerResultToResources<
                 SpecOf<RT>,
                 Validators,
                 Params
-              >(result, req.id),
+              >(result, reqs[index]!.id),
       );
 
       logTrace(`attempting to store resources from bulk producer response`, {
@@ -349,7 +360,7 @@ export function wrapBulkProducer<
     },
     collapseOverlappingRequestsTime * 1000,
     // See the COLLAPSE GRANULARITY note above.
-    ([requestItems]) => stableStringify(requestItems.map((it) => it.req)),
+    ([, collapseKey]) => collapseKey,
   );
 
   const normalizeVaryBound = (vary: Vary<Params>) =>
@@ -396,18 +407,36 @@ export function wrapBulkProducer<
       suppressFetch: () => void;
     };
 
-    const items: RequestItem[] = reqs.map((req, index) => {
+    // A bypass result can settle before the cache-read policy is known. Its
+    // disposition is final immediately, but publication must still be suppressible
+    // if a sibling read fails with onCacheReadFailure: "throw".
+    let cacheReadPolicyKnown = false;
+    const deferredBypassPublications: (() => void)[] = [];
+    const releaseBypassPublications = async () => {
+      if (cacheReadPolicyKnown) return;
+      cacheReadPolicyKnown = true;
+      await forEachCooperatively(deferredBypassPublications, (publish) =>
+        publish(),
+      );
+    };
+
+    const prepareRequest = (
+      req: (typeof reqs)[number],
+      index: number,
+    ): RequestItem => {
       const finalRequest = completeRequest(req);
       const resourceType = cache.classify(finalRequest.id);
       let fetchSettled = false;
+      let fetchSuppressed = false;
+      const directivesImpliedBypass = isRequestingCacheBypass(
+        finalRequest.directives,
+      );
 
       return {
         index,
         req: finalRequest,
         resourceType,
-        directivesImpliedBypass: isRequestingCacheBypass(
-          finalRequest.directives,
-        ),
+        directivesImpliedBypass,
         settleFetchOnce: (
           collapsed: boolean,
           disposition: CacheFetchDisposition,
@@ -416,33 +445,51 @@ export function wrapBulkProducer<
             return;
           }
           fetchSettled = true;
-          publishCacheFetch({
-            cache: cache.name,
-            resourceType: resourceType,
-            resourceId: req.id,
-            collapsed,
-            ...disposition,
-          });
+          const publish = () => {
+            if (fetchSuppressed) return;
+            publishCacheFetch({
+              cache: cache.name,
+              resourceType,
+              resourceId: req.id,
+              collapsed,
+              ...disposition,
+            });
+          };
+          if (
+            directivesImpliedBypass &&
+            !cacheReadPolicyKnown &&
+            disposition.disposition !== "aborted"
+          )
+            deferredBypassPublications.push(publish);
+          else publish();
         },
         suppressFetch: () => {
           fetchSettled = true;
+          fetchSuppressed = true;
         },
       };
-    });
+    };
+
+    const items: RequestItem[] =
+      reqs.length <= 32
+        ? reqs.map(prepareRequest)
+        : await mapCooperatively(reqs, prepareRequest);
 
     // Skipped entirely for a bare producer, which declares no covered set
     // because it covers the whole registry (see wrapProducer's docs) -- hence
     // the hoisted test, so the common case doesn't walk the batch to make N
     // calls that each return immediately.
     if (covered !== undefined) {
-      items.forEach((item) => {
+      const checkCoverage = (item: RequestItem) => {
         assertResourceTypeCovered(
           cache.name,
           covered,
           item.resourceType,
           item.req.id,
         );
-      });
+      };
+      if (items.length <= 32) items.forEach(checkCoverage);
+      else await forEachCooperatively(items, checkCoverage);
     }
 
     // Every abort-caused rejection settles the still-unsettled elements as
@@ -466,10 +513,14 @@ export function wrapBulkProducer<
 
     // Separate bypass requests (which skip the cache read entirely; see
     // wrapProducer's docs) from the rest.
-    const [bypassItems, readItems] = partition(
-      items,
-      (item) => item.directivesImpliedBypass,
-    );
+    const bypassItems: RequestItem[] = [];
+    const readItems: RequestItem[] = [];
+    const partitionItem = (item: RequestItem) => {
+      (item.directivesImpliedBypass ? bypassItems : readItems).push(item);
+    };
+    if (items.length <= 32) items.forEach(partitionItem);
+    else await forEachCooperatively(items, partitionItem);
+    const attachedRides = new Map<RequestItem, boolean>();
 
     logTrace(`separated bypass and cache-eligible requests`, {
       totalRequests: reqs.length,
@@ -502,24 +553,40 @@ export function wrapBulkProducer<
     // results. One invocation per call at batch collapse granularity (see the
     // COLLAPSE GRANULARITY note above); it returns a list so its callers can
     // concatenate their trigger classes, and so an empty set attaches nothing.
-    const attachGroups = (
+    const attachGroups = async (
       groupItems: readonly ProducerBoundItem[],
       trigger: CollapsedInvocation["trigger"],
-    ): AttachedGroup[] => {
+    ): Promise<AttachedGroup[]> => {
       if (groupItems.length === 0) {
         return [];
       }
 
-      const bareItems = groupItems.map(({ item }) => item);
-      const attached = collapsedCallProducerAndStore(trigger, bareItems);
-
+      const bareItems = await mapCooperatively(groupItems, ({ item }) => item);
+      // Serializing one completed request at a time produces the same stable
+      // JSON array key while allowing other event-loop work between elements.
+      const collapseKey = await stableStringifyArrayCooperatively(
+        await mapCooperatively(bareItems, (item) => item.req),
+      );
+      if (trigger !== "revalidation" && signal?.aborted) {
+        throwAborted(
+          items.map((item) => ({
+            item,
+            rode: attachedRides.get(item) ?? false,
+          })),
+        );
+      }
+      const attached = collapsedCallProducerAndStore(
+        trigger,
+        bareItems,
+        collapseKey,
+      );
       const handled = attached.promise.then(
-        (producerResults): (LooseEntry | ErrorType)[] =>
-          // zip is safe: the invocation task validates result completeness
-          // before resolving (an under-return rejects the whole invocation,
-          // handled below)
-          zip2(groupItems, producerResults).map(
-            ([{ item, usableIfError }, producerResult]) => {
+        async (producerResults): Promise<(LooseEntry | ErrorType)[]> => {
+          // The invocation validates positional completeness before resolving.
+          return mapCooperatively(
+            groupItems,
+            ({ item, usableIfError }, index) => {
+              const producerResult = producerResults[index]!;
               if (producerResult instanceof Error) {
                 const fallback = usableIfError;
                 if (fallback) {
@@ -552,13 +619,14 @@ export function wrapBulkProducer<
                 SpecOf<RT>["id"]
               >(normalizeVaryBound, producerResult, item.req.id);
             },
-          ),
-        (error: unknown) => {
+          );
+        },
+        async (error: unknown) => {
           // The bulk producer itself rejected (it's supposed to return
           // Error elements for per-request failures instead). There's no
           // way to handle this per the wrapped function's contract except
           // rethrowing (we don't know the thrown value is an `ErrorType`).
-          groupItems.forEach(({ item }) => {
+          await forEachCooperatively(groupItems, ({ item }) => {
             item.settleFetchOnce(attached.rode, {
               disposition: "producer-error",
               directivesImpliedBypass: item.directivesImpliedBypass,
@@ -568,16 +636,25 @@ export function wrapBulkProducer<
         },
       );
 
+      // The ride-index pass can yield after the producer has already failed.
+      // Observe its rejection before that first yield without consuming it.
+      void handled.catch(() => {});
+      await forEachCooperatively(bareItems, (item) => {
+        attachedRides.set(item, attached.rode);
+      });
       return [{ items: bareItems, rode: attached.rode, handled }];
     };
 
     // Kick off the bypass requests' producer calls immediately (in parallel
     // with the cache read below): their directives guarantee producer
     // contact, so there's nothing to read first.
-    const bypassGroups = attachGroups(
-      bypassItems.map((item) => ({ item })),
-      "bypass",
-    );
+    const bypassGroups =
+      bypassItems.length === 0
+        ? []
+        : await attachGroups(
+            await mapCooperatively(bypassItems, (item) => ({ item })),
+            "bypass",
+          );
     // Insurance against unhandled rejections if this call throws before
     // awaiting the groups (e.g., a cache-read failure below): observing the
     // rejection here doesn't consume it for the real await.
@@ -599,7 +676,9 @@ export function wrapBulkProducer<
       readItems.length > 0
         ? await cache
             .getMany(
-              readItems.map((item) => item.req),
+              readItems.length <= 32
+                ? readItems.map((item) => item.req)
+                : await mapCooperatively(readItems, (item) => item.req),
               callOptions,
             )
             .catch((e: unknown) => {
@@ -636,7 +715,9 @@ export function wrapBulkProducer<
                   assertUnreachable(onCacheReadFailure);
               }
             })
+            .finally(releaseBypassPublications)
         : [];
+    if (readItems.length === 0) await releaseBypassPublications();
 
     // An abort that landed while the read was in flight (but didn't reject
     // it) settles everything as aborted before any miss reaches a producer.
@@ -644,7 +725,10 @@ export function wrapBulkProducer<
       throwAbortedForAllPending();
     }
 
-    const itemsWithCacheResults = zip2(readItems, cacheResults);
+    const itemsWithCacheResults = await mapCooperatively(
+      readItems,
+      (item, index) => [item, cacheResults[index]!] as const,
+    );
 
     // Results are written straight into their caller-order slot via
     // `item.index`, so there is no identity map to keep consistent. Sparse by
@@ -659,8 +743,8 @@ export function wrapBulkProducer<
     const settleFromCache = (
       field: "usable" | "usableWhileRevalidate",
       disposition: "served-from-cache" | "served-stale-while-revalidating",
-    ): RequestItem[] =>
-      itemsWithCacheResults.flatMap(([item, res]) => {
+    ): Promise<RequestItem[]> =>
+      flatMapCooperatively(itemsWithCacheResults, ([item, res]) => {
         const entry = res[field];
         if (!entry) {
           return [];
@@ -670,35 +754,42 @@ export function wrapBulkProducer<
         return [item];
       });
 
-    settleFromCache("usable", "served-from-cache");
-    const revalidateItems = settleFromCache(
+    await settleFromCache("usable", "served-from-cache");
+    const revalidateItems = await settleFromCache(
       "usableWhileRevalidate",
       "served-stale-while-revalidating",
     );
 
     // Call the producers immediately for requests that can't be satisfied
     // directly from cache.
-    const itemsNeedingProducerNow = itemsWithCacheResults.filter(
-      ([, res]) => !(res.usable ?? res.usableWhileRevalidate),
+    const itemsNeedingProducerNow = await flatMapCooperatively(
+      itemsWithCacheResults,
+      (pair) =>
+        !(pair[1].usable ?? pair[1].usableWhileRevalidate) ? [pair] : [],
     );
 
-    const missGroups = attachGroups(
-      itemsNeedingProducerNow.map(([item, res]) => ({
+    const missGroups = await attachGroups(
+      await mapCooperatively(itemsNeedingProducerNow, ([item, res]) => ({
         item,
         usableIfError: res.usableIfError,
       })),
       "miss",
     );
 
+    // Cooperative refresh preparation may yield before the final foreground
+    // await. Observe fast miss failures now so none become unhandled.
+    missGroups.forEach((group) => void group.handled.catch(() => {}));
+
     // Start background refreshes but don't await them; swallow any errors
     // rather than crashing. No signal here since this is fire-and-forget
     // background work. (These items' fetch messages already settled above, so
     // the shared group machinery publishes nothing for them.)
     if (revalidateItems.length > 0) {
-      attachGroups(
-        revalidateItems.map((item) => ({ item })),
+      const refreshGroups = await attachGroups(
+        await mapCooperatively(revalidateItems, (item) => ({ item })),
         "revalidation",
-      ).forEach((group) => {
+      );
+      refreshGroups.forEach((group) => {
         group.handled.catch(() => {
           logWarning(
             "error asynchronously requesting refreshed content from bulk producer",
@@ -729,11 +820,11 @@ export function wrapBulkProducer<
       throw e;
     }
 
-    zip2(foregroundGroups, groupResults).forEach(([group, groupResult]) => {
-      zip2(group.items, groupResult).forEach(([item, result]) => {
-        orderedResults[item.index] = result;
+    for (const [group, groupResult] of zip2(foregroundGroups, groupResults)) {
+      await forEachCooperatively(group.items, (item, index) => {
+        orderedResults[item.index] = groupResult[index]!;
       });
-    });
+    }
 
     return orderedResults;
   };

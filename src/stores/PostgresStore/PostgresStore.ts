@@ -1,4 +1,10 @@
 import { chunk } from "es-toolkit";
+import {
+  mapCooperatively,
+  forEachCooperatively,
+  mapFromEntriesCooperatively,
+  sortCooperatively,
+} from "../../utils/cooperative.js";
 import type { ColumnType, PostgresPool, RawBuilder, SqlBool } from "kysely";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import type { Tagged } from "type-fest";
@@ -40,7 +46,7 @@ import {
 import {
   defaultLoggersByComponent,
   jsonStringify,
-  keepMaxPerGroup,
+  keepMaxPerGroupCooperatively,
 } from "../../utils/utils.js";
 
 /** Three parameters per request: index, ID, and JSONB params. */
@@ -348,7 +354,26 @@ export default class PostgresStore<
     return results as StoreGetManyResult<Spec, Reqs, Validators, Params>;
   }
 
-  async store(
+  #mutationTail: Promise<void> = Promise.resolve();
+
+  // Cooperative preparation and split transactions must finish before a later
+  // mutation starts. Otherwise an earlier write can recreate an invalidated id.
+  #mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = this.#mutationTail.then(operation);
+    this.#mutationTail = pending.then(
+      () => {},
+      () => {},
+    );
+    return pending;
+  }
+
+  store(
+    entries: readonly StoreEntryInput<Spec, Validators, Params>[],
+  ): Promise<readonly StoreEntryResult[]> {
+    return this.#mutate(() => this.#store(entries));
+  }
+
+  async #store(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
     this.logTrace("storing entries", entries);
@@ -364,8 +389,11 @@ export default class PostgresStore<
     // query, so collapse entries that share a slot (id + vary), keeping the
     // newest by birth date. Dropped duplicates report `{}` (they weren't the
     // value compared/stored).
-    const deduped = keepMaxPerGroup({
-      items: entries.map((it, originalIndex) => ({ it, originalIndex })),
+    const deduped = await keepMaxPerGroupCooperatively({
+      items: await mapCooperatively(entries, (it, originalIndex) => ({
+        it,
+        originalIndex,
+      })),
       groupBy: ({ it }) => this.slotKey(it.entry),
       maxBy: ({ it }) => entryUtils.birthDate(it.entry).getTime(),
     });
@@ -376,13 +404,13 @@ export default class PostgresStore<
     // concurrent calls whose batches share >= 2 slots in DIFFERENT orders
     // could otherwise deadlock (each holding a row the other is waiting on).
     // With a consistent order, the later call just waits for the earlier one.
-    const rows = deduped
-      .map(({ it }) => ({
+    const rows = await sortCooperatively(
+      await mapCooperatively(deduped, ({ it }) => ({
         resource_id: it.entry.id,
         vary: this.serializeVary(it.entry.vary),
         entry: this.serializeEntry(it.entry),
-      }))
-      .toSorted((a, b) =>
+      })),
+      (a, b) =>
         a.resource_id < b.resource_id
           ? -1
           : a.resource_id > b.resource_id
@@ -392,88 +420,116 @@ export default class PostgresStore<
               : a.vary > b.vary
                 ? 1
                 : 0,
-      );
-    const resourceIds = [...new Set(deduped.map(({ it }) => it.entry.id))];
-
-    // One statement with two sibling CTEs sharing a single snapshot: `old` reads
-    // each affected slot's validators as they were BEFORE this call, while
-    // `upsert` overwrites the rows. A data-modifying CTE runs even though the
-    // final query doesn't reference `upsert`, so the write still happens; and
-    // because both CTEs see the pre-statement snapshot, `old` reflects the
-    // state before the upsert. We select `old` back to compare in JS (the same
-    // `validatorsEqual` the other stores use), rather than comparing in SQL.
-    //
-    // Concurrency caveat: this store plays a little loose with the contract's
-    // "as it was before this store() call" under a same-slot race. The
-    // classification comes from this statement's snapshot, but ON CONFLICT DO
-    // UPDATE can still see -- and overwrite -- a row a concurrent writer
-    // committed after that snapshot was taken. In that window we may report
-    // "is-new" (or a stale changed/unchanged) even though the upsert actually
-    // replaced the concurrent write. We accept that approximation for cache
-    // workloads rather than pay for row locks (SELECT ... FOR UPDATE) on
-    // every store; MemoryStore (synchronous) and SqliteStore (one write
-    // transaction) are exact.
-    // NB: kysely can't keep the row type for columns whose type depends on this
-    // class's `Params`/`Validators` generics, so -- as in `get` -- we cast the
-    // read-back rows to their known shape. The query *construction* above is
-    // still fully checked by kysely (table, columns, insert shape, on-conflict).
-    const oldRows = (await this.db
-      .with("old", (c) =>
-        c
-          .selectFrom(this.tableName)
-          .where("resource_id", "in", resourceIds)
-          .select((eb) => [
-            "resource_id",
-            "vary",
-            sql<Partial<Validators>>`${eb.ref("entry")} -> 'validators'`.as(
-              "validators",
-            ),
-          ]),
-      )
-      .with("upsert", (c) =>
-        c
-          .insertInto(this.tableName)
-          .values(rows)
-          .onConflict((oc) =>
-            oc
-              .columns(["resource_id", "vary"])
-              .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") })),
-          ),
-      )
-      .selectFrom("old")
-      .selectAll("old")
-      .execute()
-      .catch((error: unknown) => {
-        this.logError("failed to store entries", error);
-        throw error;
-      })) as unknown as readonly {
+    );
+    const resourceIds = new Set<string>();
+    await forEachCooperatively(deduped, ({ it }) => {
+      resourceIds.add(it.entry.id);
+    });
+    type OldRow = {
       resource_id: string;
       vary: Readonly<NormalizedVary<Params>>;
       validators: Partial<Validators>;
-    }[];
+    };
+    const oldQuery = this.db
+      .selectFrom(this.tableName)
+      .select((eb) => [
+        "resource_id",
+        "vary",
+        sql<Partial<Validators>>`${eb.ref("entry")} -> 'validators'`.as(
+          "validators",
+        ),
+      ]);
+    const batchSize = 1_000;
+    let oldRows: readonly OldRow[];
+    try {
+      if (rows.length <= batchSize) {
+        // Keep the one-statement fast path for ordinary small cache writes.
+        oldRows = (await this.db
+          .with("old", () =>
+            oldQuery.where("resource_id", "in", [...resourceIds]),
+          )
+          .with("upsert", (c) =>
+            c
+              .insertInto(this.tableName)
+              .values(rows)
+              .onConflict((oc) =>
+                oc
+                  .columns(["resource_id", "vary"])
+                  .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") })),
+              ),
+          )
+          .selectFrom("old")
+          .selectAll("old")
+          .execute()) as unknown as readonly OldRow[];
+      } else {
+        // One encoded parameter avoids both expanded IN parameters and a
+        // full-cohort synchronous array-encoding pass in the Postgres driver.
+        const resourceIdsJson = `[${(await mapCooperatively(resourceIds, (id) => JSON.stringify(id))).join(",")}]`;
+        const previousQuery = oldQuery.where(
+          sql<SqlBool>`${sql.ref("resource_id")} IN (SELECT jsonb_array_elements_text(${resourceIdsJson}::jsonb))`,
+        );
+        oldRows = await this.db.transaction().execute(async (trx) => {
+          // Capture ONE pre-write statement snapshot for every input slot.
+          // Repeating this SELECT per batch would change comparison metadata.
+          const previous = await trx.executeQuery<OldRow>(
+            previousQuery.compile(),
+          );
+          // Sort the whole call before batching. The identical JS comparator
+          // preserves global lock order with older one-statement writers.
+          for (let start = 0; start < rows.length; start += batchSize) {
+            await trx
+              .insertInto(this.tableName)
+              .values(rows.slice(start, start + batchSize))
+              .onConflict((oc) =>
+                oc
+                  .columns(["resource_id", "vary"])
+                  .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") })),
+              )
+              .execute();
+          }
+          return previous.rows;
+        });
+      }
+    } catch (error: unknown) {
+      this.logError("failed to store entries", error);
+      throw error;
+    }
     this.logTrace("stored entries successfully");
 
-    // Index each affected slot's pre-call validators, so a slot with no row here
-    // is one that didn't exist before the call (i.e. "is-new").
-    const oldValidatorsBySlot = new Map(
-      oldRows.map((row) => [
-        this.slotKey({ id: row.resource_id, vary: row.vary }),
-        row.validators,
-      ]),
+    // Like the former one-statement path, comparisons use the pre-write
+    // snapshot. A concurrent writer may still commit between that snapshot
+    // and an upsert, so this metadata remains approximate under same-slot races.
+    // Build comparison metadata after the transaction releases its connection.
+    const oldValidatorsBySlot = await mapFromEntriesCooperatively(
+      await mapCooperatively(
+        oldRows,
+        (row) =>
+          [
+            this.slotKey({ id: row.resource_id, vary: row.vary }),
+            row.validators,
+          ] as const,
+      ),
     );
 
     // Each deduped ("winner") entry reports its relationship, keyed back to its
     // original input index.
-    const resultByInputIndex = new Map<number, StoreEntryResult>(
-      deduped.map(({ it, originalIndex }) => [
-        originalIndex,
-        this.#relationshipToExisting(it.entry, oldValidatorsBySlot),
-      ]),
+    const resultByInputIndex = await mapFromEntriesCooperatively(
+      await mapCooperatively(
+        deduped,
+        ({ it, originalIndex }) =>
+          [
+            originalIndex,
+            this.#relationshipToExisting(it.entry, oldValidatorsBySlot),
+          ] as const,
+      ),
     );
 
     // Map back onto the full input order; every input that isn't a winner (a
     // dropped within-call duplicate) isn't in the map and so is omitted.
-    return entries.map((_entry, index) => resultByInputIndex.get(index) ?? {});
+    return mapCooperatively(
+      entries,
+      (_entry, index) => resultByInputIndex.get(index) ?? {},
+    );
   }
 
   /**
@@ -516,7 +572,11 @@ export default class PostgresStore<
     };
   }
 
-  async delete(id: Spec["id"]): Promise<void> {
+  delete(id: Spec["id"]): Promise<void> {
+    return this.#mutate(() => this.#delete(id));
+  }
+
+  async #delete(id: Spec["id"]): Promise<void> {
     this.logTrace("deleting entries for id", id);
     await this.ensureInitializedPromise;
 
