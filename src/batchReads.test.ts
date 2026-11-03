@@ -59,7 +59,6 @@ const batchedCacheOver = (store: MemoryStore<Spec, AnyValidators, AnyParams>) =>
     store,
     name: uniqueCacheName("batch-reads"),
     resourceTypes: ACCEPT_ANY_REGISTRY,
-    batchReads: true,
   });
 
 const lookup = (id: string, params: Record<string, string> = {}) => ({
@@ -80,6 +79,7 @@ describe("Cache with batchReads", suiteOptions, () => {
       store,
       name: uniqueCacheName("unbatched"),
       resourceTypes: ACCEPT_ANY_REGISTRY,
+      batchReads: false,
     });
     await batched.store([
       { id: "plain", content: "plain", directives: freshFor100 },
@@ -153,14 +153,13 @@ describe("Cache with batchReads", suiteOptions, () => {
     assert.deepEqual(getManyRequestCounts(), [2]);
   });
 
-  it("flushes at the next setImmediate, and a later get starts the next batch", async () => {
+  it("dispatches before the next setImmediate, and a later get starts the next batch", async () => {
     const { store, getManyRequestCounts } = spiedStore();
     const cache = batchedCacheOver(store);
 
     const first = cache.get(lookup("a"));
-    // setImmediate callbacks run in order, so the batch's flush, which the
-    // get scheduled first, has run by the time this one resolves. A flush on
-    // a timer would not have.
+    // DataLoader dispatches after Promise continuations and before the
+    // next check phase.
     await nextTurn();
     assert.deepEqual(getManyRequestCounts(), [1]);
 
@@ -169,7 +168,7 @@ describe("Cache with batchReads", suiteOptions, () => {
     assert.deepEqual(getManyRequestCounts(), [1, 1]);
   });
 
-  it("splits a flush of 1,200 requests into getMany calls of at most 500", async () => {
+  it("splits a flush of 1,200 requests into getMany calls of at most 50", async () => {
     const { store, getManyRequestCounts } = spiedStore();
     const cache = batchedCacheOver(store);
     const ids = Array.from({ length: 1200 }, (_, i) => `id:${String(i)}`);
@@ -181,8 +180,8 @@ describe("Cache with batchReads", suiteOptions, () => {
       ids.map(async (id) => cache.get(lookup(id))),
     );
 
-    // README.md and the batchReads docs state the 500 cap.
-    assert.deepEqual(getManyRequestCounts(), [500, 500, 200]);
+    // README.md and the batchReads docs state the default 50 cap.
+    assert.deepEqual(getManyRequestCounts(), Array(24).fill(50));
     assert.deepEqual(
       results.map((it) => it.usable?.content),
       ids,
@@ -336,13 +335,51 @@ describe("Cache with batchReads", suiteOptions, () => {
     assert.deepEqual(getManyRequestCounts(), []);
   });
 
+  it("passes custom scheduling and batch size to DataLoader without caching reads", async () => {
+    const { store, getManyRequestCounts } = spiedStore();
+    const callbacks: (() => void)[] = [];
+    const cache = new Cache({
+      store,
+      name: uniqueCacheName("custom-batching"),
+      resourceTypes: ACCEPT_ANY_REGISTRY,
+      batchReads: {
+        maxBatchSize: 2,
+        batchScheduleFn: (dispatch) => {
+          callbacks.push(dispatch);
+        },
+      },
+    });
+    const request = lookup("same");
+    const pending = [
+      cache.get(request),
+      cache.get(request),
+      cache.get(lookup("other")),
+    ];
+    assert.deepEqual(getManyRequestCounts(), []);
+    callbacks.splice(0).forEach((dispatch) => dispatch());
+    await Promise.all(pending);
+    assert.deepEqual(getManyRequestCounts(), [2, 1]);
+    await cache.store([
+      { id: "same", content: "updated", directives: freshFor100 },
+    ]);
+    const repeated = cache.get(request);
+    callbacks.splice(0).forEach((dispatch) => dispatch());
+    assert.equal((await repeated).usable?.content, "updated");
+    assert.deepEqual(getManyRequestCounts(), [2, 1, 1]);
+    const last = cache.get(request);
+    await cache.close();
+    await last;
+    callbacks.splice(0).forEach((dispatch) => dispatch());
+    assert.deepEqual(getManyRequestCounts(), [2, 1, 1, 1]);
+  });
+
   it("is forwarded by singleTypeCacheOptions", async () => {
     const { store, getCallCount, getManyRequestCounts } = spiedStore();
     const cache = new Cache(
       singleTypeCacheOptions<string>()({
         store,
         name: uniqueCacheName("batch-reads-single-type"),
-        batchReads: true,
+        batchReads: {},
       }),
     );
 
@@ -404,7 +441,7 @@ describe(
           store: fixture.postgresStore,
           name: uniqueCacheName("batch-reads-postgres"),
           resourceTypes: ACCEPT_ANY_REGISTRY,
-          batchReads: true,
+          batchReads: {},
         });
         const ids = Array.from({ length: 10 }, (_, i) => `id:${String(i)}`);
         await cache.store(

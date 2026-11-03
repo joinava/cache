@@ -46,7 +46,10 @@ import {
   normalizeVary,
 } from "./utils/normalization.js";
 import * as entryUtils from "./utils/normalizedProducerResultResourceHelpers.js";
-import { StoreReadBatcher } from "./utils/storeReadBatcher.js";
+import {
+  StoreReadBatcher,
+  type ReadBatchOptions,
+} from "./utils/storeReadBatcher.js";
 import { assertUnreachable, defaultLoggersByComponent } from "./utils/utils.js";
 
 /**
@@ -209,18 +212,12 @@ export type CacheOptions<
   normalizeParamName?: NormalizeParamName<Params>;
   normalizeParamValue?: NormalizeParamValue<Params>;
   /**
-   * Batch concurrent `get()` calls into `store.getMany()` calls of up to 500
-   * requests, flushed on the next `setImmediate`. Defaults to `false`.
-   *
-   * Useful for per-id fan-out over stores with efficient bulk reads, such as
-   * `PostgresStore`. Each request keeps its own result, freshness check,
-   * abort signal, and diagnostics. A failed `getMany()` rejects all requests
-   * in that call.
-   *
-   * See [Batching concurrent reads](../README.md#batching-concurrent-reads-batchreads)
-   * for examples and details on aborts, shutdown, tracing, and store limits.
+   * Batch concurrent reads with DataLoader (always with caching disabled).
+   * Enabled by default, with maxBatchSize 50 and DataLoader's scheduling.
+   * Supply maxBatchSize and/or batchScheduleFn to customize batching, or
+   * false to use individual store.get calls. Failures affect the whole batch.
    */
-  batchReads?: boolean;
+  batchReads?: ReadBatchOptions | false;
 };
 
 /**
@@ -259,7 +256,7 @@ export default class Cache<
 > {
   readonly #logger: Bind1<Logger, "cache">;
   readonly #dataStore: Store<StoreSupportedTypes, Validators, Params>;
-  /** Set iff the cache was built with `batchReads: true`. */
+  /** Set iff the cache was built with batching enabled. */
   readonly #readBatcher:
     | StoreReadBatcher<StoreSupportedTypes, Validators, Params>
     | undefined;
@@ -300,8 +297,8 @@ export default class Cache<
     this.#logger = unboundLogger.bind(null, "cache");
     this.#dataStore = options.store;
     this.#readBatcher =
-      options.batchReads === true
-        ? new StoreReadBatcher(this.#dataStore)
+      options.batchReads !== false
+        ? new StoreReadBatcher(this.#dataStore, options.batchReads ?? {})
         : undefined;
     this.#onGetAfterClose = options.onGetAfterClose ?? "throw";
     this.#onStoreAfterClose = options.onStoreAfterClose ?? "throw";

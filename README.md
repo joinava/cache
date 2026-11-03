@@ -126,31 +126,31 @@ This is particularly useful when a producer that fetches a collection wants to a
 
 ### Batching concurrent reads (`batchReads`)
 
-Each `cache.get()` normally makes its own `store.get()` call. For `PostgresStore`, that is one query, and one pool connection, per call. Code that fans out one lookup per id, such as a `wrapProducer` loader called for each id in a list, therefore runs N queries for N ids.
+With batching disabled, each `cache.get()` makes its own `store.get()` call. For `PostgresStore`, that is one query, and one pool connection, per call. Code that fans out one lookup per id, such as a `wrapProducer` loader called for each id in a list, therefore runs N queries for N ids.
 
-Set `batchReads: true` to let the `get()` calls of one event-loop turn share one `store.getMany()` call:
+Reads are batched by default using DataLoader with `cache: false`. Configure its batch size and scheduler with `batchReads`:
 
 ```ts
 const cache = new Cache({
   store: new PostgresStore(pool, { schemaName: "cache", tableName: "visits" }),
   name: "visits",
   resourceTypes: visitsResourceTypes,
-  batchReads: true,
+  batchReads: { maxBatchSize: 50, batchScheduleFn: setImmediate },
 });
 
 // One `select ... where resource_id in (...)`, not ten selects:
 await Promise.all(visitIds.map((id) => getVisit({ id })));
 ```
 
-`singleTypeCacheOptions` accepts the option too. It is off by default.
+`singleTypeCacheOptions` accepts the option too. Batching is enabled by default with `maxBatchSize: 50` and DataLoader’s default scheduler. Set `batchReads: false` to disable it. DataLoader never caches results, even for identical requests.
 
 - **Requests share one query, never one result.** Each `get()` still classifies its own id, evaluates freshness at its own `now`, selects its own entry, and publishes its own `read` message. So a batched `get()` that succeeds returns what an unbatched one returns.
-- **A read waits for one event-loop turn.** The first `get()` of a turn schedules the flush with `setImmediate`, and every `get()` in the same turn joins it. There is no timer and no configurable window. A `get()` in a later turn goes into a later batch.
-- **One `getMany` call takes at most 500 requests.** A larger flush runs several calls concurrently.
+- **Scheduling is configurable.** By default, DataLoader dispatches after Promise continuations. `batchScheduleFn` receives a dispatch callback and must invoke it in the immediate future; for example, pass `setImmediate` to gather reads until the next check phase.
+- **One `getMany` call takes at most 50 requests by default.** Set `maxBatchSize` to change this limit. Larger batches split into independent calls.
 - **Aborts stay per request.** The shared `getMany` call runs without a signal. A request whose signal aborts, while it waits or while its batch's query runs, rejects at once with the signal's reason and publishes no `read` message.
 - **A store failure is shared.** When a `getMany` call fails, every request in it rejects with the error, and each publishes its own `read-failed` message. The cause can be one request's input. For example, Postgres rejects a statement that binds an id with U+0000, so that id fails every request in its `getMany` call, including other callers' requests.
 - **`close()` starts the queued reads before it closes the store.** It does not wait for them to settle, as it does not wait for unbatched reads. The store's own close handles reads in flight.
-- **The query runs in the first caller's async context.** `setImmediate` captures the async context (for example, `AsyncLocalStorage` stores and the active tracing span) of the `get()` that opened the batch. So the query's span appears in that caller's trace only.
+- **The query runs in the first caller's async context.** The default scheduler captures the async context (for example, `AsyncLocalStorage` stores and the active tracing span) of the `get()` that opened the batch; a custom scheduler controls the dispatch context. So the query's span appears in that caller's trace only.
 - **The store answers with `getMany`, not `get`.** The two agree for every input that both accept. One difference: `PostgresStore.get` rejects a string param that holds U+0000 or a lone surrogate, because Postgres cannot read it as `jsonb`, and `getMany` matches it in JS instead.
 
 Batching only saves round trips when the store's `getMany` reads all of its requests in one operation. `PostgresStore` and `SqliteStore` do. A custom store that implements `getMany` with `naiveGetMany` still runs one `get` per request; see ["Guidelines for Authoring a Store"](./docs/implementing-a-store.md). `PostgresStore.getMany` loads every stored variant of each requested id, so do not batch the reads of a cache whose producers vary on a high-cardinality param, such as one variant per user.

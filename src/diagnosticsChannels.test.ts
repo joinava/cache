@@ -79,6 +79,8 @@ const makeHarness = (label: string) => {
   const name = uniqueCacheName(label);
   const store = new MemoryStore();
   const cache = new Cache({
+    // These tests inject or count individual store.get calls.
+    batchReads: false,
     store: store,
     name,
     resourceTypes: registry,
@@ -356,6 +358,8 @@ describe("diagnostics channels (§6.5)", () => {
       const name = uniqueCacheName("read-after-close");
       const store = new MemoryStore();
       const cache = new Cache({
+        // These tests inject or count individual store.get calls.
+        batchReads: false,
         store: store,
         name,
         resourceTypes: registry,
@@ -1306,6 +1310,8 @@ describe("diagnostics channels (§6.5)", () => {
     it("sole-type caches attribute every message to the sole resource type, even with the trivial guard", async () => {
       const name = uniqueCacheName("fetch-sole-type");
       const cache = new Cache({
+        // These tests inject or count individual store.get calls.
+        batchReads: false,
         store: new MemoryStore(),
         name,
         resourceTypes: soleVisitsRegistry,
@@ -2298,6 +2304,8 @@ describe("diagnostics channels (§6.5)", () => {
       const name = uniqueCacheName("golden-e2e");
       const store = new MemoryStore();
       const cache = new Cache({
+        // These tests inject or count individual store.get calls.
+        batchReads: false,
         store: store,
         name,
         resourceTypes: registry,

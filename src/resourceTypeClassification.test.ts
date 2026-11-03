@@ -776,7 +776,7 @@ describe("a one-entry registry with a real guard rejects nonconforming ids", () 
 
   it("throws UnclassifiableIdError before the store is touched, while the sugar's accept-everything form does not", async () => {
     const store = new MemoryStore();
-    const getSpy = mock.method(store, "get");
+    const getSpy = mock.method(store, "getMany");
     const name = uniqueCacheName("sole-guarded");
     const capture = captureChannels(name);
     const cache = new Cache({ store, name, resourceTypes: guardedRegistry });

@@ -44,9 +44,16 @@ const testCacheOptions = {
 // on writes), so the factory hands back both. Instantiated at a concrete
 // registry, which is why it needs no cast -- see the note in
 // test/v2AcceptanceHelpers.ts.
-const makeTestStoreAndCache = () => {
+const makeTestStoreAndCache = (batchReads?: false) => {
   const store = new MemoryStore<SpecOf<typeof testRegistry>>();
-  return { store, cache: new Cache({ store, ...testCacheOptions }) };
+  return {
+    store,
+    cache: new Cache({
+      store,
+      ...testCacheOptions,
+      batchReads: batchReads ?? {},
+    }),
+  };
 };
 
 describe("wrapBulkProducer", () => {
@@ -102,7 +109,7 @@ describe("wrapBulkProducer", () => {
           fc.asyncProperty(
             UsableWhileRevalidateEntryArb,
             async ({ entry, consumerDirs }) => {
-              const { store, cache } = makeTestStoreAndCache();
+              const { store, cache } = makeTestStoreAndCache(false);
               const storeMock = mock.method(store, "store");
               try {
                 await store.store([{ entry, maxStoreForSeconds: 100 }]);
@@ -204,7 +211,7 @@ describe("wrapBulkProducer", () => {
             UnusableEntryArb,
             fc.boolean(),
             async ({ entry, consumerDirs }, shouldStoreEntry) => {
-              const { store, cache } = makeTestStoreAndCache();
+              const { store, cache } = makeTestStoreAndCache(false);
               try {
                 if (shouldStoreEntry) {
                   await store.store([{ entry, maxStoreForSeconds: 100 }]);
@@ -547,7 +554,10 @@ describe("wrapBulkProducer", () => {
             content: `ok-${req.id}`,
             directives: { freshUntilAge: 100 },
           })),
-          { content: "extra-nobody-asked-for", directives: { freshUntilAge: 100 } },
+          {
+            content: "extra-nobody-asked-for",
+            directives: { freshUntilAge: 100 },
+          },
         ],
       );
       const wrappedBulkProducer = wrapBulkProducer({ cache }, bulkProducer);

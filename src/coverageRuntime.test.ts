@@ -52,6 +52,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
   describe("construction throws on a keyless producers/branches record", () => {
     it("wrapHashedInputProducer / wrapBulkHashedInputProducer: empty record and bare function both throw at construction time", async () => {
       const cache = new Cache({
+        // These tests inject or count individual store.get calls.
+        batchReads: false,
         store: new MemoryStore(),
         name: uniqueCacheName("construct-computing"),
         resourceTypes: registry,
@@ -86,6 +88,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       const getSpy = mock.method(store, "get");
       const getManySpy = mock.method(store, "getMany");
       const cache = new Cache({
+        // These tests inject or count individual store.get calls.
+        batchReads: false,
         store: store,
         name,
         resourceTypes: threeTypeRegistry,
@@ -149,6 +153,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       const getSpy = mock.method(store, "get");
       const getManySpy = mock.method(store, "getMany");
       const cache = new Cache({
+        // These tests inject or count individual store.get calls.
+        batchReads: false,
         store: store,
         name,
         resourceTypes: registry,
@@ -197,6 +203,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     it("each wrapper serves only its own types; entries written by one (supplementals) are served by the other without producer contact", async () => {
       const name = uniqueCacheName("partial-wrappers");
       const cache = new Cache({
+        // These tests inject or count individual store.get calls.
+        batchReads: false,
         store: new MemoryStore(),
         name,
         resourceTypes: registry,
@@ -275,6 +283,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("single-branch: no matchesInput required; caches by the branch's hashInput", async () => {
       const cache = new Cache({
+        // These tests inject or count individual store.get calls.
+        batchReads: false,
         store: new MemoryStore(),
         name: uniqueCacheName("computing-single"),
         resourceTypes: registry,
@@ -322,6 +332,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("multi-branch: dispatches by matchesInput; each branch mints and serves its own type's ids", async () => {
       const cache = new Cache({
+        // These tests inject or count individual store.get calls.
+        batchReads: false,
         store: new MemoryStore(),
         name: uniqueCacheName("computing-multi"),
         resourceTypes: registry,
@@ -372,6 +384,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("an input that no covered branch's matchesInput accepts rejects", async () => {
       const cache = new Cache({
+        // These tests inject or count individual store.get calls.
+        batchReads: false,
         store: new MemoryStore(),
         name: uniqueCacheName("computing-unmatched"),
         resourceTypes: registry,
@@ -411,6 +425,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     it("a branch whose hashInput mints an unclassifiable id throws UnclassifiableIdError naming the branch", async () => {
       const name = uniqueCacheName("computing-bad-hash");
       const cache = new Cache({
+        // These tests inject or count individual store.get calls.
+        batchReads: false,
         store: new MemoryStore(),
         name,
         resourceTypes: registry,
@@ -445,6 +461,8 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("a branch whose hashInput mints ANOTHER type's id (its own guard rejects it) throws", async () => {
       const cache = new Cache({
+        // These tests inject or count individual store.get calls.
+        batchReads: false,
         store: new MemoryStore(),
         name: uniqueCacheName("computing-cross-type-hash"),
         resourceTypes: registry,
