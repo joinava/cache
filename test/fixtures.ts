@@ -172,7 +172,7 @@ export function postgresEnvironmentIsConfigured(): boolean {
   );
 }
 
-/** Exposes each pool client's query mock for call inspection and overrides. */
+/** Exposes one query mock for all connections belonging to this pool. */
 export function postgresStoreFixture() {
   try {
     const postgres = new pg.Pool({
@@ -182,13 +182,12 @@ export function postgresStoreFixture() {
       user: process.env["DATABASE_USER"]!, // eslint-disable-line @typescript-eslint/no-non-null-assertion
       password: process.env["DATABASE_PASSWORD"]!, // eslint-disable-line @typescript-eslint/no-non-null-assertion
     });
-    const createQueryMock = (client: pg.PoolClient) =>
-      mock.fn(client.query.bind(client));
-    const queryMocks: ReturnType<typeof createQueryMock>[] = [];
+    // Keep the receiver: pg's query method uses `this` to reach the active
+    // connection. A shared, unbound mock records calls from every pool client.
+    // eslint-disable-next-line typescript-eslint/unbound-method -- Installed as client.query below; mock.fn preserves the receiver.
+    const queryMock = mock.fn(pg.Client.prototype.query);
     postgres.on("connect", (client) => {
-      const query = createQueryMock(client);
-      client.query = query;
-      queryMocks.push(query);
+      client.query = queryMock;
     });
     // Use a new schema AND table name for each store instance so that tests
     // (and test files, which node runs in parallel) can't interfere with each
@@ -209,7 +208,7 @@ export function postgresStoreFixture() {
     return {
       postgres,
       postgresStore,
-      queryMocks,
+      queryMock,
       async cleanup() {
         // eslint-disable-next-line no-console
         console.log("Cleaning up postgres store");

@@ -41,14 +41,12 @@ function makeEntry(
 async function getManyStatements(ids: readonly string[]) {
   const fixture = postgresStoreFixture();
   const statements = () =>
-    fixture.queryMocks
-      .flatMap((query) => query.mock.calls)
-      .map(({ arguments: [text, parameters] }) => ({
-        text: String(text),
-        parameterCount: Array.isArray(parameters as unknown)
-          ? (parameters as unknown[]).length
-          : 0,
-      }));
+    fixture.queryMock.mock.calls.map(({ arguments: [text, parameters] }) => ({
+      text: String(text),
+      parameterCount: Array.isArray(parameters as unknown)
+        ? (parameters as unknown[]).length
+        : 0,
+    }));
   try {
     const store = fixture.postgresStore;
     await store.store(
@@ -71,6 +69,41 @@ describe(
     ? { timeout: 60_000 }
     : { skip: "Postgres environment variables are not configured" },
   () => {
+    it("records queries from multiple pool connections in one mock", async () => {
+      const fixture = postgresStoreFixture();
+      try {
+        await fixture.postgresStore.store([
+          { entry: makeEntry("a"), maxStoreForSeconds: 60 },
+        ]);
+        const first = await fixture.postgres.connect();
+        const second = await fixture.postgres.connect();
+        try {
+          assert.notEqual(first, second);
+          const before = fixture.queryMock.mock.callCount();
+          const results = await Promise.all([
+            first.query("select $1::text as value", ["first"]),
+            second.query("select $1::text as value", ["second"]),
+          ]);
+          assert.deepEqual(
+            results.map(({ rows }) => rows),
+            [[{ value: "first" }], [{ value: "second" }]],
+          );
+          assert.equal(fixture.queryMock.mock.callCount() - before, 2);
+          assert.deepEqual(
+            fixture.queryMock.mock.calls
+              .slice(before)
+              .map(({ arguments: args }) => args[1]),
+            [["first"], ["second"]],
+          );
+        } finally {
+          first.release();
+          second.release();
+        }
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+
     it("reads 25 ids with one select statement", async () => {
       const ids = Array.from({ length: 25 }, (_, i) => `id:${String(i)}`);
 
@@ -120,9 +153,9 @@ describe(
     it("filters each request's variants in SQL, preserving null-as-absence, duplicates, and misses", async () => {
       const fixture = postgresStoreFixture();
       const statements = () =>
-        fixture.queryMocks
-          .flatMap((query) => query.mock.calls)
-          .map(({ arguments: [text] }) => String(text));
+        fixture.queryMock.mock.calls.map(({ arguments: [text] }) =>
+          String(text),
+        );
       try {
         const store = fixture.postgresStore;
         await store.store(
@@ -299,14 +332,11 @@ describe(
       try {
         const store = fixture.postgresStore;
         await store.store([{ entry: makeEntry("a"), maxStoreForSeconds: 60 }]);
-        for (const query of fixture.queryMocks) {
-          // Hold the store at its query boundary, then abort before the
-          // query resolves; getMany must reject after awaiting that result.
-          query.mock.mockImplementationOnce((async () => {
-            controller.abort(reason);
-            return { rows: [] };
-          }) as unknown as typeof query);
-        }
+        // Abort at the query boundary, before getMany receives its result.
+        fixture.queryMock.mock.mockImplementationOnce((async () => {
+          controller.abort(reason);
+          return { rows: [] };
+        }) as unknown as typeof fixture.queryMock);
 
         await assert.rejects(
           store.getMany([{ id: "a", params: noParams }], {

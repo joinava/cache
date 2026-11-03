@@ -493,11 +493,7 @@ describe(
   () => {
     it("reads 10 concurrent gets with one SQL statement", async () => {
       const fixture = postgresStoreFixture();
-      const queryCount = () =>
-        fixture.queryMocks.reduce(
-          (count, query) => count + query.mock.callCount(),
-          0,
-        );
+      const queryCount = () => fixture.queryMock.mock.callCount();
       try {
         const cache = new Cache({
           store: fixture.postgresStore,
