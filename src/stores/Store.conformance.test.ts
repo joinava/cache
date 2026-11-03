@@ -1,3 +1,4 @@
+import { sortBy } from "es-toolkit";
 import fc from "fast-check";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -5,8 +6,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { NormalizedProducerDirectivesArb } from "../../test/arbitraries/06_Normalization.js";
-import { postgresStoreFixture } from "../../test/fixtures.js";
+import {
+  NormalizedParamsArb,
+  NormalizedProducerDirectivesArb,
+} from "../../test/arbitraries/06_Normalization.js";
+import { StoreEntryInputArb } from "../../test/arbitraries/06_Store.js";
+import {
+  postgresEnvironmentIsConfigured,
+  postgresStoreFixture,
+} from "../../test/fixtures.js";
 import type {
   AnyValidators,
   CacheSpec,
@@ -16,6 +24,7 @@ import type {
   NormalizedVary,
   Store,
 } from "../types/index.js";
+import { jsonStringify } from "../utils/utils.js";
 import MemoryStore from "./MemoryStore/MemoryStore.js";
 import type { PostgresStoreSupportedParams } from "./PostgresStore/PostgresStore.js";
 import SqliteStore from "./SqliteStore/SqliteStore.js";
@@ -190,10 +199,11 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
             { nil: undefined },
           ),
         )
-        .map(([value, nested]): TestContent =>
-          nested !== undefined
-            ? { value, nested: reparent(nested) }
-            : { value },
+        .map(
+          ([value, nested]): TestContent =>
+            nested !== undefined
+              ? { value, nested: reparent(nested) }
+              : { value },
         );
 
       const validatorsArb = fc
@@ -265,7 +275,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       assert.equal(result.length, 1);
       assert.equal(result[0]?.directives.freshUntilAge, Infinity);
       assert.equal(result[0]?.directives.storeFor, Infinity);
-      assert.equal(result[0]?.directives.maxStale?.withoutRevalidation, Infinity);
+      assert.equal(
+        result[0]?.directives.maxStale?.withoutRevalidation,
+        Infinity,
+      );
       assert.equal(result[0]?.directives.maxStale?.whileRevalidate, Infinity);
       assert.equal(result[0]?.directives.maxStale?.ifError, Infinity);
     });
@@ -371,7 +384,9 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       // e.g. "constructor" to the inherited function and fail to match here.
       const noParams = {} as NormalizedParams<TestParams>;
       assert.deepEqual(
-        (await store.get("id", noParams)).map(({ content }) => content.value).sort(),
+        (await store.get("id", noParams))
+          .map(({ content }) => content.value)
+          .sort(),
         ["all-absent", "empty"],
       );
 
@@ -379,7 +394,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       // longer matches the "must be absent" variant -- only the empty one.
       const withConstructorParam = {
         ["constructor"]: "anything",
-      } satisfies Record<string, string> as unknown as NormalizedParams<TestParams>;
+      } satisfies Record<
+        string,
+        string
+      > as unknown as NormalizedParams<TestParams>;
       assert.deepEqual(
         (await store.get("id", withConstructorParam)).map(
           ({ content }) => content.value,
@@ -416,6 +434,240 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       assert.deepEqual(
         result[3].map(({ content }) => content.value),
         ["one-any"],
+      );
+    });
+  });
+
+  it("never returns a normalized ID collision as a hit", async () => {
+    await withStore(createFixture, async (store) => {
+      await store.store([
+        {
+          entry: makeEntry("�x", "replacement", emptyVary),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      for (const id of ["\ud800x", "\ud801x", "\udc00x"]) {
+        assert.deepEqual(await store.get(id, matchingParams), []);
+        assert.deepEqual(
+          await store.getMany([{ id, params: matchingParams }]),
+          [[]],
+        );
+      }
+      assert.equal(
+        (await store.get("�x", matchingParams))[0]?.content.value,
+        "replacement",
+      );
+    });
+  });
+
+  it("never serves an ill-formed stored ID under a colliding ID", async () => {
+    await withStore(createFixture, async (store) => {
+      // Postgres rejects this JSONB entry; SQLite and MemoryStore preserve its
+      // original ID in the entry. Either rejection or exact hits/misses is safe.
+      try {
+        await store.store([
+          {
+            entry: makeEntry("\ud800x", "original", emptyVary),
+            maxStoreForSeconds: 60,
+          },
+        ]);
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          !("code" in error) ||
+          error.code !== "22P02"
+        )
+          throw error;
+      }
+      for (const id of ["�x", "\ud801x", "\ud800x"]) {
+        const single = await store.get(id, matchingParams);
+        const [bulk] = await store.getMany([{ id, params: matchingParams }]);
+        assert.ok(single.every((entry) => entry.id === id));
+        assert.ok(bulk!.every((entry) => entry.id === id));
+        if (id !== "\ud800x") {
+          assert.deepEqual(single, []);
+          assert.deepEqual(bulk, []);
+        }
+      }
+    });
+  });
+
+  it("never normalizes string vary values into false matches", async () => {
+    await withStore(createFixture, async (store) => {
+      await store.store([
+        {
+          entry: makeEntry("vary-unicode", "replacement", {
+            format: "�",
+          } as NormalizedVary<TestParams>),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      for (const format of ["\ud800", "\ud801", "\udc00"]) {
+        const params = { format } as NormalizedParams<TestParams>;
+        // Both Postgres paths reject ill-formed JSONB params.
+        try {
+          assert.deepEqual(await store.get("vary-unicode", params), []);
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !("code" in error) ||
+            error.code !== "22P02"
+          )
+            throw error;
+        }
+        try {
+          assert.deepEqual(
+            await store.getMany([{ id: "vary-unicode", params }]),
+            [[]],
+          );
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !("code" in error) ||
+            error.code !== "22P02"
+          )
+            throw error;
+        }
+      }
+    });
+  });
+
+  it("preserves persisted ill-formed vary values or rejects them without false hits", async () => {
+    await withStore(createFixture, async (store) => {
+      for (const format of ["\ud800", "\ud801", "\udc00"]) {
+        try {
+          await store.store([
+            {
+              entry: makeEntry("stored-vary-unicode", format, {
+                format,
+              } as NormalizedVary<TestParams>),
+              maxStoreForSeconds: 60,
+            },
+          ]);
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !("code" in error) ||
+            error.code !== "22P02"
+          )
+            throw error;
+          continue;
+        }
+        for (const requestedFormat of ["�", "\ud800", "\ud801", "\udc00"]) {
+          const params = {
+            format: requestedFormat,
+          } as NormalizedParams<TestParams>;
+          const single = await store.get("stored-vary-unicode", params);
+          const [bulk] = await store.getMany([
+            { id: "stored-vary-unicode", params },
+          ]);
+          for (const entry of [...single, ...bulk!]) {
+            assert.equal(entry.id, "stored-vary-unicode");
+            assert.equal(entry.vary.format, requestedFormat);
+            assert.equal(entry.content.value, requestedFormat);
+          }
+          if (requestedFormat === "�") {
+            assert.deepEqual(single, []);
+            assert.deepEqual(bulk, []);
+          }
+        }
+      }
+    });
+  });
+
+  it("returns from getMany, per request, what get returns for that request", async () => {
+    await withStore(createFixture, async (store) => {
+      // A small param space, so that random requests often match stored
+      // variants. `constructor` collides with an Object.prototype member, which
+      // a matcher must treat as an ordinary param.
+      const paramsArb = fc.record(
+        {
+          format: fc.constantFrom("json", "html"),
+          lang: fc.constantFrom("en", "es"),
+          count: fc.constantFrom(0, 1, 2.5),
+          flag: fc.boolean(),
+          constructor: fc.constantFrom("x", "y"),
+        },
+        { requiredKeys: [] },
+      ) as fc.Arbitrary<TestParams>;
+
+      const entriesArb = fc.array(
+        StoreEntryInputArb(
+          fc.string().map((value): TestContent => ({ value })),
+          fc.dictionary(fc.string({ minLength: 1 }), fc.string()),
+          paramsArb,
+          fc.constantFrom("a", "b", "c", "�x"),
+        )
+          // An invalid date cannot round-trip through a JSON store.
+          .filter(({ entry }) => !Number.isNaN(entry.date.getTime()))
+          // Long-lived, so that no entry expires between the get and getMany
+          // reads below.
+          .map((input) => ({ ...input, maxStoreForSeconds: 3600 })),
+        { minLength: 1, maxLength: 12 },
+      );
+
+      const randomRequestsArb = fc.array(
+        fc.record({
+          id: fc.constantFrom("a", "b", "c", "missing", "\ud800x", "�x"),
+          params: NormalizedParamsArb(paramsArb),
+        }),
+        { maxLength: 12 },
+      );
+
+      // Order within one request's entries is unspecified, so compare them as
+      // sets.
+      const inCanonicalOrder = (
+        entries: readonly Entry<TestSpec, AnyValidators, TestParams>[],
+      ) => sortBy(entries, [(entry) => String(jsonStringify(entry))]);
+
+      // Every run, including a replay of a reported counterexample, writes
+      // under its own id prefix, so it never reads another run's entries.
+      const runs = { count: 0 };
+
+      await fc.assert(
+        fc.asyncProperty(
+          entriesArb,
+          randomRequestsArb,
+          async (inputs, randomRequests) => {
+            runs.count += 1;
+            const scoped = (id: string) => `run-${String(runs.count)}:${id}`;
+            await store.store(
+              inputs.map((input) => ({
+                ...input,
+                entry: { ...input.entry, id: scoped(input.entry.id) },
+              })),
+            );
+
+            // One request per stored entry, with params that select its
+            // variant, so every run compares non-empty results too.
+            const matchingRequests = inputs.map(({ entry }) => ({
+              id: entry.id,
+              params: Object.fromEntries(
+                Object.entries(entry.vary).filter(([, v]) => v !== null),
+              ) as NormalizedParams<TestParams>,
+            }));
+            const requests = [...matchingRequests, ...randomRequests].map(
+              ({ id, params }) => ({ id: scoped(id), params }),
+            );
+
+            const viaGetMany = await store.getMany(requests);
+            const viaGet = await Promise.all(
+              requests.map(async ({ id, params }) => store.get(id, params)),
+            );
+
+            assert.ok(
+              viaGet
+                .slice(0, matchingRequests.length)
+                .every((entries) => entries.length > 0),
+              "a request built from a stored entry's vary must match it",
+            );
+            assert.deepEqual(
+              viaGetMany.map(inCanonicalOrder),
+              viaGet.map(inCanonicalOrder),
+            );
+          },
+        ),
+        { numRuns: 50 },
       );
     });
   });
@@ -562,16 +814,4 @@ function snapshotEntry(entry: Entry<TestSpec, AnyValidators, TestParams>) {
     ...entry,
     date: entry.date.toISOString(),
   };
-}
-
-function postgresEnvironmentIsConfigured(): boolean {
-  return [
-    "DATABASE_HOST",
-    "DATABASE_PORT",
-    "DATABASE_NAME",
-    "DATABASE_USER",
-    "DATABASE_PASSWORD",
-  ].every(
-    (key) => typeof process.env[key] === "string" && process.env[key] !== "",
-  );
 }

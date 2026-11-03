@@ -124,6 +124,39 @@ await cache.store([
 
 This is particularly useful when a producer that fetches a collection wants to additionally cache each individual entry (via `supplementalResources`), so that point lookups for each entry by id can also be served by the same cache.
 
+### Batching concurrent reads (`batchReads`)
+
+With batching disabled, each `cache.get()` makes its own `store.get()` call. For `PostgresStore`, that is one query, and one pool connection, per call. Code that fans out one lookup per id, such as a `wrapProducer` loader called for each id in a list, therefore runs N queries for N ids.
+
+Reads are batched by default using DataLoader with `cache: false`. Configure its batch size and scheduler with `batchReads`:
+
+```ts
+const cache = new Cache({
+  store: new PostgresStore(pool, { schemaName: "cache", tableName: "visits" }),
+  name: "visits",
+  resourceTypes: visitsResourceTypes,
+  batchReads: { maxBatchSize: 50, batchScheduleFn: setImmediate },
+});
+
+// One batched SQL join for these requests:
+await Promise.all(visitIds.map((id) => getVisit({ id })));
+```
+
+`singleTypeCacheOptions` accepts the option too. Batching is enabled by default with `maxBatchSize: 50` and DataLoader’s default scheduler. Set `batchReads: false` to disable it. DataLoader never caches results, even for identical requests.
+
+- **Requests share one query, never one result.** Each `get()` still classifies its own id, evaluates freshness at its own `now`, selects its own entry, and publishes its own `read` message. So a batched `get()` that succeeds returns what an unbatched one returns.
+- **Scheduling is configurable.** By default, DataLoader dispatches after Promise continuations. `batchScheduleFn` receives a dispatch callback and must invoke it in the immediate future; for example, pass `setImmediate` to gather reads until the next check phase.
+- **One `getMany` call takes at most 50 requests by default.** Set `maxBatchSize` to change this limit. Larger batches split into independent calls.
+- **Aborts stay per request.** The shared `getMany` call runs without a signal. A request whose signal aborts, while it waits or while its batch's query runs, rejects at once with the signal's reason and publishes no `read` message.
+- **A store failure is shared.** When a `getMany` call fails, every request in it rejects with the error, and each publishes its own `read-failed` message. The cause can be one request's input. For example, Postgres rejects a statement that binds an id with U+0000, so that id fails every request in its `getMany` call, including other callers' requests.
+- **`close()` starts the queued reads before it closes the store.** It does not wait for them to settle, as it does not wait for unbatched reads. The store's own close handles reads in flight.
+- **The query runs in the first caller's async context.** The default scheduler captures the async context (for example, `AsyncLocalStorage` stores and the active tracing span) of the `get()` that opened the batch; a custom scheduler controls the dispatch context. So the query's span appears in that caller's trace only.
+- **The store answers with `getMany`.** Postgres uses the same SQL vary predicate for single and bulk reads, including null-as-absence. Empty stored `vary` matches every request and takes an equality fast path that skips scanning vary fields; null-only vary objects still use the general predicate. Both reject params that JSONB cannot represent, such as strings containing U+0000 or lone surrogates. One invalid request can fail other requests in the batch.
+
+Batching only saves round trips when the store's `getMany` reads all of its requests in one operation. `PostgresStore` and `SqliteStore` do. A custom store that implements `getMany` with `naiveGetMany` still runs one `get` per request; see ["Guidelines for Authoring a Store"](./docs/implementing-a-store.md). `PostgresStore.getMany` joins indexed request rows against stored entries and filters vary requirements in SQL, transferring only matching entries. Direct bulk calls split at 1,000 requests (3,000 bound parameters) per statement, with chunks run sequentially. Duplicate requests retain separate slots and may transfer duplicate matching payloads. SQL still evaluates candidate variants, so many variants per ID can increase database work. SQLite fetches candidate variants and filters them in its worker.
+
+SQL text bindings replace lone UTF-16 surrogates in IDs with U+FFFD. Both SQL stores compare returned IDs exactly with the original request, so ill-formed IDs produce misses rather than hits for a different ID. SQLite also checks the ID preserved in entry JSON: an ill-formed stored ID cannot be served under its well-formed replacement. Such writes can collide at the SQL key and evict another entry. MemoryStore preserves IDs exactly. SQLite preserves string vary keys and values through JSON and compares them exactly; Postgres rejects ill-formed strings in persisted JSONB and in both single and bulk JSONB params. An unused request param does not prevent an otherwise valid match.
+
 ## Key Files
 
 - [`Cache.ts`](./src/Cache.ts): this defines the basic cache class. Note that the class's job is just to return whether/which previously-stored responses are usable to satisfy an incoming request. It does not handle things like making requests to the producer for new responses when no cached response is usable.

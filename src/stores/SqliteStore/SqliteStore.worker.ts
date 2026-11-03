@@ -376,7 +376,11 @@ function getMatchingEntryJson(
 ): WorkerEntryJson[] {
   const rows = context.selectById(id);
   return rows
-    .filter((it) => variantMatchesRequest(jsonParse(it.vary), params))
+    .filter(
+      (it) =>
+        it.resource_id === id &&
+        variantMatchesRequest(jsonParse(it.vary), params),
+    )
     .map((row) => row.entry);
 }
 
@@ -386,15 +390,19 @@ function getManyMatchingEntryJson(
 ): WorkerEntryJson[][] {
   if (requests.length === 0) return [];
 
-  const rowsById = Map.groupBy(
-    context.selectByIds(requests.map(({ id }) => id)),
-    ({ resource_id }) => resource_id,
-  );
+  const variants = context
+    .selectByIds(requests.map(({ id }) => id))
+    .map((row) => ({
+      id: row.resource_id,
+      vary: jsonParse(row.vary),
+      entry: row.entry,
+    }));
 
+  const variantsById = Map.groupBy(variants, ({ id }) => id);
   return requests.map(({ id, params }) =>
-    (rowsById.get(id) ?? [])
-      .filter((row) => variantMatchesRequest(jsonParse(row.vary), params))
-      .map((row) => row.entry),
+    (variantsById.get(id) ?? [])
+      .filter(({ vary }) => variantMatchesRequest(vary, params))
+      .map(({ entry }) => entry),
   );
 }
 

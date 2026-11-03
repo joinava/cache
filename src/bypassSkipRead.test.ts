@@ -34,6 +34,8 @@ const makeHarness = (label: string) => {
   const getSpy = mock.method(store, "get");
   const getManySpy = mock.method(store, "getMany");
   const cache = new Cache({
+    // These tests inject or count individual store.get calls.
+    batchReads: false,
     store: store,
     name,
     resourceTypes: TWO_TYPE_REGISTRY,

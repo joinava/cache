@@ -46,6 +46,10 @@ import {
   normalizeVary,
 } from "./utils/normalization.js";
 import * as entryUtils from "./utils/normalizedProducerResultResourceHelpers.js";
+import {
+  StoreReadBatcher,
+  type ReadBatchOptions,
+} from "./utils/storeReadBatcher.js";
 import { assertUnreachable, defaultLoggersByComponent } from "./utils/utils.js";
 
 /**
@@ -207,6 +211,13 @@ export type CacheOptions<
   onStoreAfterClose?: "throw" | "no-op";
   normalizeParamName?: NormalizeParamName<Params>;
   normalizeParamValue?: NormalizeParamValue<Params>;
+  /**
+   * Batch concurrent reads with DataLoader (always with caching disabled).
+   * Enabled by default, with maxBatchSize 50 and DataLoader's scheduling.
+   * Supply maxBatchSize and/or batchScheduleFn to customize batching, or
+   * false to use individual store.get calls. Failures affect the whole batch.
+   */
+  batchReads?: ReadBatchOptions | false;
 };
 
 /**
@@ -245,6 +256,10 @@ export default class Cache<
 > {
   readonly #logger: Bind1<Logger, "cache">;
   readonly #dataStore: Store<StoreSupportedTypes, Validators, Params>;
+  /** Set iff the cache was built with batching enabled. */
+  readonly #readBatcher:
+    | StoreReadBatcher<StoreSupportedTypes, Validators, Params>
+    | undefined;
   #closed = false;
   readonly #onGetAfterClose: "throw" | "act-empty";
   readonly #onStoreAfterClose: "throw" | "no-op";
@@ -281,6 +296,10 @@ export default class Cache<
     const unboundLogger = options.logger ?? defaultLoggersByComponent.cache;
     this.#logger = unboundLogger.bind(null, "cache");
     this.#dataStore = options.store;
+    this.#readBatcher =
+      options.batchReads !== false
+        ? new StoreReadBatcher(this.#dataStore, options.batchReads ?? {})
+        : undefined;
     this.#onGetAfterClose = options.onGetAfterClose ?? "throw";
     this.#onStoreAfterClose = options.onStoreAfterClose ?? "throw";
     this.name = options.name;
@@ -404,6 +423,9 @@ export default class Cache<
    * call: the lookup result on success, or `found: "read-failed"` with the
    * error if the store threw (and then the error still propagates). An
    * *aborted* read emits nothing, matching the `throwIfAborted` fast path.
+   *
+   * On a cache built with `batchReads`, the store read joins the batch for the
+   * current event-loop turn; see that option for what changes.
    */
   public async get<Id extends SpecOf<RT>["id"]>(
     req: ReadonlyConsumerRequest<Params, Id>,
@@ -439,8 +461,14 @@ export default class Cache<
     this.#logger("trace", "requested entries from the store");
 
     // Unlike producer invocations, store reads are NOT collapsed: N concurrent
-    // identical requests perform N row fetches. A point read is cheap next to
-    // the producer calls collapsing exists to protect.
+    // identical requests get N separate lookup results. A point read is cheap
+    // next to the producer calls collapsing exists to protect.
+    //
+    // `batchReads` does not change that. It batches the QUERY only: the reads
+    // of one event-loop turn share one `store.getMany()` call, but each
+    // request still gets its own slot of that call's result, and the code
+    // below still classifies it against this request's own `now`. Requests
+    // share one query, never one result.
     //
     // Worth knowing if that ever changes: reads must not reuse results across
     // a time window the way producer invocations do. A lookup result is a
@@ -448,28 +476,33 @@ export default class Cache<
     // serves decisions computed against a stale clock. Only a PENDING-only
     // promise share is sound, which bounds the skew to the read's own
     // duration.
-    const cacheEntries = await this.#dataStore
-      .get(id, normalizedParams, options)
-      .catch((error: unknown) => {
-        // A read that FAILED is reported on the channel (one message, same as
-        // a successful lookup) before the error propagates, so subscribers can
-        // use the read channel as a total denominator -- see
-        // CACHE_READ_CHANNEL_NAME. An *aborted* read is not a failed read: the
-        // caller cancelled, and aborts already emit nothing here (the
-        // `throwIfAborted` at the top of this method rejects before any
-        // message), so staying silent keeps that consistent instead of
-        // inflating read-failure rates with client cancellations.
-        if (options?.signal?.aborted !== true) {
-          publishCacheRead({
-            cache: this.name,
-            resourceType,
-            resourceId: id,
-            found: "read-failed",
-            error,
-          });
-        }
-        throw error;
-      });
+    const storeRead =
+      this.#readBatcher === undefined
+        ? this.#dataStore.get(id, normalizedParams, options)
+        : this.#readBatcher.read(
+            { id, params: normalizedParams },
+            options?.signal,
+          );
+    const cacheEntries = await storeRead.catch((error: unknown) => {
+      // A read that FAILED is reported on the channel (one message, same as
+      // a successful lookup) before the error propagates, so subscribers can
+      // use the read channel as a total denominator -- see
+      // CACHE_READ_CHANNEL_NAME. An *aborted* read is not a failed read: the
+      // caller cancelled, and aborts already emit nothing here (the
+      // `throwIfAborted` at the top of this method rejects before any
+      // message), so staying silent keeps that consistent instead of
+      // inflating read-failure rates with client cancellations.
+      if (options?.signal?.aborted !== true) {
+        publishCacheRead({
+          cache: this.name,
+          resourceType,
+          resourceId: id,
+          found: "read-failed",
+          error,
+        });
+      }
+      throw error;
+    });
 
     const { result, outcome } = this.#processCacheEntries(
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
@@ -750,6 +783,11 @@ export default class Cache<
 
   public async close(timeout?: number) {
     this.#closed = true;
+    // A batched read that `get()` accepted before this call still runs: start
+    // the queued ones now, so that they are in flight when the store closes,
+    // as unbatched reads would be. Do not wait for them to settle. The store's
+    // own close handles reads in flight, and `timeout` bounds it.
+    this.#readBatcher?.flushNow();
     return (
       this.#dataStore.close?.(timeout) ?? this.#dataStore[Symbol.asyncDispose]()
     );

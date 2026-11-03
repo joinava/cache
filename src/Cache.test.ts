@@ -54,7 +54,7 @@ describe("Cache", { concurrency: true }, () => {
    * test/v2AcceptanceHelpers.ts on why a registry-generic factory would.)
    */
   const cacheOver = (store: typeof memoryStore | typeof postgresStore) =>
-    new Cache({ store, ...cacheOptions });
+    new Cache({ store, ...cacheOptions, batchReads: false });
 
   // The value returned when there's no cached response at all for the resource
   // (or id + params pair in the event of a cached response with a varyKeys),

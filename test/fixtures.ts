@@ -1,4 +1,5 @@
 import pg from "pg";
+import { mock } from "node:test";
 
 import fc from "fast-check";
 import type { JSON } from "type-party";
@@ -155,6 +156,23 @@ export function dummyEntryData(
   );
 }
 
+/**
+ * Whether the environment names a test Postgres database. Suites that need one
+ * skip themselves when it does not; `pnpm test:docker` provides one.
+ */
+export function postgresEnvironmentIsConfigured(): boolean {
+  return [
+    "DATABASE_HOST",
+    "DATABASE_PORT",
+    "DATABASE_NAME",
+    "DATABASE_USER",
+    "DATABASE_PASSWORD",
+  ].every(
+    (key) => typeof process.env[key] === "string" && process.env[key] !== "",
+  );
+}
+
+/** Exposes one query mock for all connections belonging to this pool. */
 export function postgresStoreFixture() {
   try {
     const postgres = new pg.Pool({
@@ -163,6 +181,13 @@ export function postgresStoreFixture() {
       database: process.env["DATABASE_NAME"]!, // eslint-disable-line @typescript-eslint/no-non-null-assertion
       user: process.env["DATABASE_USER"]!, // eslint-disable-line @typescript-eslint/no-non-null-assertion
       password: process.env["DATABASE_PASSWORD"]!, // eslint-disable-line @typescript-eslint/no-non-null-assertion
+    });
+    // Keep the receiver: pg's query method uses `this` to reach the active
+    // connection. Each fixture creates its own mock, shared only by that pool's clients.
+    // eslint-disable-next-line typescript-eslint/unbound-method -- Installed as client.query below; mock.fn preserves the receiver.
+    const queryMock = mock.fn(pg.Client.prototype.query);
+    postgres.on("connect", (client) => {
+      client.query = queryMock;
     });
     // Use a new schema AND table name for each store instance so that tests
     // (and test files, which node runs in parallel) can't interfere with each
@@ -183,6 +208,7 @@ export function postgresStoreFixture() {
     return {
       postgres,
       postgresStore,
+      queryMock,
       async cleanup() {
         // eslint-disable-next-line no-console
         console.log("Cleaning up postgres store");

@@ -1,9 +1,5 @@
-import type {
-  ColumnType,
-  PostgresPool,
-  RawBuilder,
-  SqlBool,
-} from "kysely";
+import { chunk } from "es-toolkit";
+import type { ColumnType, PostgresPool, RawBuilder, SqlBool } from "kysely";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import type { Tagged } from "type-fest";
 import type {
@@ -45,8 +41,10 @@ import {
   defaultLoggersByComponent,
   jsonStringify,
   keepMaxPerGroup,
-  naiveGetMany,
 } from "../../utils/utils.js";
+
+/** Three parameters per request: index, ID, and JSONB params. */
+const MAX_REQUESTS_PER_GET_MANY_QUERY = 1_000;
 
 /**
  * Type representing the qualified name of the cache table.
@@ -75,8 +73,7 @@ type CacheTables<
     resource_id: ColumnType<string, string, never>;
     // Select type is `NormalizedVary` (not `NormalizedParams`) because the
     // stored value can carry `null` values -- a `null` vary value means "this
-    // variant applies only when the request omits that param". `get` reads this
-    // column back to match variants in JS via `variantMatchesRequest`.
+    // variant applies only when the request omits that param".
     vary: ColumnType<
       Readonly<NormalizedVary<Params>>,
       JsonOf<NormalizedVary<Params>>,
@@ -93,14 +90,9 @@ type CacheTables<
 /**
  * We restrict the params this store supports to _primitive_ values.
  *
- * `get` matches variants in the database (see `varyMatchesParamsSql`): a
- * non-null vary value must `jsonb`-equal the corresponding param, and a `null`
- * vary value requires the param to be *absent*. `jsonb` equality is exact at
- * every level, so object/array values would in fact match correctly -- but the
- * param type is still limited to primitives, because that's all real callers
- * use and it keeps the contract identical to the Memory/Sqlite stores, whose JS
- * matcher (`variantMatchesRequest`) compares with `===` and so cannot
- * deep-compare objects.
+ * Both read paths use `varyMatchesParamsSql`: non-null vary values require
+ * JSONB equality, and null requires an absent param. Primitive params keep
+ * the same matching contract as the Memory and SQLite stores.
  *
  * A previous implementation matched via the JSONB containment operator
  * (`vary <@ $params`). It was replaced because containment cannot express the
@@ -132,23 +124,25 @@ export type PostgresStoreCompatibleSpec = CacheSpec<string, JSONWithUndefined>;
  *   - a non-null value must `jsonb`-equal `params -> key` (which is SQL `NULL`,
  *     hence `IS DISTINCT FROM`, when the param is missing).
  *
- * `resource_id` (indexed) has already narrowed the candidate rows to the few
- * variants stored for one id, so the per-row `jsonb_each` scan is cheap. We use
+ * Both arguments are SQL expressions, so bulk reads can reference a joined
+ * request's params. Empty vary matches every request, so an equality guard
+ * skips the jsonb_each scan for that common case. Other candidates still
+ * require scanning their vary requirements. We use
  * the `jsonb_exists` function rather than the `?` operator because `?` is
  * ambiguous with driver parameter placeholders.
  */
-function varyMatchesParamsSql<Params extends PostgresStoreSupportedParams>(
-  params: Readonly<NormalizedParams<Params>>,
+function varyMatchesParamsSql(
+  vary: RawBuilder<unknown>,
+  params: RawBuilder<unknown>,
 ): RawBuilder<SqlBool> {
-  const paramsJson = jsonStringify(params);
-  return sql<SqlBool>`not exists (
+  return sql<SqlBool>`(${vary} = '{}'::jsonb or not exists (
     select 1
-    from jsonb_each(${sql.ref("vary")}) as v(key, value)
+    from jsonb_each(${vary}) as v(key, value)
     where case
-      when jsonb_typeof(v.value) = 'null' then jsonb_exists(${paramsJson}::jsonb, v.key)
-      else (${paramsJson}::jsonb -> v.key) is distinct from v.value
+      when jsonb_typeof(v.value) = 'null' then jsonb_exists(${params}, v.key)
+      else (${params} -> v.key) is distinct from v.value
     end
-  )`;
+  ))`;
 }
 
 /**
@@ -159,8 +153,14 @@ function varyMatchesParamsSql<Params extends PostgresStoreSupportedParams>(
  * (resourceId, vary) pair. Each of these rows stores the id (string), vary
  * (jsonb), and a full entry (jsonb).
  *
- * We do not use any mechanisms to speed up the entry lookup aside from an index
- * on the vary column. We rely on Postgres to be fast enough for our needs.
+ * Reads narrow candidates by resource_id and evaluate vary requirements in
+ * Postgres, transferring only matching entry payloads.
+ *
+ * `getMany` reads up to {@link MAX_REQUESTS_PER_GET_MANY_QUERY} requests in one
+ * round trip (see its docs), so
+ * a caller with many ids should use it, or a `Cache` with `batchReads`, rather
+ * than many concurrent `get` calls: each `get` is its own query and holds its
+ * own pool connection.
  */
 export default class PostgresStore<
   Spec extends PostgresStoreCompatibleSpec = PostgresStoreCompatibleSpec,
@@ -235,47 +235,117 @@ export default class PostgresStore<
     const result = await this.db
       .selectFrom(this.tableName)
       .where("resource_id", "=", id)
-      .where(varyMatchesParamsSql(params))
+      .where(
+        varyMatchesParamsSql(
+          sql.ref("vary"),
+          sql`${jsonStringify(params)}::jsonb`,
+        ),
+      )
       .selectAll()
       .execute();
 
     signal?.throwIfAborted();
 
-    const entries = result.map((it) =>
-      this.deserializeEntry(
-        it.entry satisfies TableEntry<
-          Spec,
-          Validators,
-          Params,
-          Spec["id"]
-        > as unknown as TableEntry<Spec, Validators, Params, Id>,
-      ),
-    );
+    const entries = result
+      .filter((row) => row.resource_id === id)
+      .map((it) =>
+        this.deserializeEntry(
+          it.entry satisfies TableEntry<
+            Spec,
+            Validators,
+            Params,
+            Spec["id"]
+          > as unknown as TableEntry<Spec, Validators, Params, Id>,
+        ),
+      );
 
-    this.logTrace("returning entries from postgres query", entries);
-    return entries;
+    // SQL text binding can replace lone surrogates. Accept only exact IDs,
+    // including the ID in the persisted entry.
+    const matchingEntries = entries.filter((entry) => entry.id === id);
+    this.logTrace("returning entries from postgres query", matchingEntries);
+    return matchingEntries;
   }
 
+  /**
+   * Joins indexed requests against stored rows and filters variants in SQL
+   * using the same predicate as get(). Only matching payloads reach Node.
+   * Chunks run sequentially, at most 1,000 requests / 3,000 parameters each;
+   * they do not share a transaction or snapshot. Duplicates retain separate
+   * result slots and may transfer the same matching payload more than once.
+   * Like get(), params not representable as JSONB reject the query. A failure
+   * rejects the entire getMany call, including results of earlier chunks.
+   */
   async getMany<
     const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
   >(
     requests: Reqs,
     options?: { signal?: AbortSignal },
   ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
+    const signal = options?.signal;
+    signal?.throwIfAborted();
+
     this.logTrace("querying for multiple entries", {
       requestCount: requests.length,
     });
 
-    // For PostgresStore, we'll use the naive implementation until we have time
-    // to optimize it. Technically, all these calls should probably be wrapped
-    // in a transaction, so that concurrent deletes can't lead us to returning
-    // partial/incosistent state, but that doesn't really matter for this cache.
-    return naiveGetMany<Spec, Validators, Params, Reqs>(
-      this,
+    if (requests.length === 0) {
+      return [] as StoreGetManyResult<Spec, Reqs, Validators, Params>;
+    }
+
+    await this.ensureInitializedPromise;
+
+    signal?.throwIfAborted();
+
+    type RequestRow = {
+      request_index: number;
+      resource_id: string;
+      entry: TableEntry<Spec, Validators, Params>;
+    };
+    const rowBatches: RequestRow[][] = [];
+    for (const [batchIndex, requestsChunk] of chunk(
       requests,
-      undefined,
-      options,
+      MAX_REQUESTS_PER_GET_MANY_QUERY,
+    ).entries()) {
+      signal?.throwIfAborted();
+      const offset = batchIndex * MAX_REQUESTS_PER_GET_MANY_QUERY;
+      const values = sql.join(
+        requestsChunk.map(
+          ({ id, params }, index) =>
+            sql`(${offset + index}::integer, ${id}::text, ${jsonStringify(params)}::jsonb)`,
+        ),
+      );
+      const batch =
+        await sql<RequestRow>`select r.request_index, t.resource_id, t.entry
+        from ${sql.id(this.tableNameData.schemaName, this.tableNameData.tableName)} as t
+        inner join (values ${values}) as r(request_index, resource_id, params)
+          on t.resource_id = r.resource_id
+        where ${varyMatchesParamsSql(sql.ref("t.vary"), sql.ref("r.params"))}
+      `.execute(this.db);
+      signal?.throwIfAborted();
+      rowBatches.push(batch.rows);
+    }
+    const rows = rowBatches.flat();
+
+    // SQL text binding can replace lone surrogates. Require exact IDs in
+    // both the SQL key and persisted entry before grouping the matches.
+    const entriesByRequest = Map.groupBy(
+      rows.flatMap((row) => {
+        const id = requests[row.request_index]!.id;
+        if (row.resource_id !== id) return [];
+        const entry = this.deserializeEntry(row.entry);
+        return entry.id === id
+          ? [{ requestIndex: row.request_index, entry }]
+          : [];
+      }),
+      ({ requestIndex }) => requestIndex,
     );
+    // Map the original requests, so duplicates retain their own slots and
+    // misses (including discarded ID collisions) always produce [], never undefined.
+    const results = requests.map((_, index) =>
+      (entriesByRequest.get(index) ?? []).map(({ entry }) => entry),
+    );
+
+    return results as StoreGetManyResult<Spec, Reqs, Validators, Params>;
   }
 
   async store(

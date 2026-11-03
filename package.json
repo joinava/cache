@@ -1,6 +1,6 @@
 {
   "name": "@zingage/cache",
-  "version": "3.0.1",
+  "version": "3.1.0",
   "type": "module",
   "packageManager": "pnpm@10.26.1",
   "exports": {
@@ -35,6 +35,7 @@
     "prepublishOnly": "pnpm run build && cp dist.npmignore dist/src/.npmignore && pnpm run lint"
   },
   "dependencies": {
+    "dataloader": "^2.2.3",
     "debug": "^4.4.1",
     "es-toolkit": "^1.43.0",
     "kysely": "^0.28.3",
