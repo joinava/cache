@@ -1,3 +1,4 @@
+import { chunk } from "es-toolkit";
 import type { ColumnType, PostgresPool, RawBuilder, SqlBool } from "kysely";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import type { Tagged } from "type-fest";
@@ -301,19 +302,17 @@ export default class PostgresStore<
       entry: TableEntry<Spec, Validators, Params>;
     };
     const rows: RequestRow[] = [];
-    for (
-      let offset = 0;
-      offset < requests.length;
-      offset += MAX_REQUESTS_PER_GET_MANY_QUERY
-    ) {
+    for (const [batchIndex, requestsChunk] of chunk(
+      requests,
+      MAX_REQUESTS_PER_GET_MANY_QUERY,
+    ).entries()) {
       signal?.throwIfAborted();
+      const offset = batchIndex * MAX_REQUESTS_PER_GET_MANY_QUERY;
       const values = sql.join(
-        requests
-          .slice(offset, offset + MAX_REQUESTS_PER_GET_MANY_QUERY)
-          .map(
-            ({ id, params }, index) =>
-              sql`(${offset + index}::integer, ${id}::text, ${jsonStringify(params)}::jsonb)`,
-          ),
+        requestsChunk.map(
+          ({ id, params }, index) =>
+            sql`(${offset + index}::integer, ${id}::text, ${jsonStringify(params)}::jsonb)`,
+        ),
       );
       const batch =
         await sql<RequestRow>`select r.request_index, t.resource_id, t.entry
