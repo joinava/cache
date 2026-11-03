@@ -504,7 +504,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       ]);
       for (const format of ["\ud800", "\ud801", "\udc00"]) {
         const params = { format } as NormalizedParams<TestParams>;
-        // Postgres get rejects ill-formed JSONB params; bulk reads match in JS.
+        // Both Postgres paths reject ill-formed JSONB params.
         try {
           assert.deepEqual(await store.get("vary-unicode", params), []);
         } catch (error) {
@@ -515,10 +515,19 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
           )
             throw error;
         }
-        assert.deepEqual(
-          await store.getMany([{ id: "vary-unicode", params }]),
-          [[]],
-        );
+        try {
+          assert.deepEqual(
+            await store.getMany([{ id: "vary-unicode", params }]),
+            [[]],
+          );
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !("code" in error) ||
+            error.code !== "22P02"
+          )
+            throw error;
+        }
       }
     });
   });

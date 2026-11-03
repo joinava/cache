@@ -17,7 +17,8 @@ import type { PostgresStoreSupportedParams } from "./PostgresStore.js";
 
 type StringSpec = CacheSpec<string, string>;
 
-const noParams = {} as NormalizedParams<PostgresStoreSupportedParams>;
+const noParams =
+  {} as unknown as NormalizedParams<PostgresStoreSupportedParams>;
 
 function makeEntry(
   id: string,
@@ -25,7 +26,7 @@ function makeEntry(
   return {
     id,
     content: id,
-    vary: {} as NormalizedVary<PostgresStoreSupportedParams>,
+    vary: {} as unknown as NormalizedVary<PostgresStoreSupportedParams>,
     validators: {},
     directives: { freshUntilAge: 60 } as NormalizedProducerDirectives,
     initialAge: 0,
@@ -72,21 +73,21 @@ describe(
       const { results, statements } = await getManyStatements(ids);
 
       assert.equal(statements.length, 1);
-      assert.match(statements[0]?.text ?? "", /^select .* in \(/);
+      assert.match(statements[0]?.text ?? "", /^select r\.request_index/);
       assert.deepEqual(
         results.map((entries) => entries.map(({ content }) => content)),
         ids.map((id) => [id]),
       );
     });
 
-    it("splits more than 1,000 unique ids into statements of at most 1,000 ids", async () => {
+    it("splits more than 1,000 requests into statements of at most 1,000 requests", async () => {
       const ids = Array.from({ length: 1001 }, (_, i) => `id:${String(i)}`);
 
       const { results, statements } = await getManyStatements(ids);
 
       assert.deepEqual(
         statements.map(({ parameterCount }) => parameterCount),
-        [1000, 1],
+        [3000, 3],
       );
       assert.deepEqual(
         results.map((entries) => entries.map(({ content }) => content)),
@@ -94,7 +95,7 @@ describe(
       );
     });
 
-    it("queries each id once, and still answers every duplicate request", async () => {
+    it("keeps a separate result slot for every duplicate request", async () => {
       const { results, statements } = await getManyStatements([
         "a",
         "b",
@@ -104,12 +105,96 @@ describe(
 
       assert.deepEqual(
         statements.map(({ parameterCount }) => parameterCount),
-        [2],
+        [12],
       );
       assert.deepEqual(
         results.map((entries) => entries.map(({ content }) => content)),
         [["a"], ["b"], ["a"], ["a"]],
       );
+    });
+
+    it("filters each request's variants in SQL, preserving null-as-absence, duplicates, and misses", async () => {
+      const statements: string[] = [];
+      const fixture = postgresStoreFixture({
+        onQuery: (text) => {
+          statements.push(text);
+        },
+      });
+      try {
+        const store = fixture.postgresStore;
+        await store.store(
+          [
+            { ...makeEntry("a"), content: "any" },
+            {
+              ...makeEntry("a"),
+              content: "json",
+              vary: {
+                format: "json",
+              } as unknown as NormalizedVary<PostgresStoreSupportedParams>,
+            },
+            {
+              ...makeEntry("a"),
+              content: "absent",
+              vary: {
+                format: null,
+              } as unknown as NormalizedVary<PostgresStoreSupportedParams>,
+            },
+            {
+              ...makeEntry("a"),
+              content: "html",
+              vary: {
+                format: "html",
+              } as unknown as NormalizedVary<PostgresStoreSupportedParams>,
+            },
+          ].map((entry) => ({ entry, maxStoreForSeconds: 60 })),
+        );
+        const before = statements.length;
+        const results = await store.getMany([
+          {
+            id: "a",
+            params: {
+              format: "json",
+            } as unknown as NormalizedParams<PostgresStoreSupportedParams>,
+          },
+          { id: "missing", params: noParams },
+          { id: "a", params: noParams },
+          {
+            id: "a",
+            params: {
+              format: "json",
+            } as unknown as NormalizedParams<PostgresStoreSupportedParams>,
+          },
+        ]);
+        assert.deepEqual(
+          results.map((entries) =>
+            entries
+              .map(({ content }) => {
+                assert.equal(typeof content, "string");
+                return content as string;
+              })
+              .sort((a, b) => a.localeCompare(b)),
+          ),
+          [["any", "json"], [], ["absent", "any"], ["any", "json"]],
+        );
+        assert.equal(statements.length - before, 1);
+        assert.match(statements[before]!, /jsonb_each/);
+        assert.match(statements[before]!, /"r"\."params"/);
+        for (const format of ["\ud800", "\u0000"]) {
+          await assert.rejects(
+            store.getMany([
+              { id: "a", params: noParams },
+              {
+                id: "a",
+                params: {
+                  format,
+                } as unknown as NormalizedParams<PostgresStoreSupportedParams>,
+              },
+            ]),
+          );
+        }
+      } finally {
+        await fixture.cleanup();
+      }
     });
 
     it("rejects with the abort reason when the signal aborts while the query runs", async () => {
@@ -122,7 +207,10 @@ describe(
         onQuery: (text) => {
           // Abort as the getMany statement goes out, so the query itself
           // still completes and only the check after it can reject.
-          if (abortOnSelect.armed && /^select .* in \(/.test(text)) {
+          if (
+            abortOnSelect.armed &&
+            text.startsWith("select r.request_index")
+          ) {
             controller.abort(reason);
           }
         },

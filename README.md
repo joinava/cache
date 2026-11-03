@@ -138,7 +138,7 @@ const cache = new Cache({
   batchReads: { maxBatchSize: 50, batchScheduleFn: setImmediate },
 });
 
-// One `select ... where resource_id in (...)`, not ten selects:
+// One batched SQL join for these requests:
 await Promise.all(visitIds.map((id) => getVisit({ id })));
 ```
 
@@ -151,11 +151,11 @@ await Promise.all(visitIds.map((id) => getVisit({ id })));
 - **A store failure is shared.** When a `getMany` call fails, every request in it rejects with the error, and each publishes its own `read-failed` message. The cause can be one request's input. For example, Postgres rejects a statement that binds an id with U+0000, so that id fails every request in its `getMany` call, including other callers' requests.
 - **`close()` starts the queued reads before it closes the store.** It does not wait for them to settle, as it does not wait for unbatched reads. The store's own close handles reads in flight.
 - **The query runs in the first caller's async context.** The default scheduler captures the async context (for example, `AsyncLocalStorage` stores and the active tracing span) of the `get()` that opened the batch; a custom scheduler controls the dispatch context. So the query's span appears in that caller's trace only.
-- **The store answers with `getMany`, not `get`.** The two agree for every input that both accept. One difference: `PostgresStore.get` rejects a string param that holds U+0000 or a lone surrogate, because Postgres cannot read it as `jsonb`, and `getMany` matches it in JS instead.
+- **The store answers with `getMany`.** Postgres uses the same SQL vary predicate for single and bulk reads, including null-as-absence. Both reject params that JSONB cannot represent, such as strings containing U+0000 or lone surrogates. One invalid request can fail other requests in the batch.
 
-Batching only saves round trips when the store's `getMany` reads all of its requests in one operation. `PostgresStore` and `SqliteStore` do. A custom store that implements `getMany` with `naiveGetMany` still runs one `get` per request; see ["Guidelines for Authoring a Store"](./docs/implementing-a-store.md). `PostgresStore.getMany` loads every stored variant of each requested id, so do not batch the reads of a cache whose producers vary on a high-cardinality param, such as one variant per user.
+Batching only saves round trips when the store's `getMany` reads all of its requests in one operation. `PostgresStore` and `SqliteStore` do. A custom store that implements `getMany` with `naiveGetMany` still runs one `get` per request; see ["Guidelines for Authoring a Store"](./docs/implementing-a-store.md). `PostgresStore.getMany` joins indexed request rows against stored entries and filters vary requirements in SQL, transferring only matching entries. Direct bulk calls split at 1,000 requests (3,000 bound parameters) per statement, with chunks run sequentially. Duplicate requests retain separate slots and may transfer duplicate matching payloads. SQL still evaluates candidate variants, so many variants per ID can increase database work. SQLite fetches candidate variants and filters them in its worker.
 
-SQL text bindings replace lone UTF-16 surrogates in IDs with U+FFFD. Both SQL stores compare returned IDs exactly with the original request, so ill-formed IDs produce misses rather than hits for a different ID. SQLite also checks the ID preserved in entry JSON: an ill-formed stored ID cannot be served under its well-formed replacement. Such writes can collide at the SQL key and evict another entry. MemoryStore preserves IDs exactly. SQLite preserves string vary keys and values through JSON and compares them exactly; Postgres rejects ill-formed strings in persisted JSONB and in single-read JSONB params. Bulk Postgres matching compares params exactly in JavaScript. An unused request param does not prevent an otherwise valid match.
+SQL text bindings replace lone UTF-16 surrogates in IDs with U+FFFD. Both SQL stores compare returned IDs exactly with the original request, so ill-formed IDs produce misses rather than hits for a different ID. SQLite also checks the ID preserved in entry JSON: an ill-formed stored ID cannot be served under its well-formed replacement. Such writes can collide at the SQL key and evict another entry. MemoryStore preserves IDs exactly. SQLite preserves string vary keys and values through JSON and compares them exactly; Postgres rejects ill-formed strings in persisted JSONB and in both single and bulk JSONB params. An unused request param does not prevent an otherwise valid match.
 
 ## Key Files
 
