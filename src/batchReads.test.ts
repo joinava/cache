@@ -492,12 +492,12 @@ describe(
     : { skip: "Postgres environment variables are not configured" },
   () => {
     it("reads 10 concurrent gets with one SQL statement", async () => {
-      const statements: string[] = [];
-      const fixture = postgresStoreFixture({
-        onQuery: (text) => {
-          statements.push(text);
-        },
-      });
+      const fixture = postgresStoreFixture();
+      const queryCount = () =>
+        fixture.queryMocks.reduce(
+          (count, query) => count + query.mock.callCount(),
+          0,
+        );
       try {
         const cache = new Cache({
           store: fixture.postgresStore,
@@ -510,12 +510,12 @@ describe(
           ids.map((id) => ({ id, content: id, directives: freshFor100 })),
         );
 
-        const before = statements.length;
+        const before = queryCount();
         const results = await Promise.all(
           ids.map(async (id) => cache.get(lookup(id))),
         );
 
-        assert.equal(statements.slice(before).length, 1);
+        assert.equal(queryCount() - before, 1);
         assert.deepEqual(
           results.map((it) => it.usable?.content),
           ids,

@@ -39,23 +39,27 @@ function makeEntry(
  * result together with every statement that the `getMany` call sent.
  */
 async function getManyStatements(ids: readonly string[]) {
-  const statements: { text: string; parameterCount: number }[] = [];
-  const fixture = postgresStoreFixture({
-    onQuery: (text, parameters) => {
-      statements.push({ text, parameterCount: parameters.length });
-    },
-  });
+  const fixture = postgresStoreFixture();
+  const statements = () =>
+    fixture.queryMocks
+      .flatMap((query) => query.mock.calls)
+      .map(({ arguments: [text, parameters] }) => ({
+        text: String(text),
+        parameterCount: Array.isArray(parameters as unknown)
+          ? (parameters as unknown[]).length
+          : 0,
+      }));
   try {
     const store = fixture.postgresStore;
     await store.store(
       ids.map((id) => ({ entry: makeEntry(id), maxStoreForSeconds: 60 })),
     );
 
-    const before = statements.length;
+    const before = statements().length;
     const results = await store.getMany(
       ids.map((id) => ({ id, params: noParams })),
     );
-    return { results, statements: statements.slice(before) };
+    return { results, statements: statements().slice(before) };
   } finally {
     await fixture.cleanup();
   }
@@ -114,12 +118,11 @@ describe(
     });
 
     it("filters each request's variants in SQL, preserving null-as-absence, duplicates, and misses", async () => {
-      const statements: string[] = [];
-      const fixture = postgresStoreFixture({
-        onQuery: (text) => {
-          statements.push(text);
-        },
-      });
+      const fixture = postgresStoreFixture();
+      const statements = () =>
+        fixture.queryMocks
+          .flatMap((query) => query.mock.calls)
+          .map(({ arguments: [text] }) => String(text));
       try {
         const store = fixture.postgresStore;
         await store.store(
@@ -148,7 +151,7 @@ describe(
             },
           ].map((entry) => ({ entry, maxStoreForSeconds: 60 })),
         );
-        const before = statements.length;
+        const before = statements().length;
         const results = await store.getMany([
           {
             id: "a",
@@ -176,9 +179,9 @@ describe(
           ),
           [["any", "json"], [], ["absent", "any"], ["any", "json"]],
         );
-        assert.equal(statements.length - before, 1);
-        assert.match(statements[before]!, /jsonb_each/);
-        assert.match(statements[before]!, /"r"\."params"/);
+        assert.equal(statements().length - before, 1);
+        assert.match(statements()[before]!, /jsonb_each/);
+        assert.match(statements()[before]!, /"r"\."params"/);
         for (const format of ["\ud800", "\u0000"]) {
           await assert.rejects(
             store.getMany([
@@ -292,25 +295,18 @@ describe(
     it("rejects with the abort reason when the signal aborts while the query runs", async () => {
       const controller = new AbortController();
       const reason = new Error("caller gave up");
-      // Armed only after the store() call below, whose statement also has an
-      // `in (...)` list.
-      const abortOnSelect = { armed: false };
-      const fixture = postgresStoreFixture({
-        onQuery: (text) => {
-          // Abort as the getMany statement goes out, so the query itself
-          // still completes and only the check after it can reject.
-          if (
-            abortOnSelect.armed &&
-            text.startsWith("select r.request_index")
-          ) {
-            controller.abort(reason);
-          }
-        },
-      });
+      const fixture = postgresStoreFixture();
       try {
         const store = fixture.postgresStore;
         await store.store([{ entry: makeEntry("a"), maxStoreForSeconds: 60 }]);
-        abortOnSelect.armed = true;
+        for (const query of fixture.queryMocks) {
+          // Hold the store at its query boundary, then abort before the
+          // query resolves; getMany must reject after awaiting that result.
+          query.mock.mockImplementationOnce((async () => {
+            controller.abort(reason);
+            return { rows: [] };
+          }) as unknown as typeof query);
+        }
 
         await assert.rejects(
           store.getMany([{ id: "a", params: noParams }], {

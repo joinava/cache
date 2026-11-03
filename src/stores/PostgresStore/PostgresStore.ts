@@ -295,8 +295,12 @@ export default class PostgresStore<
 
     signal?.throwIfAborted();
 
-    const results: EntryForId<Spec, Validators, Params, Spec["id"]>[][] =
-      Array.from({ length: requests.length }, () => []);
+    type RequestRow = {
+      request_index: number;
+      resource_id: string;
+      entry: TableEntry<Spec, Validators, Params>;
+    };
+    const rows: RequestRow[] = [];
     for (
       let offset = 0;
       offset < requests.length;
@@ -311,28 +315,35 @@ export default class PostgresStore<
               sql`(${offset + index}::integer, ${id}::text, ${jsonStringify(params)}::jsonb)`,
           ),
       );
-      const { rows } = await sql<{
-        request_index: number;
-        resource_id: string;
-        entry: TableEntry<Spec, Validators, Params>;
-      }>`select r.request_index, t.resource_id, t.entry
+      const batch =
+        await sql<RequestRow>`select r.request_index, t.resource_id, t.entry
         from ${sql.id(this.tableNameData.schemaName, this.tableNameData.tableName)} as t
         inner join (values ${values}) as r(request_index, resource_id, params)
           on t.resource_id = r.resource_id
         where ${varyMatchesParamsSql(sql.ref("t.vary"), sql.ref("r.params"))}
       `.execute(this.db);
       signal?.throwIfAborted();
-      for (const row of rows) {
-        const id = requests[row.request_index]!.id;
-        // SQL text binding can replace lone surrogates; never accept that
-        // normalized collision, nor a mismatched ID in the entry payload.
-        // Every result slot starts as []; skipping a row leaves an explicit
-        // miss at that index, never undefined or a shorter result array.
-        if (row.resource_id !== id) continue;
-        const entry = this.deserializeEntry(row.entry);
-        if (entry.id === id) results[row.request_index]!.push(entry);
-      }
+      rows.push(...batch.rows);
     }
+
+    // SQL text binding can replace lone surrogates. Require exact IDs in
+    // both the SQL key and persisted entry before grouping the matches.
+    const entriesByRequest = Map.groupBy(
+      rows.flatMap((row) => {
+        const id = requests[row.request_index]!.id;
+        if (row.resource_id !== id) return [];
+        const entry = this.deserializeEntry(row.entry);
+        return entry.id === id
+          ? [{ requestIndex: row.request_index, entry }]
+          : [];
+      }),
+      ({ requestIndex }) => requestIndex,
+    );
+    // Map the original requests, so duplicates retain their own slots and
+    // misses (including discarded ID collisions) always produce [], never undefined.
+    const results = requests.map((_, index) =>
+      (entriesByRequest.get(index) ?? []).map(({ entry }) => entry),
+    );
 
     return results as StoreGetManyResult<Spec, Reqs, Validators, Params>;
   }
