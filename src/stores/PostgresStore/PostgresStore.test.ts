@@ -197,6 +197,73 @@ describe(
       }
     });
 
+    it("matches empty vary for every supported param set without treating null-only vary as empty", async () => {
+      const fixture = postgresStoreFixture();
+      try {
+        const store = fixture.postgresStore;
+        await store.store(
+          [
+            { ...makeEntry("empty-vary"), content: "any" },
+            {
+              ...makeEntry("empty-vary"),
+              content: "absent",
+              vary: {
+                format: null,
+              } as unknown as NormalizedVary<PostgresStoreSupportedParams>,
+            },
+            {
+              ...makeEntry("empty-vary"),
+              content: "json",
+              vary: {
+                format: "json",
+              } as unknown as NormalizedVary<PostgresStoreSupportedParams>,
+            },
+          ].map((entry) => ({ entry, maxStoreForSeconds: 60 })),
+        );
+        const requests = [
+          {},
+          { format: "json" },
+          { format: "html" },
+          { format: false },
+          { format: 0 },
+          { format: "" },
+          { unrelated: "present" },
+        ].map((params) => ({
+          id: "empty-vary",
+          params:
+            params as unknown as NormalizedParams<PostgresStoreSupportedParams>,
+        }));
+        const expected = [
+          ["absent", "any"],
+          ["any", "json"],
+          ["any"],
+          ["any"],
+          ["any"],
+          ["any"],
+          ["absent", "any"],
+        ];
+        const contents = (entries: readonly { content: unknown }[]) =>
+          entries
+            .map(({ content }) => {
+              assert.equal(typeof content, "string");
+              return content as string;
+            })
+            .sort((a, b) => a.localeCompare(b));
+        assert.deepEqual(
+          (await store.getMany(requests)).map(contents),
+          expected,
+        );
+        for (const [index, request] of requests.entries()) {
+          assert.deepEqual(
+            contents(await store.get(request.id, request.params)),
+            expected[index],
+          );
+        }
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+
     it("rejects with the abort reason when the signal aborts while the query runs", async () => {
       const controller = new AbortController();
       const reason = new Error("caller gave up");

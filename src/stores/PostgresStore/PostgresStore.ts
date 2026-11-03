@@ -124,8 +124,9 @@ export type PostgresStoreCompatibleSpec = CacheSpec<string, JSONWithUndefined>;
  *     hence `IS DISTINCT FROM`, when the param is missing).
  *
  * Both arguments are SQL expressions, so bulk reads can reference a joined
- * request's params. The resource_id lookup narrows candidates; each candidate
- * still requires a jsonb_each scan of its vary requirements. We use
+ * request's params. Empty vary matches every request, so an equality guard
+ * skips the jsonb_each scan for that common case. Other candidates still
+ * require scanning their vary requirements. We use
  * the `jsonb_exists` function rather than the `?` operator because `?` is
  * ambiguous with driver parameter placeholders.
  */
@@ -133,14 +134,14 @@ function varyMatchesParamsSql(
   vary: RawBuilder<unknown>,
   params: RawBuilder<unknown>,
 ): RawBuilder<SqlBool> {
-  return sql<SqlBool>`not exists (
+  return sql<SqlBool>`(${vary} = '{}'::jsonb or not exists (
     select 1
     from jsonb_each(${vary}) as v(key, value)
     where case
       when jsonb_typeof(v.value) = 'null' then jsonb_exists(${params}, v.key)
       else (${params} -> v.key) is distinct from v.value
     end
-  )`;
+  ))`;
 }
 
 /**
