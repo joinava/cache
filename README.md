@@ -281,3 +281,7 @@ Upgrading from 1.6.0, whose single channel reported a `status` string: `hit` →
 ## Mutation ordering
 
 Overlapping `store()` and `delete()` calls have no ordering guarantee, including calls on the same cache or store instance. Await a mutation before starting the next mutation when their order matters. A completed delete does not prevent an in-flight producer from storing its result later. Cross-request invalidation needs a separate version or generation protocol; these APIs do not provide one.
+
+## Store shutdown
+
+MemoryStore close only stops periodic expiration cleanup; pending operations continue. PostgresStore disposal leaves operations and connection-pool shutdown to the caller. SqliteStore close drains accepted worker tasks unless shutdown fails or times out. Await operation promises when their completion or errors matter. Finish Postgres operations before shutting down the supplied pool. See [store shutdown details](docs/implementing-a-store.md#store-shutdown), including timeout behavior and `Cache.close()`.

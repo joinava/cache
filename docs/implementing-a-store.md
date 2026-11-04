@@ -57,4 +57,18 @@ To handle this, call the exported `restoreInfinityInDirectives` helper on the pa
 
 ## Overlapping mutations
 
-`store()` and `delete()` have no ordering guarantee when calls overlap, including calls on one instance. Callers must await a mutation before starting a dependent mutation. Callers must also await pending operations before closing a store. A delete does not cancel a producer or prevent its later result from repopulating the cache. Stronger invalidation requires an explicit protocol, such as versions or generations, or suitable database transaction guarantees.
+`store()` and `delete()` have no ordering guarantee when calls overlap, including calls on one instance. Callers must await a mutation before starting a dependent mutation. A delete does not cancel a producer or prevent its later result from repopulating the cache. Stronger invalidation requires an explicit protocol, such as versions or generations, or suitable database transaction guarantees.
+
+## Store shutdown
+
+Shutdown behavior depends on the store:
+
+| Store | Shutdown behavior | Pending operations |
+| --- | --- | --- |
+| MemoryStore | `close()` stops the expiration-cleanup timer. It does not clear entries or reject new operations. | Pending reads and writes continue. Close does not wait for them, so their promises can settle after close resolves. Reads still check entry expiration. |
+| PostgresStore | There is no `close()` method. `Symbol.asyncDispose()` does nothing because the caller owns the supplied connection pool. | Operations continue. Finish operations before shutting down the supplied pool, including writes still preparing or executing transaction batches. |
+| SqliteStore | `close()` rejects new operations, drains accepted reader tasks, enqueues a writer checkpoint/close task behind accepted writes, and closes the workers. | Accepted tasks normally finish. An explicit close timeout destroys both worker pools and rejects close. Outstanding tasks can reject. A rejected write promise alone does not establish whether its transaction committed before termination. |
+
+SqliteStore's installed Piscina pools also have a 30-second graceful-close timeout. This limit applies even without an explicit store close timeout. SQLite shutdown drains worker tasks; it does not explicitly collect every public operation promise or its remaining result conversion. Await operation promises when their completion or errors matter.
+
+`Cache.close()` marks the cache closed and flushes accepted queued reads before invoking the store's shutdown method. It does not wait for all cache operations or producer calls to settle. Store shutdown behavior does not imply an ordering guarantee for overlapping mutations.

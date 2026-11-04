@@ -181,6 +181,11 @@ export type Store<
    * connection, closing that is part of this function's responsibility; however,
    * if the store has a db client/connection passed in, it's up to the caller to
    * manage that.
+   *
+   * Shutdown does not imply a uniform drain guarantee. MemoryStore only stops
+   * periodic cleanup. PostgresStore leaves the supplied pool open. SqliteStore
+   * drains accepted worker tasks unless shutdown fails or times out. Await
+   * operation promises when their completion or errors matter.
    */
   [Symbol.asyncDispose](): Promise<void>;
 
