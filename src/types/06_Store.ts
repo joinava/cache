@@ -68,6 +68,10 @@ export type StoreEntryResult = {
  * (on disk, in memory, in a database, etc). The type params have the same
  * meanings as in the ProducerResult type.
  *
+ * Overlapping store() and delete() calls have no ordering guarantee, even on
+ * one instance. Await a mutation before starting another when order matters.
+ * Deleting an entry does not prevent an in-flight producer from storing it later.
+ *
  * `Spec` is the union of cache key shapes the store can hold; see
  * {@link CacheSpec}. The `get`/`getMany` methods are generic over the
  * specific id of an incoming request so that the returned entries' content

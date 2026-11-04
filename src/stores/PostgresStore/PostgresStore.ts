@@ -354,26 +354,7 @@ export default class PostgresStore<
     return results as StoreGetManyResult<Spec, Reqs, Validators, Params>;
   }
 
-  #mutationTail: Promise<void> = Promise.resolve();
-
-  // Cooperative preparation and split transactions must finish before a later
-  // mutation starts. Otherwise an earlier write can recreate an invalidated id.
-  #mutate<T>(operation: () => Promise<T>): Promise<T> {
-    const pending = this.#mutationTail.then(operation);
-    this.#mutationTail = pending.then(
-      () => {},
-      () => {},
-    );
-    return pending;
-  }
-
-  store(
-    entries: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ): Promise<readonly StoreEntryResult[]> {
-    return this.#mutate(() => this.#store(entries));
-  }
-
-  async #store(
+  async store(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
     this.logTrace("storing entries", entries);
@@ -572,11 +553,7 @@ export default class PostgresStore<
     };
   }
 
-  delete(id: Spec["id"]): Promise<void> {
-    return this.#mutate(() => this.#delete(id));
-  }
-
-  async #delete(id: Spec["id"]): Promise<void> {
+  async delete(id: Spec["id"]): Promise<void> {
     this.logTrace("deleting entries for id", id);
     await this.ensureInitializedPromise;
 

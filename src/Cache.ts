@@ -1,8 +1,8 @@
-import { mapCooperatively, forEachCooperatively } from "./utils/cooperative.js";
+import { mapCooperatively } from "./utils/cooperative.js";
 import { groupBy, sortBy, sumBy } from "es-toolkit";
 import { EventEmitter } from "events";
 import type { InvariantOf, ReadonlyDeep } from "type-fest";
-import { isNonEmptyArray } from "type-party/runtime/nonempty.js";
+import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
 import {
   cacheStoreEntryChannel,
   publishCacheRead,
@@ -262,7 +262,6 @@ export default class Cache<
     | StoreReadBatcher<StoreSupportedTypes, Validators, Params>
     | undefined;
   #closed = false;
-  #writePreparationTail: Promise<void> | undefined;
   readonly #onGetAfterClose: "throw" | "act-empty";
   readonly #onStoreAfterClose: "throw" | "no-op";
   readonly #resourceTypeEntries: ResourceTypesEntries<RT>;
@@ -567,10 +566,7 @@ export default class Cache<
 
     // Classify every request id up front: a classification failure rejects
     // the whole operation before we touch the store.
-    const resourceTypes =
-      requests.length <= 32
-        ? requests.map((req) => this.classify(req.id))
-        : await mapCooperatively(requests, (req) => this.classify(req.id));
+    const resourceTypes = mapNonEmpty(requests, (req) => this.classify(req.id));
 
     const publishRead = (requestIndex: number, outcome: CacheReadOutcome) => {
       publishCacheRead({
@@ -596,10 +592,10 @@ export default class Cache<
         "received getMany request when closed, so returning no entries",
       );
 
-      return (await mapCooperatively(requests, (_req, i) => {
+      return mapNonEmpty(requests, (_req, i) => {
         publishRead(i, { found: "none" });
         return { validatable: [] };
-      })) as GetManyResults<Reqs, RT, Validators, Params>;
+      });
     }
 
     const now = new Date();
@@ -607,34 +603,27 @@ export default class Cache<
     // Prepare requests for the store's getMany method
     this.#logger("trace", "received getMany request", {
       requestCount: requests.length,
-      requests: requests.map((r) => ({
-        id: r.id,
-        params: r.params,
-      })),
+      requests: requests.map((r) => ({ id: r.id, params: r.params })),
     });
     this.#logger("trace", "requested entries from the store via getMany");
 
-    // Cancellation can arrive during cooperative preparation, before the store
-    // has received the operation.
-    const prepareStoreRequest = (req: Reqs[number]) => ({
-      id: req.id,
-      params: this.normalizeParams(req.params),
-    });
-    const storeRequests =
-      requests.length <= 32
-        ? requests.map(prepareStoreRequest)
-        : await mapCooperatively(requests, prepareStoreRequest);
-    options?.signal?.throwIfAborted();
+    // Use the store's optimized getMany method
     const cacheEntriesForRequests = await this.#dataStore
-      .getMany(storeRequests, options)
-      .catch(async (error: unknown) => {
+      .getMany(
+        mapNonEmpty(requests, (req) => ({
+          id: req.id,
+          params: this.normalizeParams(req.params),
+        })),
+        options,
+      )
+      .catch((error: unknown) => {
         // One `read-failed` message PER REQUEST, not one per call: the channel
         // is one-message-per-lookup, and a batch read is N lookups that all
         // failed together. Emitting one message for the batch would make a
         // subscriber's per-id read counts disagree with the successful path.
         // Aborts stay silent for the reason given in `get`.
         if (options?.signal?.aborted !== true) {
-          await forEachCooperatively(requests, (req, i) => {
+          requests.forEach((req, i) => {
             publishCacheRead({
               cache: this.name,
               // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
@@ -690,46 +679,14 @@ export default class Cache<
    * Emits one `store-entry` diagnostics message PER entry (see
    * `CACHE_STORE_ENTRY_CHANNEL_NAME`).
    */
-  public store(
+  public async store(
     data: readonly ProducerResultResource<SpecOf<RT>, Validators, Params>[],
-  ): Promise<readonly StoreEntryResult[]> {
-    const closedAtCall = this.#closed;
-    return this.#prepareWrite((release) =>
-      this.#store(data, closedAtCall, release),
-    );
-  }
-
-  // Order the preparation of writes, not their backing-store I/O. A later
-  // invalidation or close must not overtake a store that yielded in preflight.
-  #prepareWrite<T>(prepare: (release: () => void) => Promise<T>): Promise<T> {
-    const previous = this.#writePreparationTail;
-    const gate = Promise.withResolvers<void>();
-    this.#writePreparationTail = gate.promise;
-    const release = () => {
-      if (this.#writePreparationTail === gate.promise)
-        this.#writePreparationTail = undefined;
-      gate.resolve();
-    };
-    const pending = previous
-      ? previous.then(() => prepare(release))
-      : prepare(release);
-    void pending.then(release, release);
-    return pending;
-  }
-
-  async #store(
-    data: readonly ProducerResultResource<SpecOf<RT>, Validators, Params>[],
-    closedAtCall: boolean,
-    releasePreparation: () => void,
   ): Promise<readonly StoreEntryResult[]> {
     // Classify all entry ids up front -- any failure rejects before we
     // normalize, emit events, or persist anything.
-    const resourceTypes =
-      data.length <= 32
-        ? data.map((it) => this.classify(it.id))
-        : await mapCooperatively(data, (it) => this.classify(it.id));
+    const resourceTypes = data.map((it) => this.classify(it.id));
 
-    if (closedAtCall) {
+    if (this.#closed) {
       if (this.#onStoreAfterClose === "throw") {
         this.#logger(
           "trace",
@@ -745,18 +702,14 @@ export default class Cache<
     }
 
     const now = new Date();
-    const prepareEntry = (it: (typeof data)[number]) => {
+    const entriesWithTimes = data.map((it) => {
       const entry = normalizeProducerResultResource(
         this.normalizeVary,
         it,
         now,
       );
       return { entry, maxStoreForSeconds: calculateStoreFor(entry, now) };
-    };
-    const entriesWithTimes =
-      data.length <= 32
-        ? data.map(prepareEntry)
-        : await mapCooperatively(data, prepareEntry);
+    });
 
     this.#logger(
       "trace",
@@ -764,16 +717,11 @@ export default class Cache<
       entriesWithTimes,
     );
 
-    const emitStore = ({
-      entry,
-      maxStoreForSeconds,
-    }: (typeof entriesWithTimes)[number]) => {
+    entriesWithTimes.forEach(({ entry, maxStoreForSeconds }) => {
       this.emitter.emit("store", entry, maxStoreForSeconds);
-    };
-    if (entriesWithTimes.length <= 32) entriesWithTimes.forEach(emitStore);
-    else await forEachCooperatively(entriesWithTimes, emitStore);
+    });
 
-    const pendingStore = this.#dataStore.store(
+    const results = await this.#dataStore.store(
       entriesWithTimes as unknown as readonly StoreEntryInput<
         StoreSupportedTypes,
         Validators,
@@ -781,31 +729,25 @@ export default class Cache<
       >[],
     );
 
-    releasePreparation();
-    const results = await pendingStore;
-
     // The results array is parallel to the input entries (see Store.store).
     // One message PER ENTRY -- primary plus every supplemental -- so this is
     // the package's other O(entries) diagnostics payload, and `publish` would
     // discard each message without preventing its construction. Hence the
     // subscriber test around the whole loop rather than inside it.
     if (cacheStoreEntryChannel.hasSubscribers) {
-      await forEachCooperatively(
-        results,
-        ({ relationshipToExistingStoredData }, i) => {
+      results.forEach(({ relationshipToExistingStoredData }, i) => {
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        const { entry } = entriesWithTimes[i]!;
+        publishCacheStoreEntry({
+          cache: this.name,
           // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          const { entry } = entriesWithTimes[i]!;
-          publishCacheStoreEntry({
-            cache: this.name,
-            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-            resourceType: resourceTypes[i]!,
-            resourceId: entry.id,
-            vary: entry.vary,
-            validators: entry.validators,
-            relationshipToExistingStoredData,
-          });
-        },
-      );
+          resourceType: resourceTypes[i]!,
+          resourceId: entry.id,
+          vary: entry.vary,
+          validators: entry.validators,
+          relationshipToExistingStoredData,
+        });
+      });
     }
 
     return results;
@@ -837,11 +779,7 @@ export default class Cache<
       return;
     }
 
-    return this.#prepareWrite(async (release) => {
-      const pendingDelete = this.#dataStore.delete(id);
-      release();
-      return pendingDelete;
-    });
+    return this.#dataStore.delete(id);
   }
 
   public async close(timeout?: number) {
@@ -851,7 +789,6 @@ export default class Cache<
     // as unbatched reads would be. Do not wait for them to settle. The store's
     // own close handles reads in flight, and `timeout` bounds it.
     this.#readBatcher?.flushNow();
-    if (this.#writePreparationTail) await this.#writePreparationTail;
     return (
       this.#dataStore.close?.(timeout) ?? this.#dataStore[Symbol.asyncDispose]()
     );

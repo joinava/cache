@@ -169,14 +169,9 @@ export async function naiveGetMany<
   const limit = pLimit(maxConcurrency);
 
   // Process all requests with controlled concurrency
-  const promises = await mapCooperatively(requests, (request) => {
-    const pending = limit(async () =>
-      store.get(request.id, request.params, options),
-    );
-    // A yielded enrollment pass may outlive an early store rejection.
-    void pending.catch(() => {});
-    return pending;
-  });
+  const promises = requests.map(async (request) =>
+    limit(async () => store.get(request.id, request.params, options)),
+  );
 
   const res = await Promise.all(promises);
   return res satisfies Entry<

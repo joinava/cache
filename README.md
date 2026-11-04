@@ -277,3 +277,7 @@ A cache's unit of storage is the `(id, vary)` **pair**, where `vary` is the norm
 Upgrading from 1.6.0, whose single channel reported a `status` string: `hit` → `served-from-cache`, `stale_while_revalidate` → `served-stale-while-revalidating`, and `miss`/`bypass` → `served-from-producer` (now distinguished by `directivesImpliedBypass`). `served-stale-after-error`, `producer-error`, and `aborted` are new dispositions that 1.6.0 could not report at all.
 
 `fetch` and `produce` are the two spans of one story with different subjects and cardinalities: a `fetch` is the consumer-side span (one per logical request); a `produce` is the origin-side span (one per invocation). N collapsed callers ride one invocation, one bulk invocation covers many requests, a stale-while-revalidate refresh settles *after* its triggering fetch already shipped, and an `aborted` fetch settles *before* its invocation does (the collapsed producer call keeps running and stores in the background).
+
+## Mutation ordering
+
+Overlapping `store()` and `delete()` calls have no ordering guarantee, including calls on the same cache or store instance. Await a mutation before starting the next mutation when their order matters. A completed delete does not prevent an in-flight producer from storing its result later. Cross-request invalidation needs a separate version or generation protocol; these APIs do not provide one.

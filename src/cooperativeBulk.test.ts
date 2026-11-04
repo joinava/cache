@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { setImmediate } from "node:timers/promises";
 import { it, mock } from "node:test";
-import stableStringify from "safe-stable-stringify";
 import Cache from "./Cache.js";
 import {
   MemoryStore,
@@ -10,28 +8,13 @@ import {
   type NormalizedParams,
   type SpecOf,
 } from "./index.js";
-import {
-  mapCooperatively,
-  mapFromEntriesCooperatively,
-  stableStringifyArrayCooperatively,
-} from "./utils/cooperative.js";
 import { wrapBulkProducer } from "./utils/wrapBulkProducer.js";
 
 const batchSize = 10_000;
 function makeCache() {
-  let classifications = 0;
   const registry = {
     resources: resourceType<number>()({
-      matches: (id): id is string => {
-        classifications += 1;
-        // Deterministically exceed the cooperative budget, independent of CPU
-        // speed, while keeping the classification contract realistic and pure.
-        const until = performance.now() + 0.002;
-        while (performance.now() < until) {
-          /* classification work */
-        }
-        return id.startsWith("resource:");
-      },
+      matches: (id): id is string => id.startsWith("resource:"),
     }),
   };
   const store = new MemoryStore<SpecOf<typeof registry>>();
@@ -40,14 +23,14 @@ function makeCache() {
     resourceTypes: registry,
     store,
   });
-  return { cache, store, classifications: () => classifications };
+  return { cache, store };
 }
 const requests = Array.from({ length: batchSize }, (_, i) => ({
   id: `resource:${i}`,
 }));
 
-it("yields during a 10k cold batch without splitting its producer cohort", async () => {
-  const { cache, classifications } = makeCache();
+it("preserves the full producer cohort and result order for a 10k cold batch", async () => {
+  const { cache } = makeCache();
   const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
     reqs.map((req) => ({
       content: Number(req.id.slice("resource:".length)),
@@ -58,14 +41,8 @@ it("yields during a 10k cold batch without splitting its producer cohort", async
     { cache, collapseOverlappingRequestsTime: 0 },
     producer,
   );
-  let seenAtMacrotask = 0;
-  const tick = setImmediate().then(() => {
-    seenAtMacrotask = classifications();
-  });
   try {
     const result = await wrapped(requests);
-    await tick;
-    assert.ok(seenAtMacrotask > 0 && seenAtMacrotask < batchSize);
     assert.equal(producer.mock.callCount(), 1);
     assert.equal(producer.mock.calls[0]!.arguments[0].length, batchSize);
     assert.deepEqual(
@@ -77,8 +54,8 @@ it("yields during a 10k cold batch without splitting its producer cohort", async
   }
 });
 
-it("yields during a 10k warm batch and preserves ordered cache hits", async () => {
-  const { cache, classifications } = makeCache();
+it("preserves ordered cache hits for a 10k warm batch", async () => {
+  const { cache } = makeCache();
   const producer = mock.fn(async () => {
     throw new Error("warm batch must not produce");
   });
@@ -91,14 +68,7 @@ it("yields during a 10k warm batch and preserves ordered cache hits", async () =
         directives: { freshUntilAge: 60 },
       })),
     );
-    const before = classifications();
-    let seenAtMacrotask = 0;
-    const tick = setImmediate().then(() => {
-      seenAtMacrotask = classifications() - before;
-    });
     const result = await wrapped(requests);
-    await tick;
-    assert.ok(seenAtMacrotask > 0 && seenAtMacrotask < batchSize);
     assert.equal(producer.mock.callCount(), 0);
     assert.deepEqual(
       result.map((entry) => (entry instanceof Error ? entry : entry.content)),
@@ -109,20 +79,14 @@ it("yields during a 10k warm batch and preserves ordered cache hits", async () =
   }
 });
 
-it("classifies an invalid final ID before any cache or producer side effect despite yielding", async () => {
-  const { cache, store, classifications } = makeCache();
+it("classifies an invalid final ID before any cache or producer side effect", async () => {
+  const { cache, store } = makeCache();
   const read = mock.method(store, "getMany");
   const write = mock.method(store, "store");
   const producer = mock.fn(async () => []);
   const wrapped = wrapBulkProducer({ cache }, producer);
-  let seenAtMacrotask = 0;
-  const tick = setImmediate().then(() => {
-    seenAtMacrotask = classifications();
-  });
   try {
     await assert.rejects(wrapped([...requests, { id: "invalid" }]));
-    await tick;
-    assert.ok(seenAtMacrotask > 0 && seenAtMacrotask < batchSize);
     assert.equal(read.mock.callCount(), 0);
     assert.equal(write.mock.callCount(), 0);
     assert.equal(producer.mock.callCount(), 0);
@@ -131,44 +95,33 @@ it("classifies an invalid final ID before any cache or producer side effect desp
   }
 });
 
-it("an abort during yielded preflight never starts cache reads or a producer", async () => {
-  const { cache, store } = makeCache();
-  const read = mock.method(store, "getMany");
+it("an abort during a pending cache read prevents producer execution", async () => {
+  const { cache } = makeCache();
+  const started = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<void>();
+  const controller = new AbortController();
+  const reason = new Error("abort during cache read");
+  const read = mock.method(cache, "getMany", async () => {
+    started.resolve();
+    await finish.promise;
+    controller.signal.throwIfAborted();
+    return [];
+  });
   const producer = mock.fn(async () => []);
   const wrapped = wrapBulkProducer({ cache }, producer);
-  const controller = new AbortController();
-  const reason = new Error("abort during preflight");
-  const tick = setImmediate().then(() => {
-    controller.abort(reason);
-  });
   try {
-    await assert.rejects(
-      wrapped(requests, { signal: controller.signal }),
-      (error) => error === reason,
-    );
-    await tick;
-    assert.equal(read.mock.callCount(), 0);
+    const pending = wrapped(requests, { signal: controller.signal });
+    const rejected = assert.rejects(pending, (error) => error === reason);
+    await started.promise;
+    controller.abort(reason);
+    finish.resolve();
+    await rejected;
+    assert.equal(read.mock.callCount(), 1);
     assert.equal(producer.mock.callCount(), 0);
   } finally {
+    finish.resolve();
     await cache.close();
   }
-});
-
-it("cooperative collapse keys preserve stable array serialization", async () => {
-  const shared = { z: [true, null, { b: "b", a: "a" }], a: 1 };
-  const values = [
-    { id: "resource:1", params: { shared, absent: undefined }, directives: {} },
-    {
-      id: "resource:2",
-      directives: { maxAge: 0 },
-      params: { shared, nested: [undefined, Infinity] },
-    },
-    ...requests,
-  ];
-  assert.equal(
-    await stableStringifyArrayCooperatively(values),
-    stableStringify(values),
-  );
 });
 
 it("single MemoryStore writes remain immediately visible without awaiting their promise", async () => {
@@ -204,244 +157,7 @@ it("single MemoryStore writes remain immediately visible without awaiting their 
   }
 });
 
-it("yielded MemoryStore writers retain ordered comparisons and later invalidation", async () => {
-  const { cache, store } = makeCache();
-  try {
-    await cache.store([
-      {
-        id: "resource:template",
-        content: 0,
-        directives: { freshUntilAge: 60 },
-      },
-    ]);
-    const { usable } = await cache.get({
-      id: "resource:template",
-      params: {},
-      directives: {},
-    });
-    assert.ok(usable);
-    const firstInputs = requests.map((req) => ({
-      entry: { ...usable, id: req.id, validators: { version: "one" } },
-      maxStoreForSeconds: 60,
-    }));
-    const secondInputs = firstInputs.map((input) => ({
-      ...input,
-      entry: { ...input.entry, validators: { version: "two" } },
-    }));
-    const first = store.store(firstInputs);
-    const second = store.store(secondInputs);
-    const deletion = store.delete(requests[batchSize - 1]!.id);
-    const [firstResults, secondResults] = await Promise.all([first, second]);
-    await deletion;
-    assert.ok(
-      firstResults.every(
-        (result) => result.relationshipToExistingStoredData === "is-new",
-      ),
-    );
-    assert.ok(
-      secondResults.every(
-        (result) => result.relationshipToExistingStoredData === "changed",
-      ),
-    );
-    assert.deepEqual(
-      await store.get(
-        requests[batchSize - 1]!.id,
-        {} as NormalizedParams<AnyParams>,
-      ),
-      [],
-    );
-  } finally {
-    await cache.close();
-  }
-});
-
-it("a bypass settled before a sibling read abort keeps its producer disposition", async () => {
-  const { cache, store } = makeCache();
-  const { cacheFetchChannel, cacheProduceChannel } =
-    await import("./diagnostics.js");
-  const produced = Promise.withResolvers<void>();
-  const readStarted = Promise.withResolvers<void>();
-  const fetches: { resourceId: string; disposition: string }[] = [];
-  const onFetch = (message: { resourceId: string; disposition: string }) => {
-    fetches.push(message);
-  };
-  const onProduce = () => {
-    produced.resolve();
-  };
-  cacheFetchChannel.subscribe(onFetch);
-  cacheProduceChannel.subscribe(onProduce);
-  mock.method(
-    store,
-    "getMany",
-    async (_requests: unknown, options?: { signal?: AbortSignal }) => {
-      readStarted.resolve();
-      return new Promise((_resolve, reject) => {
-        options!.signal!.addEventListener(
-          "abort",
-          () => {
-            reject(options!.signal!.reason);
-          },
-          { once: true },
-        );
-      });
-    },
-  );
-  const controller = new AbortController();
-  const reason = new Error("abort sibling read after bypass finishes");
-  const wrapped = wrapBulkProducer({ cache }, async (reqs) =>
-    reqs.map(() => ({ content: 1, directives: { freshUntilAge: 60 } })),
-  );
-  try {
-    const pending = wrapped(
-      [
-        { id: "resource:bypass", directives: { maxAge: 0 } },
-        { id: "resource:read" },
-      ],
-      { signal: controller.signal },
-    );
-    const rejection = assert.rejects(pending, (error) => error === reason);
-    await Promise.all([produced.promise, readStarted.promise]);
-    await setImmediate();
-    controller.abort(reason);
-    await rejection;
-    assert.deepEqual(
-      fetches
-        .map(({ resourceId, disposition }) => ({ resourceId, disposition }))
-        .sort((a, b) => a.resourceId.localeCompare(b.resourceId)),
-      [
-        { resourceId: "resource:bypass", disposition: "served-from-producer" },
-        { resourceId: "resource:read", disposition: "aborted" },
-      ],
-    );
-  } finally {
-    controller.abort(reason);
-    cacheFetchChannel.unsubscribe(onFetch);
-    cacheProduceChannel.unsubscribe(onProduce);
-    await cache.close();
-  }
-});
-
-function makeLifecycleCache(duringNormalization: (cache: Cache) => void) {
-  let scheduled = false;
-  const store = new MemoryStore();
-  const cache = new Cache({
-    name: "cooperative-lifecycle",
-    resourceTypes: {
-      resources: resourceType<unknown>()({
-        matches: (_id): _id is string => true,
-      }),
-    },
-    store,
-    normalizeParamValue: (_name, value) => {
-      if (!scheduled) {
-        scheduled = true;
-        void setImmediate().then(() => {
-          duringNormalization(cache);
-        });
-      }
-      const until = performance.now() + 0.02;
-      while (performance.now() < until) {
-        /* force a preparation yield */
-      }
-      return value;
-    },
-  });
-  const inputs = requests.slice(0, 1_000).map((req, i) => ({
-    id: req.id,
-    content: i,
-    vary: { x: "v" },
-    directives: { freshUntilAge: 60 },
-  }));
-  return { cache, store, inputs };
-}
-
-it("a public delete cannot overtake a bulk store yielding in normalization", async () => {
-  let deletion: Promise<void> | undefined;
-  const { cache, store, inputs } = makeLifecycleCache((active) => {
-    deletion = active.delete("resource:0");
-  });
-  try {
-    await cache.store(inputs);
-    assert.ok(deletion);
-    await deletion;
-    assert.deepEqual(
-      await store.get("resource:0", {
-        x: "v",
-      } as unknown as NormalizedParams<AnyParams>),
-      [],
-    );
-  } finally {
-    await cache.close();
-  }
-});
-
-it("public close waits for previously accepted bulk write preparation", async () => {
-  let closing: Promise<void> | undefined;
-  const { cache, store, inputs } = makeLifecycleCache((active) => {
-    closing = active.close();
-  });
-  const order: string[] = [];
-  const originalStore = store.store.bind(store);
-  const originalClose = store.close.bind(store);
-  mock.method(store, "store", (entries: Parameters<typeof store.store>[0]) => {
-    order.push("store");
-    return originalStore(entries);
-  });
-  mock.method(store, "close", () => {
-    order.push("close");
-    return originalClose();
-  });
-  await cache.store(inputs);
-  assert.ok(closing);
-  await closing;
-  assert.deepEqual(order, ["store", "close"]);
-});
-
-it("a fast miss rejection remains observed while background refresh enrollment yields", async () => {
-  const { cache } = makeCache();
-  try {
-    await cache.store([
-      {
-        id: "resource:template",
-        content: 0,
-        directives: { freshUntilAge: 60 },
-      },
-    ]);
-    const { usable } = await cache.get({
-      id: "resource:template",
-      params: {},
-      directives: {},
-    });
-    assert.ok(usable);
-    mock.method(cache, "getMany", async (reqs: readonly { id: string }[]) =>
-      reqs.map((req, index) =>
-        index === 0
-          ? { validatable: [] }
-          : {
-              validatable: [],
-              usableWhileRevalidate: { ...usable, id: req.id },
-            },
-      ),
-    );
-    const failure = new Error("fast foreground miss failure");
-    const wrapped = wrapBulkProducer({ cache, logger: () => {} }, async () => {
-      throw failure;
-    });
-    const payload = "x".repeat(2_048);
-    // Stable-key preparation for the refresh cohort must yield, leaving enough
-    // time for a fast foreground rejection to become unhandled without the
-    // immediate observer installed by the wrapper.
-    await assert.rejects(
-      wrapped(requests.map((request) => ({ ...request, params: { payload } }))),
-      (error) => error === failure,
-    );
-    await setImmediate();
-  } finally {
-    await cache.close();
-  }
-});
-
-it("an invalid final bulk store ID prevents writes and events after yielded preflight", async () => {
+it("an invalid final bulk store ID prevents writes and events", async () => {
   const { cache, store } = makeCache();
   const write = mock.method(store, "store");
   let events = 0;
@@ -499,78 +215,6 @@ it("a pre-aborted mixed batch publishes every aborted fetch before any read star
     assert.equal(producer.mock.callCount(), 0);
   } finally {
     cacheFetchChannel.unsubscribe(onFetch);
-    await cache.close();
-  }
-});
-
-it("cooperative map construction yields while consuming an iterable and keeps last duplicate values", async () => {
-  const state = { visited: 0, visitedAtTick: 0 };
-  function* entries(): IterableIterator<readonly [number, number]> {
-    for (let index = 0; index < batchSize; index += 1) {
-      const until = performance.now() + 0.002;
-      while (performance.now() < until) {
-        /* iterable entry work */
-      }
-      state.visited += 1;
-      yield [index % 100, index];
-    }
-  }
-  const tick = setImmediate().then(() => {
-    state.visitedAtTick = state.visited;
-  });
-  const result = await mapFromEntriesCooperatively(entries());
-  await tick;
-  assert.ok(state.visitedAtTick > 0 && state.visitedAtTick < batchSize);
-  assert.deepEqual(
-    [...result.keys()],
-    Array.from({ length: 100 }, (_, index) => index),
-  );
-  assert.deepEqual(
-    [...result.values()],
-    Array.from({ length: 100 }, (_, index) => batchSize - 100 + index),
-  );
-  assert.deepEqual(
-    await mapCooperatively(result.values(), (value) => value + 1),
-    [...result.values()].map((value) => value + 1),
-  );
-});
-
-it("ride bookkeeping yields without leaving a fast producer rejection unobserved", async () => {
-  const { cache } = makeCache();
-  // oxlint-disable-next-line typescript/unbound-method -- The interceptor calls this captured method with its original receiver below.
-  const originalSet = Map.prototype.set;
-  const progress = { indexed: 0, indexedAtTick: 0, timer: Promise.resolve() };
-  const set = mock.method(
-    Map.prototype,
-    "set",
-    function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
-      // Only the wrapper's per-request ride index uses these request objects as keys.
-      if (typeof key === "object" && key !== null && "settleFetchOnce" in key) {
-        if (progress.indexed === 0) {
-          progress.timer = setImmediate().then(() => {
-            progress.indexedAtTick = progress.indexed;
-          });
-        }
-        const until = performance.now() + 0.002;
-        while (performance.now() < until) {
-          /* ride-index work */
-        }
-        progress.indexed += 1;
-      }
-      return originalSet.call(this, key, value);
-    },
-  );
-  const failure = new Error("fast producer rejection during ride indexing");
-  const wrapped = wrapBulkProducer({ cache }, async () => {
-    throw failure;
-  });
-  try {
-    await assert.rejects(wrapped(requests), (error) => error === failure);
-    await progress.timer;
-    assert.equal(progress.indexed, batchSize);
-    assert.ok(progress.indexedAtTick > 0 && progress.indexedAtTick < batchSize);
-  } finally {
-    set.mock.restore();
     await cache.close();
   }
 });

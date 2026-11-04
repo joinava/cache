@@ -93,42 +93,6 @@ describe(
   "PostgresStore bulk persistence",
   postgresConfigured ? {} : { skip: "Postgres is not configured" },
   () => {
-    for (const count of [1, 2_001]) {
-      it(`a later delete cannot overtake preparation of ${count} writes`, async () => {
-        const f = await fixture();
-        try {
-          const writing = f.store.store(
-            Array.from({ length: count }, (_, index) => input(`id:${index}`, 1)),
-          );
-          const deleting = f.store.delete("id:0");
-          await Promise.all([writing, deleting]);
-          assert.deepEqual(
-            await f.store.get("id:0", {} as NormalizedParams<Params>),
-            [],
-          );
-        } finally {
-          await f.cleanup();
-        }
-      });
-    }
-
-    it("a failed write does not block later mutations", async () => {
-      const f = await fixture();
-      try {
-        const rejected = f.store.store([input("invalid\u0000", 1)]);
-        const writing = f.store.store([input("valid", 2)]);
-        await assert.rejects(rejected);
-        await writing;
-        await f.store.delete("valid");
-        assert.deepEqual(
-          await f.store.get("valid", {} as NormalizedParams<Params>),
-          [],
-        );
-      } finally {
-        await f.cleanup();
-      }
-    });
-
     it("keeps the one-statement fast path for a small write", async () => {
       const f = await fixture();
       const observed = observeQueries();

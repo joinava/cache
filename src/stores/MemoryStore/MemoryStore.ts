@@ -170,7 +170,7 @@ export default class MemoryStore<
     options?: { signal?: AbortSignal },
   ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
     options?.signal?.throwIfAborted();
-    if (requests.length <= 32) {
+    if (requests.length <= 1_000) {
       return requests.map((it) =>
         this.#getOneSync(it.id, it.params),
       ) as StoreGetManyResult<Spec, Reqs, Validators, Params>;
@@ -210,27 +210,11 @@ export default class MemoryStore<
     });
   }
 
-  private storeTail: Promise<unknown> = Promise.resolve();
-  private pendingStores = 0;
-
   public async store(
     entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
-    // Keep overlapping writers ordered while their bulk passes yield. Each
-    // call still compares every slot to its state before that call writes.
-    // Single-entry callers depend on writes happening before store() returns
-    // its promise (wrapProducer deliberately does not await that promise).
-    if (entriesWithTimes.length <= 32 && this.pendingStores === 0) {
-      return Promise.resolve(this.#storeSmall(entriesWithTimes));
-    }
-    this.pendingStores += 1;
-    const pending = this.storeTail.then(() => this.#store(entriesWithTimes));
-    this.storeTail = pending
-      .finally(() => {
-        this.pendingStores -= 1;
-      })
-      .catch(() => {});
-    return pending;
+    if (entriesWithTimes.length <= 1_000) return this.#storeSmall(entriesWithTimes);
+    return this.#store(entriesWithTimes);
   }
 
   #storeSmall(
@@ -283,10 +267,8 @@ export default class MemoryStore<
       },
     );
 
-    // The relationship is measured against what each slot held BEFORE this
-    // call, so snapshot every touched slot's current entry now, before any
-    // write. Reading a slot more than once here is harmless: nothing has been
-    // written yet, so each read of a slot returns the same pre-call value.
+    // Capture entries before this call persists its winners. Overlapping
+    // mutations can interleave while this pass yields.
     const preCallBySlot = await mapFromEntriesCooperatively(
       await mapCooperatively(
         prepared,
@@ -391,8 +373,6 @@ export default class MemoryStore<
   }
 
   public async delete(id: Spec["id"]) {
-    // A later invalidation must not be overtaken by a yielded earlier write.
-    if (this.pendingStores > 0) await this.storeTail;
     const resourceMetadata = this.resourceMetadataMap.get(id);
     if (!resourceMetadata) {
       return;
@@ -407,7 +387,6 @@ export default class MemoryStore<
   }
 
   public async close() {
-    if (this.pendingStores > 0) await this.storeTail;
     this.entriesMap.close();
   }
 

@@ -54,3 +54,7 @@ To handle this, call the exported `restoreInfinityInDirectives` helper on the pa
 
 - All the [`vary`-related helper functions](../src/utils/varyHelpers.ts)
 - [`restoreInfinityInDirectives`](../src/utils/normalization.ts) for JSON-based stores, as described above
+
+## Overlapping mutations
+
+`store()` and `delete()` have no ordering guarantee when calls overlap, including calls on one instance. Callers must await a mutation before starting a dependent mutation. Callers must also await pending operations before closing a store. A delete does not cancel a producer or prevent its later result from repopulating the cache. Stronger invalidation requires an explicit protocol, such as versions or generations, or suitable database transaction guarantees.
