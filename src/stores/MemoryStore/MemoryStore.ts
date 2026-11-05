@@ -1,4 +1,4 @@
-import { timeSlicedMap, timeSlicedForEach, timeSlicedMapFromEntries } from "../../utils/time-slicing.js";
+import { timeSlicedMap, timeSlicedMapFromEntries } from "../../utils/time-slicing.js";
 import type { CacheSpec, SpecForId } from "../../types/00_CacheSpec.js";
 import type {
   StoreEntryResult,
@@ -214,15 +214,6 @@ export default class MemoryStore<
       },
     );
 
-    // Capture entries before this call persists its winners. Overlapping
-    // mutations can interleave while this pass yields.
-    const preCallBySlot = await timeSlicedMapFromEntries(
-      await timeSlicedMap(
-        prepared,
-        ({ cacheKey }) => [cacheKey, this.entriesMap.get(cacheKey)] as const,
-      ),
-    );
-
     // Dedupe within the call per the contract's uniform rule: for each slot,
     // only the entry with the newest birth date persists (the same rule the
     // other stores apply).
@@ -231,22 +222,22 @@ export default class MemoryStore<
       groupBy: (it) => it.cacheKey,
       maxBy: (it) => birthDate(it.input.entry).valueOf(),
     });
-    await timeSlicedForEach(winners, (it) => this.#persist(it));
-
-    const winnerIndexBySlot = await timeSlicedMapFromEntries(
-      await timeSlicedMap(
-        winners,
-        ({ cacheKey, index }) => [cacheKey, index] as const,
-      ),
+    // Read and replace each winning slot in one synchronous callback. Other
+    // mutations can interleave between winners, but not between these two steps.
+    const resultByInputIndex = await timeSlicedMapFromEntries(
+      await timeSlicedMap(winners, (winner) => {
+        const result = this.#relationshipToExisting(
+          winner.input.entry,
+          this.entriesMap.get(winner.cacheKey),
+        );
+        this.#persist(winner);
+        return [winner.index, result] as const;
+      }),
     );
 
-    // Each slot's winner reports how its validators relate to that slot's
-    // pre-call entry; every other input (a dropped within-call duplicate) is
-    // omitted.
-    return await timeSlicedMap(prepared, ({ input, index, cacheKey }) =>
-      winnerIndexBySlot.get(cacheKey) === index
-        ? this.#relationshipToExisting(input.entry, preCallBySlot.get(cacheKey))
-        : {},
+    // Dropped within-call duplicates have no comparison result.
+    return await timeSlicedMap(prepared, ({ index }) =>
+      resultByInputIndex.get(index) ?? {},
     );
   }
 
