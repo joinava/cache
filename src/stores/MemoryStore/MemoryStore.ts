@@ -235,7 +235,9 @@ export default class MemoryStore<
       }),
     );
 
-    // Dropped within-call duplicates have no comparison result.
+    // Each slot's winner reports how its validators relate to that slot's
+    // entry immediately before persistence; every other input (a dropped
+    // within-call duplicate) is omitted.
     return await timeSlicedMap(prepared, ({ index }) =>
       resultByInputIndex.get(index) ?? {},
     );
