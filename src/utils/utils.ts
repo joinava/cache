@@ -1,4 +1,4 @@
-import { mapCooperatively, forEachCooperatively } from "./cooperative.js";
+import { timeSlicedForEach } from "./time-slicing.js";
 import { default as debug } from "debug";
 import { maxBy } from "es-toolkit";
 
@@ -126,13 +126,17 @@ export async function keepMaxPerGroupCooperatively<T>(opts: {
   maxBy: (item: T) => number;
 }): Promise<T[]> {
   const winners = new Map<string, { item: T; max: number }>();
-  await forEachCooperatively(opts.items, (item) => {
+  await timeSlicedForEach(opts.items, (item) => {
     const key = opts.groupBy(item);
     const max = opts.maxBy(item);
     const previous = winners.get(key);
     if (!previous || max > previous.max) winners.set(key, { item, max });
   });
-  return mapCooperatively(winners.values(), ({ item }) => item);
+  const result: T[] = [];
+  await timeSlicedForEach(winners.values(), ({ item }) => {
+    result.push(item);
+  });
+  return result;
 }
 
 /**

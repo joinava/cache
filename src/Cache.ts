@@ -1,4 +1,4 @@
-import { mapCooperatively } from "./utils/cooperative.js";
+import { timeSlicedMap } from "./utils/time-slicing.js";
 import { groupBy, sortBy, sumBy } from "es-toolkit";
 import { EventEmitter } from "events";
 import type { InvariantOf, ReadonlyDeep } from "type-fest";
@@ -642,7 +642,7 @@ export default class Cache<
     });
 
     // Process each request and return results in the same order
-    return (await mapCooperatively(requests, (req, i) => {
+    return (await timeSlicedMap(requests, (req, i) => {
       const { result, outcome } = this.#processCacheEntries(
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         cacheEntriesForRequests[

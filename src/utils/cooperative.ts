@@ -1,55 +1,11 @@
-import { scheduler } from "node:timers/promises";
-
-// Share the budget across consecutive bulk phases and concurrent requests.
-// A new phase must not reset the clock and extend an uninterrupted turn.
-let yieldAt = performance.now() + 8;
-
-export async function forEachCooperatively<T>(
-  items: Iterable<T>,
-  callback: (item: T, index: number) => void,
-): Promise<void> {
-  if (Array.isArray(items) && items.length <= 1_000) {
-    items.forEach(callback);
-    return;
-  }
-  let index = 0;
-  for (const item of items) {
-    if (index > 0 && performance.now() >= yieldAt) {
-      await scheduler.yield();
-      yieldAt = performance.now() + 8;
-    }
-    callback(item, index);
-    index += 1;
-  }
-}
-
-export async function mapCooperatively<T, R>(
-  items: Iterable<T>,
-  callback: (item: T, index: number) => R,
-): Promise<R[]> {
-  const results: R[] = [];
-  await forEachCooperatively(items, (item, index) => {
-    results.push(callback(item, index));
-  });
-  return results;
-}
-
-/** Build a map without a synchronous full-batch Map constructor pass. */
-export async function mapFromEntriesCooperatively<Key, Value>(
-  entries: Iterable<readonly [Key, Value]>,
-): Promise<Map<Key, Value>> {
-  const result = new Map<Key, Value>();
-  await forEachCooperatively(entries, ([key, value]) => {
-    result.set(key, value);
-  });
-  return result;
-}
+import { TimeSliceBudget, timeSlicedForEach } from "./time-slicing.js";
 
 /** Stable sorting with the same comparator as native sort and bounded native runs. */
 export async function sortCooperatively<T>(
   items: readonly T[],
   compare: (left: T, right: T) => number,
 ): Promise<T[]> {
+  const budget = new TimeSliceBudget();
   const runSize = 256;
   function* sortedRuns() {
     for (let start = 0; start < items.length; start += runSize) {
@@ -74,9 +30,16 @@ export async function sortCooperatively<T>(
       }
     }
   }
-  let result = await mapCooperatively(sortedRuns(), (item) => item);
+  let result: T[] = [];
+  await timeSlicedForEach(sortedRuns(), (item) => {
+    result.push(item);
+  }, budget);
   for (let width = runSize; width < items.length; width *= 2) {
-    result = await mapCooperatively(mergedRuns(result, width), (item) => item);
+    const merged: T[] = [];
+    await timeSlicedForEach(mergedRuns(result, width), (item) => {
+      merged.push(item);
+    }, budget);
+    result = merged;
   }
   return result;
 }

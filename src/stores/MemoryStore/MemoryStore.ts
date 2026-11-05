@@ -1,8 +1,4 @@
-import {
-  mapCooperatively,
-  forEachCooperatively,
-  mapFromEntriesCooperatively,
-} from "../../utils/cooperative.js";
+import { timeSlicedMap, timeSlicedForEach, timeSlicedMapFromEntries } from "../../utils/time-slicing.js";
 import { isNonEmptyArray } from "type-party/runtime/nonempty.js";
 import type { CacheSpec, SpecForId } from "../../types/00_CacheSpec.js";
 import type {
@@ -176,7 +172,7 @@ export default class MemoryStore<
       ) as StoreGetManyResult<Spec, Reqs, Validators, Params>;
     }
     return isNonEmptyArray(requests)
-      ? ((await mapCooperatively(requests, (it) =>
+      ? ((await timeSlicedMap(requests, (it) =>
           this.#getOneSync(it.id, it.params),
         )) as StoreGetManyResult<Spec, Reqs, Validators, Params>)
       : ([] as StoreGetManyResult<Spec, Reqs, Validators, Params>);
@@ -254,7 +250,7 @@ export default class MemoryStore<
     entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
     // Derive each input's slot (variant + full cache key) once, up front.
-    const prepared = await mapCooperatively(
+    const prepared = await timeSlicedMap(
       entriesWithTimes,
       (input, index) => {
         const variantKey = resultVariantKey(input.entry.vary);
@@ -269,8 +265,8 @@ export default class MemoryStore<
 
     // Capture entries before this call persists its winners. Overlapping
     // mutations can interleave while this pass yields.
-    const preCallBySlot = await mapFromEntriesCooperatively(
-      await mapCooperatively(
+    const preCallBySlot = await timeSlicedMapFromEntries(
+      await timeSlicedMap(
         prepared,
         ({ cacheKey }) => [cacheKey, this.entriesMap.get(cacheKey)] as const,
       ),
@@ -284,10 +280,10 @@ export default class MemoryStore<
       groupBy: (it) => it.cacheKey,
       maxBy: (it) => birthDate(it.input.entry).valueOf(),
     });
-    await forEachCooperatively(winners, (it) => this.#persist(it));
+    await timeSlicedForEach(winners, (it) => this.#persist(it));
 
-    const winnerIndexBySlot = await mapFromEntriesCooperatively(
-      await mapCooperatively(
+    const winnerIndexBySlot = await timeSlicedMapFromEntries(
+      await timeSlicedMap(
         winners,
         ({ cacheKey, index }) => [cacheKey, index] as const,
       ),
@@ -296,7 +292,7 @@ export default class MemoryStore<
     // Each slot's winner reports how its validators relate to that slot's
     // pre-call entry; every other input (a dropped within-call duplicate) is
     // omitted.
-    return await mapCooperatively(prepared, ({ input, index, cacheKey }) =>
+    return await timeSlicedMap(prepared, ({ input, index, cacheKey }) =>
       winnerIndexBySlot.get(cacheKey) === index
         ? this.#relationshipToExisting(input.entry, preCallBySlot.get(cacheKey))
         : {},

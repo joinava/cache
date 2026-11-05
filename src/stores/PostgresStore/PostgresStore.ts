@@ -1,10 +1,6 @@
 import { chunk } from "es-toolkit";
-import {
-  mapCooperatively,
-  forEachCooperatively,
-  mapFromEntriesCooperatively,
-  sortCooperatively,
-} from "../../utils/cooperative.js";
+import { sortCooperatively } from "../../utils/cooperative.js";
+import { timeSlicedMap, timeSlicedForEach, timeSlicedMapFromEntries } from "../../utils/time-slicing.js";
 import type { ColumnType, PostgresPool, RawBuilder, SqlBool } from "kysely";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import type { Tagged } from "type-fest";
@@ -371,7 +367,7 @@ export default class PostgresStore<
     // newest by birth date. Dropped duplicates report `{}` (they weren't the
     // value compared/stored).
     const deduped = await keepMaxPerGroupCooperatively({
-      items: await mapCooperatively(entries, (it, originalIndex) => ({
+      items: await timeSlicedMap(entries, (it, originalIndex) => ({
         it,
         originalIndex,
       })),
@@ -386,7 +382,7 @@ export default class PostgresStore<
     // could otherwise deadlock (each holding a row the other is waiting on).
     // With a consistent order, the later call just waits for the earlier one.
     const rows = await sortCooperatively(
-      await mapCooperatively(deduped, ({ it }) => ({
+      await timeSlicedMap(deduped, ({ it }) => ({
         resource_id: it.entry.id,
         vary: this.serializeVary(it.entry.vary),
         entry: this.serializeEntry(it.entry),
@@ -403,7 +399,7 @@ export default class PostgresStore<
                 : 0,
     );
     const resourceIds = new Set<string>();
-    await forEachCooperatively(deduped, ({ it }) => {
+    await timeSlicedForEach(deduped, ({ it }) => {
       resourceIds.add(it.entry.id);
     });
     type OldRow = {
@@ -445,7 +441,7 @@ export default class PostgresStore<
       } else {
         // One encoded parameter avoids both expanded IN parameters and a
         // full-cohort synchronous array-encoding pass in the Postgres driver.
-        const resourceIdsJson = `[${(await mapCooperatively(resourceIds, (id) => JSON.stringify(id))).join(",")}]`;
+        const resourceIdsJson = `[${(await timeSlicedMap(resourceIds, (id) => JSON.stringify(id))).join(",")}]`;
         const previousQuery = oldQuery.where(
           sql<SqlBool>`${sql.ref("resource_id")} IN (SELECT jsonb_array_elements_text(${resourceIdsJson}::jsonb))`,
         );
@@ -481,8 +477,8 @@ export default class PostgresStore<
     // snapshot. A concurrent writer may still commit between that snapshot
     // and an upsert, so this metadata remains approximate under same-slot races.
     // Build comparison metadata after the transaction releases its connection.
-    const oldValidatorsBySlot = await mapFromEntriesCooperatively(
-      await mapCooperatively(
+    const oldValidatorsBySlot = await timeSlicedMapFromEntries(
+      await timeSlicedMap(
         oldRows,
         (row) =>
           [
@@ -494,8 +490,8 @@ export default class PostgresStore<
 
     // Each deduped ("winner") entry reports its relationship, keyed back to its
     // original input index.
-    const resultByInputIndex = await mapFromEntriesCooperatively(
-      await mapCooperatively(
+    const resultByInputIndex = await timeSlicedMapFromEntries(
+      await timeSlicedMap(
         deduped,
         ({ it, originalIndex }) =>
           [
@@ -507,7 +503,7 @@ export default class PostgresStore<
 
     // Map back onto the full input order; every input that isn't a winner (a
     // dropped within-call duplicate) isn't in the map and so is omitted.
-    return mapCooperatively(
+    return timeSlicedMap(
       entries,
       (_entry, index) => resultByInputIndex.get(index) ?? {},
     );
