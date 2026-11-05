@@ -4,8 +4,6 @@ import Cache from "./Cache.js";
 import {
   MemoryStore,
   resourceType,
-  type AnyParams,
-  type NormalizedParams,
   type SpecOf,
 } from "./index.js";
 import { wrapBulkProducer } from "./utils/wrapBulkProducer.js";
@@ -124,38 +122,6 @@ it("an abort during a pending cache read prevents producer execution", async () 
   }
 });
 
-it("single MemoryStore writes remain immediately visible without awaiting their promise", async () => {
-  const { cache, store } = makeCache();
-  try {
-    await cache.store([
-      {
-        id: "resource:template",
-        content: 0,
-        directives: { freshUntilAge: 60 },
-      },
-    ]);
-    const { usable } = await cache.get({
-      id: "resource:template",
-      params: {},
-      directives: {},
-    });
-    assert.ok(usable);
-    const pending = store.store([
-      {
-        entry: { ...usable, id: "resource:immediate" },
-        maxStoreForSeconds: 60,
-      },
-    ]);
-    const read = await store.get(
-      "resource:immediate",
-      {} as NormalizedParams<AnyParams>,
-    );
-    assert.equal(read.length, 1);
-    await pending;
-  } finally {
-    await cache.close();
-  }
-});
 
 it("an invalid final bulk store ID prevents writes and events", async () => {
   const { cache, store } = makeCache();

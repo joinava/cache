@@ -1,5 +1,4 @@
 import { timeSlicedMap, timeSlicedForEach, timeSlicedMapFromEntries } from "../../utils/time-slicing.js";
-import { isNonEmptyArray } from "type-party/runtime/nonempty.js";
 import type { CacheSpec, SpecForId } from "../../types/00_CacheSpec.js";
 import type {
   StoreEntryResult,
@@ -23,7 +22,6 @@ import {
 import type { JsonOf } from "../../utils/utils.js";
 import {
   jsonStringify,
-  keepMaxPerGroup,
   keepMaxPerGroupCooperatively,
 } from "../../utils/utils.js";
 import {
@@ -166,16 +164,9 @@ export default class MemoryStore<
     options?: { signal?: AbortSignal },
   ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
     options?.signal?.throwIfAborted();
-    if (requests.length <= 1_000) {
-      return requests.map((it) =>
-        this.#getOneSync(it.id, it.params),
-      ) as StoreGetManyResult<Spec, Reqs, Validators, Params>;
-    }
-    return isNonEmptyArray(requests)
-      ? ((await timeSlicedMap(requests, (it) =>
-          this.#getOneSync(it.id, it.params),
-        )) as StoreGetManyResult<Spec, Reqs, Validators, Params>)
-      : ([] as StoreGetManyResult<Spec, Reqs, Validators, Params>);
+    return (await timeSlicedMap(requests, (it) =>
+      this.#getOneSync(it.id, it.params),
+    )) as StoreGetManyResult<Spec, Reqs, Validators, Params>;
   }
 
   #getOneSync<Id extends Spec["id"]>(
@@ -207,46 +198,6 @@ export default class MemoryStore<
   }
 
   public async store(
-    entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ): Promise<readonly StoreEntryResult[]> {
-    if (entriesWithTimes.length <= 1_000) return this.#storeSmall(entriesWithTimes);
-    return this.#store(entriesWithTimes);
-  }
-
-  #storeSmall(
-    entries: readonly StoreEntryInput<Spec, Validators, Params>[],
-  ): readonly StoreEntryResult[] {
-    const prepared = entries.map((input, index) => {
-      const variantKey = resultVariantKey(input.entry.vary);
-      return {
-        input,
-        index,
-        variantKey,
-        cacheKey: makeCacheKey(input.entry.id, variantKey),
-      };
-    });
-    const preCallBySlot = new Map(
-      prepared.map(
-        ({ cacheKey }) => [cacheKey, this.entriesMap.get(cacheKey)] as const,
-      ),
-    );
-    const winners = keepMaxPerGroup({
-      items: prepared,
-      groupBy: (it) => it.cacheKey,
-      maxBy: (it) => birthDate(it.input.entry).valueOf(),
-    });
-    winners.forEach((it) => this.#persist(it));
-    const winnerIndexBySlot = new Map(
-      winners.map(({ cacheKey, index }) => [cacheKey, index] as const),
-    );
-    return prepared.map(({ input, index, cacheKey }) =>
-      winnerIndexBySlot.get(cacheKey) === index
-        ? this.#relationshipToExisting(input.entry, preCallBySlot.get(cacheKey))
-        : {},
-    );
-  }
-
-  async #store(
     entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
     // Derive each input's slot (variant + full cache key) once, up front.

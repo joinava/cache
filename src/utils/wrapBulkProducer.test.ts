@@ -775,6 +775,7 @@ describe("wrapBulkProducer", () => {
     describe("supplemental resources", () => {
       it("should cache supplemental resources returned by the bulk producer", async () => {
         const { cache } = makeTestStoreAndCache();
+        const writes = mock.method(cache, "store");
 
         try {
           const bulkProducer = mock.fn(
@@ -810,6 +811,9 @@ describe("wrapBulkProducer", () => {
 
           assert.equal(result0?.content, "main-res1");
           assert.equal(result1?.content, "main-res2");
+
+          assert.equal(writes.mock.callCount(), 1);
+          await writes.mock.calls[0]!.result;
 
           // Now request the supplemental resources - they should be cached
           const suppResults = await wrappedBulkProducer([
@@ -966,6 +970,7 @@ describe("wrapBulkProducer", () => {
 
     it("should still return cache hits even when signal is provided", async () => {
       const { cache } = makeTestStoreAndCache();
+      const writes = mock.method(cache, "store");
 
       try {
         const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
@@ -983,6 +988,9 @@ describe("wrapBulkProducer", () => {
         // Populate cache
         await wrappedBulk([{ id: "hit-a" }, { id: "hit-b" }]);
         assert.equal(producer.mock.callCount(), 1);
+
+        assert.equal(writes.mock.callCount(), 1);
+        await writes.mock.calls[0]!.result;
 
         // Second call with signal should still get cache hits
         const controller = new AbortController();

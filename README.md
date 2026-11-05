@@ -280,7 +280,7 @@ Upgrading from 1.6.0, whose single channel reported a `status` string: `hit` →
 
 ## Mutation ordering
 
-Overlapping `store()` and `delete()` calls have no ordering guarantee, including calls on the same cache or store instance. Await a mutation before starting the next mutation when their order matters. A completed delete does not prevent an in-flight producer from storing its result later. Cross-request invalidation needs a separate version or generation protocol; these APIs do not provide one.
+Overlapping `store()` and `delete()` calls have no ordering guarantee, including calls on the same cache or store instance. Await a mutation before starting the next mutation when their order matters. MemoryStore writes also require awaiting completion before a caller can rely on their visibility. A completed delete does not prevent an in-flight producer from storing its result later. Cross-request invalidation needs a separate version or generation protocol; these APIs do not provide one.
 
 ## Store shutdown
 
