@@ -6,10 +6,12 @@ export async function sortCooperatively<T>(
   compare: (left: T, right: T) => number,
 ): Promise<T[]> {
   const budget = new TimeSliceBudget();
+  const compareWithinBudget = (left: T, right: T) =>
+    budget.measure(() => compare(left, right));
   const runSize = 256;
   function* sortedRuns() {
     for (let start = 0; start < items.length; start += runSize) {
-      yield* items.slice(start, start + runSize).sort(compare);
+      yield* items.slice(start, start + runSize).sort(compareWithinBudget);
     }
   }
   function* mergedRuns(source: readonly T[], width: number) {
@@ -21,7 +23,7 @@ export async function sortCooperatively<T>(
       while (left < middle || right < end) {
         if (
           right === end ||
-          (left < middle && !(compare(source[left]!, source[right]!) > 0))
+          (left < middle && !(compareWithinBudget(source[left]!, source[right]!) > 0))
         ) {
           yield source[left++]!;
         } else {

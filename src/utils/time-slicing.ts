@@ -58,23 +58,16 @@ export async function timeSlicedForEach<Item, Result>(
   callback: (item: Item, index: number) => Result & Synchronous<Result>,
   budget = new TimeSliceBudget(),
 ): Promise<void> {
-  const iterator = items[Symbol.iterator]();
-  const position = { index: 0, finished: false };
-  try {
-    // oxlint-disable-next-line zingage/no-restricted-syntax -- Iteration must pause between items without scheduling one promise per callback.
-    while (!position.finished) {
-      const next = budget.measure(() => iterator.next());
-      if (next.done === true) position.finished = true;
-      else {
-        budget.measure<Result>(() => callback(next.value, position.index));
-        position.index += 1;
-      }
-      const pending = budget.yieldIfNeeded();
-      if (pending !== undefined) await pending;
-    }
-  } finally {
-    if (!position.finished) iterator.return?.();
+  const position = { index: 0 };
+  // oxlint-disable-next-line zingage/no-restricted-syntax -- Native iteration owns cleanup while the body awaits budget yields.
+  for (const item of items) {
+    budget.measure<Result>(() => callback(item, position.index));
+    position.index += 1;
+    const pending = budget.yieldIfNeeded();
+    if (pending !== undefined) await pending;
   }
+  const pending = budget.yieldIfNeeded();
+  if (pending !== undefined) await pending;
 }
 
 export async function timeSlicedMap<Item, Result>(
@@ -100,35 +93,24 @@ export async function timeSlicedFlatMap<Item, Result>(
   budget = new TimeSliceBudget(),
 ): Promise<Result[]> {
   const results: Result[] = [];
-  const iterator = items[Symbol.iterator]();
-  const position = { index: 0, finished: false };
-  try {
-    // oxlint-disable-next-line zingage/no-restricted-syntax -- Both outer iteration and flattening must pause without splitting callbacks.
-    while (!position.finished) {
-      const next = budget.measure(() => iterator.next());
-      if (next.done === true) position.finished = true;
-      else {
-        const mapped = budget.measure(() =>
-          callback(next.value, position.index),
-        );
-        position.index += 1;
-        const pending = budget.yieldIfNeeded();
-        if (pending !== undefined) await pending;
-        await timeSlicedForEach(
-          mapped,
-          (value) => {
-            // oxlint-disable-next-line zingage/no-restricted-syntax -- Append incrementally without argument-spread limits or quadratic copying.
-            results.push(value);
-          },
-          budget,
-        );
-      }
-      const pending = budget.yieldIfNeeded();
-      if (pending !== undefined) await pending;
-    }
-  } finally {
-    if (!position.finished) iterator.return?.();
+  const position = { index: 0 };
+  // oxlint-disable-next-line zingage/no-restricted-syntax -- Native outer iteration owns cleanup; inner traversal can also yield.
+  for (const item of items) {
+    const mapped = budget.measure(() => callback(item, position.index));
+    position.index += 1;
+    const pending = budget.yieldIfNeeded();
+    if (pending !== undefined) await pending;
+    await timeSlicedForEach(
+      mapped,
+      (value) => {
+        // oxlint-disable-next-line zingage/no-restricted-syntax -- Append incrementally without argument-spread limits or quadratic copying.
+        results.push(value);
+      },
+      budget,
+    );
   }
+  const pending = budget.yieldIfNeeded();
+  if (pending !== undefined) await pending;
   return results;
 }
 

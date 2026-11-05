@@ -123,7 +123,7 @@ describe("processing budgets", () => {
     assert.equal(c.state.yields, 1);
   });
 
-  it("counts iterator work and closes a generator after callback failure", async () => {
+  it("closes a generator after callback failure", async () => {
     const c = clock();
     const state = { closed: false };
     function* items() {
@@ -328,4 +328,152 @@ describe("collection helpers", () => {
       ]),
     );
   });
+});
+
+describe("native iterator cleanup", () => {
+  const traversals = [
+    {
+      name: "forEach",
+      run: async (
+        items: Iterable<number>,
+        callback: (value: number) => void,
+        budget: TimeSliceBudget,
+      ) => await timeSlicedForEach(items, callback, budget),
+    },
+    {
+      name: "flatMap",
+      run: async (
+        items: Iterable<number>,
+        callback: (value: number) => void,
+        budget: TimeSliceBudget,
+      ) =>
+        await timeSlicedFlatMap(
+          items,
+          (value) => {
+            callback(value);
+            return [];
+          },
+          budget,
+        ),
+    },
+  ];
+  // oxlint-disable-next-line zingage/no-restricted-syntax -- Register the same cleanup tests for both traversal implementations.
+  for (const { name, run } of traversals) {
+    describe(name, () => {
+      it(`${name} does not close an iterator whose next method throws`, async () => {
+        const state = { closes: 0 };
+        const failure = new TypeError("next failed");
+        const items: Iterable<number> = {
+          [Symbol.iterator]() {
+            return {
+              next: () => {
+                throw failure;
+              },
+              return: () => {
+                state.closes += 1;
+                return { done: true, value: undefined };
+              },
+            };
+          },
+        };
+        await assert.rejects(
+          run(
+            items,
+            () => assert.fail("next must fail first"),
+            new TimeSliceBudget(),
+          ),
+          (error) => error === failure,
+        );
+        assert.equal(state.closes, 0);
+      });
+
+      it(`${name} preserves callback errors when cleanup also throws`, async () => {
+        const state = { closes: 0 };
+        const failure = new TypeError("callback failed");
+        const items: Iterable<number> = {
+          [Symbol.iterator]() {
+            const iterator = {
+              next() {
+                assert.equal(this, iterator);
+                return { done: false as const, value: 1 };
+              },
+              return() {
+                assert.equal(this, iterator);
+                state.closes += 1;
+                throw new TypeError("cleanup failed");
+              },
+            };
+            return iterator;
+          },
+        };
+        await assert.rejects(
+          run(
+            items,
+            () => {
+              throw failure;
+            },
+            new TimeSliceBudget(),
+          ),
+          (error) => error === failure,
+        );
+        assert.equal(state.closes, 1);
+      });
+
+      it(`${name} preserves yield failures when cleanup also throws`, async () => {
+        const c = clock();
+        const state = { closes: 0 };
+        const failure = new TypeError("yield failed");
+        const items: Iterable<number> = {
+          [Symbol.iterator]() {
+            return {
+              next: () => ({ done: false as const, value: 1 }),
+              return: () => {
+                state.closes += 1;
+                throw new TypeError("cleanup failed");
+              },
+            };
+          },
+        };
+        const budget = new TimeSliceBudget(
+          8,
+          c.settings.now,
+          async () => await Promise.reject(failure),
+        );
+        await assert.rejects(
+          run(items, () => c.work(8), budget),
+          (error) => error === failure,
+        );
+        assert.equal(state.closes, 1);
+      });
+
+      it(`${name} does not close after normal exhaustion or charge iterator work`, async () => {
+        const c = clock();
+        const state = { closes: 0, calls: 0 };
+        const items: Iterable<number> = {
+          [Symbol.iterator]() {
+            return {
+              next: () => {
+                state.calls += 1;
+                c.work(4);
+                return state.calls === 1
+                  ? { done: false as const, value: 1 }
+                  : { done: true as const, value: undefined };
+              },
+              return: () => {
+                state.closes += 1;
+                return { done: true, value: undefined };
+              },
+            };
+          },
+        };
+        await run(
+          items,
+          () => {},
+          new TimeSliceBudget(8, c.settings.now, c.settings.yieldToEventLoop),
+        );
+        assert.equal(state.closes, 0);
+        assert.equal(c.state.yields, 0);
+      });
+    });
+  }
 });
