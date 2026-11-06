@@ -484,8 +484,8 @@ export function throwUnreachableAbort(signal: AbortSignal | undefined): never {
  * failed write never fails the call (it is logged and dropped). The precise
  * guarantee about repeated calls is then:
  *
- * - Identical calls that overlap the producer invocation share it (request
- *   collapsing, above).
+ * - Identical calls that overlap the producer invocation share it, subject to
+ *   the collapse time window (request collapsing, above).
  * - A call that arrives after the producer resolved but before its
  *   `cache.store()` settled is answered from the wrapper's own in-memory
  *   overlay of in-flight writes -- consulted before the cache read, and
