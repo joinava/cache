@@ -427,6 +427,9 @@ export default class Cache<
    *
    * On a cache built with `batchReads`, the store read joins the batch for the
    * current event-loop turn; see that option for what changes.
+   * If Store.getMany returns an Error in this request's slot, only this caller
+   * rejects. Other callers in the automatic batch retain their hits or misses.
+   * A rejected store promise rejects every non-cancelled caller in the batch.
    */
   public async get<Id extends SpecOf<RT>["id"]>(
     req: ReadonlyConsumerRequest<Params, Id>,
@@ -536,13 +539,17 @@ export default class Cache<
    *
    * The result is a tuple typed per-request: each output slot's content type
    * is narrowed to the spec variants compatible with the corresponding input
-   * request's id.
+   * request's id. This method never returns Error slots. If Store.getMany
+   * returns any error slots, this call rejects with the first Error in request
+   * order. Successful slots are not returned. A rejected store promise also
+   * rejects the whole call. This differs from automatically batched get calls,
+   * whose per-request store errors affect only their respective callers.
    *
    * Emits one `read` diagnostics message PER request -- the lookup result on
    * success, or `found: "read-failed"` with the error for every request in the
-   * batch if the underlying store read throws (and then the error still
-   * propagates). An *aborted* read emits nothing. All request ids are
-   * classified up front, so a classification failure rejects the whole call
+   * batch if the underlying store read throws or returns an error slot (and
+   * then the error still propagates). An *aborted* read emits nothing. All
+   * request ids are classified up front, so a classification failure rejects the whole call
    * before touching the store, emitting nothing.
    *
    * @param requests Array of consumer requests to process
@@ -615,6 +622,12 @@ export default class Cache<
           params: this.normalizeParams(req.params),
         })),
         options,
+      )
+      .then((results) =>
+        results.map((entries) => {
+          if (entries instanceof Error) throw entries;
+          return entries;
+        }),
       )
       .catch((error: unknown) => {
         // One `read-failed` message PER REQUEST, not one per call: the channel

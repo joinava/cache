@@ -162,11 +162,11 @@ export default class MemoryStore<
   >(
     requests: Reqs,
     options?: { signal?: AbortSignal },
-  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
+  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params, never>> {
     options?.signal?.throwIfAborted();
     return (await timeSlicedMap(requests, (it) =>
       this.#getOneSync(it.id, it.params),
-    )) as StoreGetManyResult<Spec, Reqs, Validators, Params>;
+    )) as StoreGetManyResult<Spec, Reqs, Validators, Params, never>;
   }
 
   #getOneSync<Id extends Spec["id"]>(

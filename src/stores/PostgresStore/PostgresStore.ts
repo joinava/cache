@@ -282,7 +282,7 @@ export default class PostgresStore<
   >(
     requests: Reqs,
     options?: { signal?: AbortSignal },
-  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
+  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params, never>> {
     const signal = options?.signal;
     signal?.throwIfAborted();
 
@@ -291,7 +291,7 @@ export default class PostgresStore<
     });
 
     if (requests.length === 0) {
-      return [] as StoreGetManyResult<Spec, Reqs, Validators, Params>;
+      return [] as StoreGetManyResult<Spec, Reqs, Validators, Params, never>;
     }
 
     await this.ensureInitializedPromise;
@@ -347,7 +347,7 @@ export default class PostgresStore<
       (entriesByRequest.get(index) ?? []).map(({ entry }) => entry),
     );
 
-    return results as StoreGetManyResult<Spec, Reqs, Validators, Params>;
+    return results as StoreGetManyResult<Spec, Reqs, Validators, Params, never>;
   }
 
   async store(

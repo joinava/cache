@@ -173,7 +173,7 @@ export default class SqliteStore<
   >(
     requests: Reqs,
     options?: { signal?: AbortSignal },
-  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
+  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params, never>> {
     options?.signal?.throwIfAborted();
 
     const entries = await this.#read({
