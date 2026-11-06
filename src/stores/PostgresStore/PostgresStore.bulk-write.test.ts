@@ -185,7 +185,7 @@ describe(
           ...value,
           entry: {
             ...value.entry,
-            vary: normalizeVary<Params>((name) => name, (_name, item) => String(item), { variant: index }),
+            vary: normalizeVary<Params>((name) => name, (_name, item) => { assert.ok(typeof item === "number"); return item; }, { variant: index }),
           },
         };
       });
