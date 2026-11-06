@@ -1,4 +1,4 @@
-import type { WaitForStoreOptions } from "./wrapProducer.js";
+import type { OnStore } from "./wrapProducer.js";
 import pLimit from "p-limit";
 import type { ReadonlyDeep } from "type-fest";
 
@@ -308,7 +308,7 @@ type WrappedHashedInputProducer<
   Params extends AnyParams,
 > = (
   input: Input,
-  options?: { directives?: ConsumerDirectives; signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
+  options?: { directives?: ConsumerDirectives; signal?: AbortSignal; onStore?: OnStore },
 ) => Promise<
   Entry<
     SpecForId<SpecOf<RT>, Extract<MintedId, SpecOf<RT>["id"]>>,
@@ -327,7 +327,7 @@ type WrappedBulkHashedInputProducer<
   ErrorType extends Error,
 > = (
   inputs: readonly Input[],
-  options?: { directives?: ConsumerDirectives; signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
+  options?: { directives?: ConsumerDirectives; signal?: AbortSignal; onStore?: OnStore },
 ) => Promise<
   (
     | Entry<
@@ -610,7 +610,7 @@ export function wrapHashedInputProducer(
 
   return async (
     input: never,
-    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
+    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal; onStore?: OnStore },
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
@@ -796,7 +796,7 @@ export function wrapBulkHashedInputProducer(
 
   return async (
     inputs: readonly never[],
-    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
+    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal; onStore?: OnStore },
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();

@@ -110,4 +110,4 @@ export {
 } from "./utils/varyHelpers.js";
 export type { VariantKey, VaryKeys } from "./utils/varyHelpers.js";
 
-export type { WaitForStoreOptions } from "./utils/wrapProducer.js";
+export type { OnStore } from "./utils/wrapProducer.js";

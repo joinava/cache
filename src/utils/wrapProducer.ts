@@ -49,26 +49,19 @@ import {
   raceWithSignal,
 } from "./utils.js";
 
-/** A bounded wait for this call's foreground persistence. Failures remain callback outcomes. */
-export type WaitForStoreOptions = {
-  maxWaitMs: number;
-  onUnstored?: (outcome: { reason: "store-failed" | "producer-error"; error: unknown } | { reason: "timed-out" }) => void;
-};
-export type StoreOutcome = { ok: true } | { ok: false; reason: "store-failed" | "producer-error"; error: unknown };
+/** Observe foreground persistence without delaying the produced result. */
+export type OnStore = (stored: Promise<void>) => void;
 
-
-/** Keep shared persistence alive while each caller owns its timeout and abort. */
-export async function waitForStores(stores: readonly Promise<StoreOutcome>[], wait: WaitForStoreOptions, signal?: AbortSignal): Promise<void> {
-  const timeout = Promise.withResolvers<{ reason: "timed-out" }>();
-  const timer = setTimeout(() => timeout.resolve({ reason: "timed-out" }), wait.maxWaitMs);
-  try {
-    const completion = Promise.all(stores).then((outcomes) => outcomes.find((outcome) => !outcome.ok) ?? { ok: true } satisfies StoreOutcome);
-    const outcome = await raceWithSignal(Promise.race([completion, timeout.promise]), signal);
-    if ("reason" in outcome) {
-      if (outcome.reason === "timed-out") wait.onUnstored?.({ reason: "timed-out" });
-      else wait.onUnstored?.({ reason: outcome.reason, error: outcome.error });
-    }
-  } finally { clearTimeout(timer); }
+/** Bulk persistence settles every write before exposing the first failure. */
+export function notifyStore(stores: readonly Promise<void>[], onStore: OnStore | undefined): void {
+  if (onStore === undefined) return;
+  const stored = Promise.allSettled(stores).then((results) => {
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  });
+  // Callers may ignore persistence or attach a handler after the result arrives.
+  void stored.catch(() => {});
+  onStore(stored);
 }
 
 /**
@@ -368,7 +361,7 @@ type WrappedProducerFn<
   Params extends AnyParams,
 > = <Id extends IdOfResourceType<RT[Covered]>>(
   req: PartialReadonlyConsumerRequest<Params, Id>,
-  options?: { signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
+  options?: { signal?: AbortSignal; onStore?: OnStore },
 ) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>>;
 
 /**
@@ -643,12 +636,10 @@ export default function wrapProducer<
       publishProduce("success");
 
       logTrace(`attempting to store response.`);
-      const stored: Promise<StoreOutcome> = Promise.try(() => cache.store(
+      const stored = Promise.try(() => cache.store(
         requestPairedProducerResultToResources(requestPairedResult, req.id),
-      )).then(
-        () => { logTrace(`successfully stored producer's response`); return { ok: true }; },
-        (error: unknown) => { logTrace(`error storing producer's response`, error); return { ok: false, reason: "store-failed", error }; },
-      );
+      )).then(() => { logTrace(`successfully stored producer's response`); });
+      void stored.catch((error: unknown) => { logTrace(`error storing producer's response`, error); });
 
       return { result: requestPairedResult, stored };
     },
@@ -663,7 +654,7 @@ export default function wrapProducer<
 
   const wrappedProducer = async function (
     req: PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>,
-    callOptions?: { signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
+    callOptions?: { signal?: AbortSignal; onStore?: OnStore },
   ): Promise<LooseEntry> {
     const signal = callOptions?.signal;
 
@@ -714,7 +705,7 @@ export default function wrapProducer<
     // races the caller's wait against its signal, settles the fetch message,
     // and applies the caller's own usableIfError fallback on producer error.
     const settleOnProducer = async (
-      attached: { promise: Promise<{ result: LooseResult; stored: Promise<StoreOutcome> }>; rode: boolean },
+      attached: { promise: Promise<{ result: LooseResult; stored: Promise<void> }>; rode: boolean },
       usableIfError: LooseEntry | undefined,
     ): Promise<LooseEntry> => {
       let result: LooseEntry;
@@ -747,7 +738,7 @@ export default function wrapProducer<
             disposition: "served-stale-after-error",
             vary: usableIfError.vary,
           });
-          callOptions?.waitForStore?.onUnstored?.({ reason: "producer-error", error });
+          notifyStore([], callOptions?.onStore);
           return usableIfError;
         }
 
@@ -762,9 +753,9 @@ export default function wrapProducer<
         disposition: "served-from-producer",
         directivesImpliedBypass,
       });
-      if (callOptions?.waitForStore !== undefined) {
+      if (callOptions?.onStore !== undefined) {
         const invocation = await attached.promise;
-        await waitForStores([invocation.stored], callOptions.waitForStore, signal);
+        notifyStore([invocation.stored], callOptions.onStore);
       }
       return result;
     };
@@ -817,6 +808,7 @@ export default function wrapProducer<
         disposition: "served-from-cache",
         vary: usable.vary,
       });
+      notifyStore([], callOptions?.onStore);
       return usable;
     }
 
@@ -873,6 +865,7 @@ export default function wrapProducer<
         disposition: "served-stale-while-revalidating",
         vary: usableWhileRevalidate.vary,
       });
+      notifyStore([], callOptions?.onStore);
       return usableWhileRevalidate;
     }
 

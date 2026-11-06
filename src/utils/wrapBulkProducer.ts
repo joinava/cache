@@ -47,9 +47,8 @@ import {
   type LooseRequestFor,
   type LooseResultFor,
   type WrapProducerOptions,
-  type WaitForStoreOptions,
-  type StoreOutcome,
-  waitForStores,
+  type OnStore,
+  notifyStore,
 } from "./wrapProducer.js";
 
 
@@ -100,7 +99,7 @@ type WrappedBulkProducerFn<
   >[],
 >(
   reqs: Reqs,
-  options?: { signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
+  options?: { signal?: AbortSignal; onStore?: OnStore },
 ) => Promise<{
   -readonly [K in keyof Reqs]:
     | EntryForId<
@@ -336,11 +335,8 @@ export function wrapBulkProducer<
         resourcesToStore,
       });
 
-      const producerError = requestPairedProducerResults.find((result) => result instanceof Error);
-      const stored: Promise<StoreOutcome> = (resourcesToStore.length === 0 ? Promise.resolve() : Promise.try(() => cache.store(resourcesToStore))).then(
-        () => producerError === undefined ? { ok: true } : { ok: false, reason: "producer-error", error: producerError },
-        (error: unknown) => { logTrace(`error storing bulk producer's response`, error); return { ok: false, reason: "store-failed", error }; },
-      );
+      const stored = (resourcesToStore.length === 0 ? Promise.resolve() : Promise.try(() => cache.store(resourcesToStore))).then(() => undefined);
+      void stored.catch((error: unknown) => { logTrace(`error storing bulk producer's response`, error); });
       return { results: requestPairedProducerResults, stored };
     },
     collapseOverlappingRequestsTime * 1000,
@@ -353,11 +349,12 @@ export function wrapBulkProducer<
 
   const wrappedBulkProducer = async function (
     reqs: readonly PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>[],
-    callOptions?: { signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
+    callOptions?: { signal?: AbortSignal; onStore?: OnStore },
   ): Promise<(LooseEntry | ErrorType)[]> {
     const signal = callOptions?.signal;
 
     if (reqs.length === 0) {
+      notifyStore([], callOptions?.onStore);
       return [];
     }
 
@@ -477,7 +474,7 @@ export function wrapBulkProducer<
       items: readonly RequestItem[];
       rode: boolean;
       handled: Promise<(LooseEntry | ErrorType)[]>;
-      stored: Promise<StoreOutcome>;
+      stored: Promise<void>;
     };
 
     /**
@@ -510,7 +507,8 @@ export function wrapBulkProducer<
       const bareItems = groupItems.map(({ item }) => item);
       const attached = collapsedCallProducerAndStore(trigger, bareItems);
 
-      const stored = attached.promise.then(({ stored }) => stored, (): StoreOutcome => ({ ok: true }));
+      const stored = attached.promise.then(({ stored }) => stored, () => undefined);
+      void stored.catch(() => {});
       const handled = attached.promise.then(
         ({ results: producerResults }): (LooseEntry | ErrorType)[] =>
           // zip is safe: the invocation task validates result completeness
@@ -733,9 +731,7 @@ export function wrapBulkProducer<
       });
     });
 
-    if (callOptions?.waitForStore !== undefined) {
-      await waitForStores(foregroundGroups.map((group) => group.stored), callOptions.waitForStore, signal);
-    }
+    notifyStore(foregroundGroups.map((group) => group.stored), callOptions?.onStore);
 
     return orderedResults;
   };

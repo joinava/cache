@@ -1,6 +1,6 @@
 import { setImmediate as nextTurn } from "node:timers/promises";
 import assert from "node:assert/strict";
-import { describe, it, mock } from "node:test";
+import { describe, it } from "node:test";
 import {
   Cache,
   MemoryStore,
@@ -9,6 +9,7 @@ import {
   wrapProducer,
   wrapHashedInputProducer,
   wrapBulkHashedInputProducer,
+  type OnStore,
 } from "../index.js";
 
 function deferred() {
@@ -95,279 +96,161 @@ function makeWrappedProducer(
   );
 }
 
-describe("wrapBulkProducer waitForStore", () => {
-  it("waits for the gated store before returning", async () => {
-    const store = makeGatedMemoryStore();
-    const wrapped = makeWrappedProducer(store.store);
-    const call = wrapped([{ id: "wait" }], {
-      waitForStore: { maxWaitMs: 1_000 },
-    });
-    await store.started;
 
-    const settledBeforeRelease = await Promise.race([
-      call.then(() => true),
-      nextTurn(false),
-    ]);
-    assert.strictEqual(settledBeforeRelease, false);
+type WrapperKind = "single" | "bulk" | "hashed" | "bulk-hashed";
+function makeCall(kind: WrapperKind, store: MemoryStore) {
+  const cache = new Cache(singleTypeCacheOptions<string>()({ name: kind, store }));
+  const result = { content: "value", directives: { freshUntilAge: 60 } };
+  const call = (onStore: OnStore) => kind === "single"
+    ? wrapProducer({ cache }, async () => result)({ id: "key" }, { onStore })
+    : kind === "bulk"
+      ? wrapBulkProducer({ cache }, async (requests) => requests.map(() => result))([{ id: "key" }], { onStore })
+      : kind === "hashed"
+        ? wrapHashedInputProducer({ cache, hashInput: (input: string) => input, produce: async () => result })("key", { onStore })
+        : wrapBulkHashedInputProducer({ cache, hashInput: (input: string) => input, produce: async (inputs) => inputs.map(() => result) })(["key"], { onStore });
+  return { call, cache };
+}
 
-    store.release();
-    const storedBeforeReturn = await Promise.race([
-      store.stored.then(() => true),
-      call.then(() => false),
-    ]);
-    assert.strictEqual(storedBeforeReturn, true);
-    await call;
-  });
-
-  it("reports a timeout and returns the producer result", async () => {
-    const store = makeGatedMemoryStore();
-    const wrapped = makeWrappedProducer(store.store);
-    const onUnstored = mock.fn();
-    const call = wrapped([{ id: "timeout" }], {
-      waitForStore: { maxWaitMs: 10, onUnstored },
-    });
-    await store.started;
-
-    const results = await call;
-
-    assert.strictEqual(results.length, 1);
-    assert.deepStrictEqual(onUnstored.mock.calls[0]?.arguments[0], {
-      reason: "timed-out",
-    });
-    store.release();
-    await store.stored;
-  });
-
-  it("reports a store failure and returns the producer result", async () => {
-    const store = makeGatedMemoryStore();
-    const producerError = new Error("producer failed");
-    const storeError = new Error("store failed");
-    const wrapped = makeWrappedProducer(store.store, {
-      producerErrors: new Map([["failure", producerError]]),
-    });
-    const onUnstored = mock.fn();
-    const call = wrapped([{ id: "failure" }, { id: "success" }], {
-      waitForStore: { maxWaitMs: 1_000, onUnstored },
-    });
-    await store.started;
-    store.fail(storeError);
-
-    const results = await call;
-
-    assert.strictEqual(results.length, 2);
-    assert.strictEqual(results[0], producerError);
-    assert.deepStrictEqual(onUnstored.mock.calls[0]?.arguments[0], {
-      reason: "store-failed",
-      error: storeError,
-    });
-  });
-
-  it("reports a per-item producer error and returns all results", async () => {
-    const store = makeGatedMemoryStore();
-    const producerError = new Error("producer failed");
-    const wrapped = makeWrappedProducer(store.store, {
-      producerErrors: new Map([["producer-error", producerError]]),
-    });
-    const onUnstored = mock.fn();
-    const call = wrapped([{ id: "producer-error" }, { id: "success" }], {
-      waitForStore: { maxWaitMs: 1_000, onUnstored },
-    });
-    await store.started;
-    store.release();
-
-    const results = await call;
-
-    assert.strictEqual(results.length, 2);
-    assert.strictEqual(results[0], producerError);
-    assert.strictEqual(store.isStored(), true);
-    assert.deepStrictEqual(onUnstored.mock.calls[0]?.arguments[0], {
-      reason: "producer-error",
-      error: producerError,
-    });
-  });
-
-  it("reports a producer error when every item fails", async () => {
-    const store = makeGatedMemoryStore();
-    const producerError = new Error("producer failed");
-    const wrapped = makeWrappedProducer(store.store, {
-      producerErrors: new Map([
-        ["producer-error-1", producerError],
-        ["producer-error-2", producerError],
-      ]),
-    });
-    const onUnstored = mock.fn();
-
-    const results = await wrapped(
-      [{ id: "producer-error-1" }, { id: "producer-error-2" }],
-      { waitForStore: { maxWaitMs: 1_000, onUnstored } },
-    );
-
-    assert.strictEqual(results.length, 2);
-    assert.strictEqual(results[0], producerError);
-    assert.strictEqual(results[1], producerError);
-    assert.strictEqual(store.isStored(), false);
-    assert.deepStrictEqual(onUnstored.mock.calls[0]?.arguments[0], {
-      reason: "producer-error",
-      error: producerError,
-    });
-  });
-
-  it("waits for every group when one group reports a producer error", async () => {
-    const store = makeGatedMemoryStore();
-    const producerError = new Error("producer failed");
-    const wrapped = makeWrappedProducer(store.store, {
-      producerErrors: new Map([["bypass-error", producerError]]),
-    });
-    const onUnstored = mock.fn();
-    const state = { settled: false };
-    const call = wrapped(
-      [{ id: "bypass-error", directives: { maxAge: 0 } }, { id: "miss" }],
-      {
-        waitForStore: { maxWaitMs: 1_000, onUnstored },
-      },
-    ).then((results) => {
-      state.settled = true;
-      return results;
-    });
-    await store.started;
-    await nextTurn();
-    assert.strictEqual(state.settled, false);
-
-    store.release();
-    const results = await call;
-
-    assert.strictEqual(state.settled, true);
-    assert.strictEqual(results.length, 2);
-    assert.strictEqual(results[0], producerError);
-    assert.strictEqual(store.isStored(), true);
-    assert.deepStrictEqual(
-      onUnstored.mock.calls.map((call) => call.arguments[0]),
-      [{ reason: "producer-error", error: producerError }],
-    );
-  });
-
-  it("returns before the store finishes when waitForStore is unset", async () => {
-    const store = makeGatedMemoryStore();
-    const wrapped = makeWrappedProducer(store.store);
-
-    const results = await wrapped([{ id: "no-wait" }]);
-    await store.started;
-
-    assert.strictEqual(results.length, 1);
-    assert.strictEqual(store.isStored(), false);
-    store.release();
-    await store.stored;
-  });
-
-  it("waits for the shared store when this call joins a producer", async () => {
-    const store = makeGatedMemoryStore();
-    const producerCalls = mock.fn();
-    const wrapped = makeWrappedProducer(store.store, {
-      collapseOverlappingRequestsTime: 3,
-      onProducerCall: producerCalls,
-    });
-    const requests = [{ id: "collapsed" }];
-    const producerCall = wrapped(requests);
-    const riderCall = wrapped(requests, {
-      waitForStore: { maxWaitMs: 1_000 },
-    });
-    await store.started;
-    const producerResults = await producerCall;
-
-    const riderSettledBeforeRelease = await Promise.race([
-      riderCall.then(() => true),
-      nextTurn(false),
-    ]);
-    assert.strictEqual(producerResults.length, 1);
-    assert.strictEqual(producerCalls.mock.callCount(), 1);
-    assert.strictEqual(riderSettledBeforeRelease, false);
-
-    store.release();
-    const riderResults = await riderCall;
-
-    assert.strictEqual(riderResults.length, 1);
-    assert.strictEqual(producerCalls.mock.callCount(), 1);
-    await store.stored;
-  });
-
-  it("waits for bypassed items to store", async () => {
-    const store = makeGatedMemoryStore();
-    const wrapped = makeWrappedProducer(store.store);
-    const call = wrapped([{ id: "bypass", directives: { maxAge: 0 } }], {
-      waitForStore: { maxWaitMs: 1_000 },
-    });
-    await store.started;
-
-    const settledBeforeRelease = await Promise.race([
-      call.then(() => true),
-      nextTurn(false),
-    ]);
-    assert.strictEqual(settledBeforeRelease, false);
-
-    store.release();
-    const results = await call;
-
-    assert.strictEqual(results.length, 1);
-    await store.stored;
-  });
-
-  it("rejects when the caller aborts during the store wait", async () => {
-    const store = makeGatedMemoryStore();
-    const wrapped = makeWrappedProducer(store.store);
-    const controller = new AbortController();
-    const call = wrapped([{ id: "abort" }], {
-      signal: controller.signal,
-      waitForStore: { maxWaitMs: 1_000 },
-    });
-    await store.started;
-    controller.abort(new Error("caller aborted"));
-
-    await assert.rejects(call, /caller aborted/);
-    store.release();
-    await store.stored;
-  });
-});
-
-
-describe("persistence waits across all producer wrappers", () => {
+describe("onStore across all producer wrappers", () => {
   for (const kind of ["single", "bulk", "hashed", "bulk-hashed"] as const) {
-    it(`${kind} waits for its store before returning`, async () => {
+    it(`${kind} exposes persistence without delaying the result`, async () => {
       const store = makeGatedMemoryStore();
-      const cache = new Cache(singleTypeCacheOptions<string>()({ name: kind, store: store.store }));
-      const options = { waitForStore: { maxWaitMs: 1_000 } };
-      const result = { content: "value", directives: { freshUntilAge: 60 } };
-      const call = kind === "single"
-        ? wrapProducer({ cache }, async () => result)({ id: "key" }, options)
-        : kind === "bulk"
-          ? wrapBulkProducer({ cache }, async (requests) => requests.map(() => result))([{ id: "key" }], options)
-          : kind === "hashed"
-            ? wrapHashedInputProducer({ cache, hashInput: (input: string) => input, produce: async () => result })("key", options)
-            : wrapBulkHashedInputProducer({ cache, hashInput: (input: string) => input, produce: async (inputs) => inputs.map(() => result) })(["key"], options);
-      await store.started;
-      assert.equal(await Promise.race([call.then(() => true), nextTurn(false)]), false);
+      const { call, cache } = makeCall(kind, store.store);
+      const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+      let calls = 0;
+      await call((stored) => { calls += 1; captured.resolve({ stored }); });
+      const { stored } = await captured.promise;
+      assert.equal(calls, 1);
+      assert.equal(await Promise.race([stored.then(() => true), nextTurn(false)]), false);
       store.release();
-      await call;
+      await stored;
       assert.equal(store.isStored(), true);
       await cache.close();
     });
+    it(`${kind} rejects the store promise without rejecting the result`, async () => {
+      const store = makeGatedMemoryStore();
+      const { call, cache } = makeCall(kind, store.store);
+      const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+      await call((stored) => captured.resolve({ stored }));
+      const { stored } = await captured.promise;
+      const failure = new Error("store failed");
+      const rejected = assert.rejects(stored, (error) => error === failure);
+      store.fail(failure);
+      await rejected;
+      await cache.close();
+    });
   }
+  it("waits for every foreground store before rejecting the aggregate", async () => {
+    const memory = new MemoryStore();
+    const first = deferred();
+    const second = deferred();
+    const original = memory.store.bind(memory);
+    memory.store = async (entries) => {
+      await (entries[0]?.entry.id === "bypass" ? first.promise : second.promise);
+      return await original(entries);
+    };
+    const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+    await makeWrappedProducer(memory)([{ id: "bypass", directives: { maxAge: 0 } }, { id: "miss" }], { onStore: (stored) => captured.resolve({ stored }) });
+    const { stored } = await captured.promise;
+    const failure = new Error("first store failed");
+    const rejected = assert.rejects(stored, (error) => error === failure);
+    first.reject(failure);
+    assert.equal(await Promise.race([stored.then(() => true, () => true), nextTurn(false)]), false);
+    second.resolve();
+    await rejected;
+    await memory.close();
+  });
+  it("reports a fulfilled promise on cache hits", async () => {
+    const store = makeGatedMemoryStore();
+    const { call, cache } = makeCall("single", store.store);
+    store.release();
+    const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+    await call((stored) => captured.resolve({ stored }));
+    await (await captured.promise).stored;
+    let calls = 0;
+    await call((stored) => { calls += 1; assert.ok(stored instanceof Promise); });
+    assert.equal(calls, 1);
+    await cache.close();
+  });
+  it("reports a fulfilled promise for empty bulk calls", async () => {
+    const cache = new Cache(singleTypeCacheOptions<string>()({ name: "empty", store: new MemoryStore() }));
+    const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+    const produce = wrapBulkProducer({ cache }, async () => []);
+    assert.deepEqual(await produce([], { onStore: (stored) => captured.resolve({ stored }) }), []);
+    await (await captured.promise).stored;
+    await cache.close();
+  });
 });
 
-
-it("single producer reports failed persistence when a producer error serves stale content", async () => {
-  const cache = new Cache(singleTypeCacheOptions<string>()({ name: "stale-fallback", store: new MemoryStore() }));
-  await cache.store([{ id: "key", content: "stale", directives: { freshUntilAge: 60 } }]);
-  const originalGet = cache.get.bind(cache);
-  cache.get = async (request, options) => {
-    const lookup = await originalGet(request, options);
-    assert.ok(lookup.usable);
-    return { validatable: [], usableIfError: lookup.usable };
-  };
-  const error = new Error("producer unavailable");
-  const onUnstored = mock.fn();
-  const produce = wrapProducer({ cache }, async () => { throw error; });
-  const result = await produce({ id: "key" }, { waitForStore: { maxWaitMs: 1_000, onUnstored } });
-  assert.equal(result.content, "stale");
-  assert.deepEqual(onUnstored.mock.calls[0]?.arguments, [{ reason: "producer-error", error }]);
-  await cache.close();
+it("collapsed callers observe the same pending write", async () => {
+  const store = makeGatedMemoryStore();
+  const produce = makeWrappedProducer(store.store);
+  const first = Promise.withResolvers<{ stored: Promise<void> }>();
+  const second = Promise.withResolvers<{ stored: Promise<void> }>();
+  await Promise.all([
+    produce([{ id: "key" }], { onStore: (stored) => first.resolve({ stored }) }),
+    produce([{ id: "key" }], { onStore: (stored) => second.resolve({ stored }) }),
+  ]);
+  const a = (await first.promise).stored;
+  const b = (await second.promise).stored;
+  assert.equal(await Promise.race([Promise.all([a, b]).then(() => true), nextTurn(false)]), false);
+  store.release();
+  await Promise.all([a, b]);
 });
+
+it("synchronous hook errors reject the wrapper without cancelling the write", async () => {
+  const store = makeGatedMemoryStore();
+  const failure = new Error("hook failed");
+  await assert.rejects(makeWrappedProducer(store.store)([{ id: "key" }], { onStore: () => { throw failure; } }), (error) => error === failure);
+  store.release();
+  await store.stored;
+});
+
+it("ignored rejected store promises do not reject the wrapper", async () => {
+  const memory = new MemoryStore();
+  memory.store = async () => { throw new Error("ignored store failure"); };
+  await makeWrappedProducer(memory)([{ id: "key" }], { onStore: () => {} });
+  await nextTurn();
+  await memory.close();
+});
+
+for (const mode of ["background", "fallback"] as const) {
+  it(`single ${mode} exposes no foreground writes`, async () => {
+    const memory = new MemoryStore();
+    const cache = new Cache(singleTypeCacheOptions<string>()({ name: mode, store: memory }));
+    await cache.store([{ id: "key", content: "cached", directives: { freshUntilAge: 60 } }]);
+    const originalGet = cache.get.bind(cache);
+    cache.get = async (request, options) => {
+      const lookup = await originalGet(request, options);
+      assert.ok(lookup.usable);
+      return mode === "background"
+        ? { validatable: [], usableWhileRevalidate: lookup.usable }
+        : { validatable: [], usableIfError: lookup.usable };
+    };
+    const gate = deferred();
+    const started = deferred();
+    const finished = deferred();
+    const originalStore = memory.store.bind(memory);
+    memory.store = async (entries) => {
+      started.resolve();
+      await gate.promise;
+      const result = await originalStore(entries);
+      finished.resolve();
+      return result;
+    };
+    const produce = wrapProducer({ cache }, async () => {
+      if (mode === "fallback") throw new Error("producer unavailable");
+      return { content: "new", directives: { freshUntilAge: 60 } };
+    });
+    const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+    const result = await produce({ id: "key" }, { onStore: (stored) => captured.resolve({ stored }) });
+    assert.equal(result.content, "cached");
+    await (await captured.promise).stored;
+    if (mode === "background") {
+      await started.promise;
+      gate.resolve();
+      await finished.promise;
+    }
+    await cache.close();
+  });
+}

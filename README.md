@@ -286,16 +286,31 @@ Overlapping `store()` and `delete()` calls have no ordering guarantee, including
 
 MemoryStore close only stops periodic expiration cleanup; pending operations continue. PostgresStore disposal leaves operations and connection-pool shutdown to the caller. SqliteStore close drains accepted worker tasks unless shutdown fails or times out. Await operation promises when their completion or errors matter. Finish Postgres operations before shutting down the supplied pool. See [store shutdown details](docs/implementing-a-store.md#store-shutdown), including timeout behavior and `Cache.close()`.
 
-### Waiting for persistence
+### Observing persistence
 
-All four producer wrappers accept a per-call
-`waitForStore: { maxWaitMs, onUnstored? }` option. It waits for all foreground
-stores, including a shared producer invocation that this caller joins. Cache hits
-and background revalidation do not add stores to this wait.
+All four producer wrappers accept a per-call `onStore(stored)` callback.
+The callback receives a `Promise<void>` for that call's foreground cache writes.
+The wrapper returns produced results without awaiting persistence or the callback's
+return value. Callers own their wait, timeout, retry, and failure policy.
 
-Without this option, persistence remains asynchronous. With the option, a timeout,
-store failure, or per-item producer error invokes `onUnstored` and preserves the
-returned producer results. A throwing callback rejects the call. Abort signals
-reject the caller's wait; they do not cancel shared persistence. The timeout starts
-after foreground producer results arrive. This option does not guarantee durable
-storage after a timeout and does not add a database transaction.
+The callback runs once before a successful call returns. Cache hits, empty bulk
+calls, and stale fallbacks with no foreground writes receive a fulfilled promise.
+Background revalidation is excluded. Collapsed callers observe the same underlying
+writes. For bulk calls, the promise settles every foreground store before rejecting
+with the first rejection in group order. Producer errors keep their existing
+throw, per-item error, and stale-fallback behavior; they are not store failures.
+
+The package observes persistence rejections internally, so callers can ignore the
+promise or attach handlers later. A synchronous callback exception rejects the
+wrapper call. An async callback's returned promise is not awaited or observed;
+callers must handle their own async work. Caller cancellation does not cancel
+shared persistence. The hook is not delivered if the wrapper call rejects before
+it can return results.
+
+```typescript
+let stored = Promise.resolve();
+const result = await produce(request, {
+  onStore: (promise) => { stored = promise; },
+});
+await stored; // Optional: require persistence before starting subsequent work.
+```
