@@ -1,19 +1,11 @@
-import type { ReadonlyDeep } from "type-fest";
-
 import type { CacheSpec } from "../types/00_CacheSpec.js";
 import type {
   AnyParams,
   AnyValidators,
-  ConsumerDirectives,
   Entry,
   NormalizedParams,
 } from "../types/index.js";
-import {
-  birthDate,
-  calculateStoreFor,
-  classify,
-  EntryClassification,
-} from "./normalizedProducerResultResourceHelpers.js";
+import { calculateStoreFor } from "./normalizedProducerResultResourceHelpers.js";
 import { resultVariantKey, variantMatchesRequest } from "./varyHelpers.js";
 
 type PendingEntry<
@@ -45,17 +37,11 @@ type PendingEntry<
  *
  * This overlay closes that window: every entry handed to `cache.store()` is
  * held here until that store call settles, and the wrapper consults the
- * overlay before reading the store. An entry that would be a fresh hit had the
- * write already landed is served from here instead.
+ * overlay before reading the store. Pending entries use the same freshness
+ * classification and selection rules as stored entries.
  *
  * ## What it does NOT do
  *
- * - It only serves entries that classify as {@link EntryClassification.Usable}
- *   under the caller's directives. A pending entry that is already stale (a
- *   producer with `freshUntilAge: 0`, say) is not served, even if a stale
- *   serve would have been allowed: the wrapper's stale-while-revalidate and
- *   stale-if-error paths need the store's lookup result, so those requests
- *   fall through to the store as before.
  * - It never serves an entry the store would not retain (`storeFor: 0`, or
  *   an entry already past every usefulness bound), so a producer that asked
  *   for its response not to be stored is not silently memoized for one call.
@@ -80,8 +66,8 @@ export class PendingStores<
   /**
    * Pending entries by resource id. A `Set` (not a single slot) because one
    * id can have several variants in flight, and one variant can be written
-   * twice in quick succession (two invocations whose collapse windows did
-   * not overlap); {@link findUsable} picks among them the way the cache does.
+   * twice while earlier work remains pending, after the joining age limit expires
+   * or requests differ. Cache lookup rules select among matching entries.
    */
   readonly #byId = new Map<
     Spec["id"],
@@ -157,34 +143,13 @@ export class PendingStores<
     return this.#byId.has(id);
   }
 
-  /**
-   * The pending entry that would satisfy the request as a fresh hit (the
-   * cache's `usable` slot) had its write already landed, or `undefined` if
-   * none would. Among several candidates, the newest by birth date wins --
-   * the same rule `Cache.get` applies to stored entries.
-   */
-  findUsable(
+  /** Return variant-matching records; Cache owns freshness and entry selection. */
+  matching(
     id: Spec["id"],
     normalizedParams: Readonly<NormalizedParams<Params>>,
-    directives: ReadonlyDeep<ConsumerDirectives>,
-    now: Date,
-  ): PendingEntry<Spec, Validators, Params> | undefined {
-    const pending = this.#byId.get(id);
-    if (pending === undefined) {
-      return undefined;
-    }
-
-    let best: PendingEntry<Spec, Validators, Params> | undefined;
-    for (const pendingEntry of pending) {
-      const { entry } = pendingEntry;
-      if (
-        variantMatchesRequest(entry.vary, normalizedParams) &&
-        classify(entry, directives, now) === EntryClassification.Usable &&
-        (best === undefined || birthDate(entry) > birthDate(best.entry))
-      ) {
-        best = pendingEntry;
-      }
-    }
-    return best;
+  ): readonly PendingEntry<Spec, Validators, Params>[] {
+    return [...(this.#byId.get(id) ?? [])].filter(({ entry }) =>
+      variantMatchesRequest(entry.vary, normalizedParams),
+    );
   }
 }

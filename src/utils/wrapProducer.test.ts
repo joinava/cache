@@ -1013,8 +1013,8 @@ describe("wrapProducer", () => {
       await wrapped({ id: "first", params: { language: "en" } });
       const before = normalize.mock.callCount();
       await wrapped({ id: "second", params: { language: "fr" } });
-      // Cache.get and Cache.store each normalize this request once. An eager
-      // overlay lookup would add another normalization before Cache.get.
+      // The producer has no vary parameters, so only Cache.get normalizes
+      // this request. An eager overlay lookup would normalize it again.
       assert.equal(normalize.mock.callCount() - before, 1);
       await cache.close();
     });
@@ -1028,6 +1028,226 @@ describe("wrapProducer", () => {
       await gatedCache.close();
       await assert.rejects(wrapped({ id: "x" }), /closed/);
       assert.equal(producer.mock.callCount(), 1);
+    });
+
+    it("pending stale-while-revalidate returns stale data and observes only its existing write", async () => {
+      const refresh =
+        Promise.withResolvers<
+          RequestPairedProducerResult<
+            SpecOf<typeof testRegistry>,
+            AnyValidators,
+            AnyParams
+          >
+        >();
+      const refreshing = Promise.withResolvers<void>();
+      const produce = mock.fn(async () => {
+        if (produce.mock.callCount() > 0) {
+          refreshing.resolve();
+          return await refresh.promise;
+        }
+        return {
+          content: "stale",
+          date: new Date(Date.now() - 10_000),
+          directives: {
+            freshUntilAge: 1,
+            maxStale: {
+              whileRevalidate: 60,
+              ifError: 60,
+              withoutRevalidation: 0,
+            },
+          },
+        };
+      });
+      const originalStore = gatedCache.store.bind(gatedCache);
+      const refreshWrite = Promise.withResolvers<{
+        stored: Promise<readonly unknown[]>;
+      }>();
+      mock.method(gatedCache, "store", (entries: Parameters<TestCache["store"]>[0]) => {
+        const stored = originalStore(entries);
+        if (entries[0]?.content === "fresh") refreshWrite.resolve({ stored });
+        return stored;
+      });
+      const wrapped = wrapProducer({ cache: gatedCache }, produce);
+      await wrapped({ id: "x" });
+      const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+      const stale = await wrapped(
+        { id: "x" },
+        { onStore: (stored) => captured.resolve({ stored }) },
+      );
+      assert.equal(stale.content, "stale");
+      await refreshing.promise;
+      assert.equal(produce.mock.callCount(), 2);
+      store.releaseAll();
+      await (
+        await captured.promise
+      ).stored;
+      // Persistence of the returned stale entry does not await its refresh.
+      refresh.resolve({ content: "fresh", directives: { freshUntilAge: 100 } });
+      const write = await refreshWrite.promise;
+      store.releaseAll();
+      await write.stored;
+    });
+
+    it("a failed background refresh does not reject the pending stale return", async () => {
+      const produce = mock.fn(async () => {
+        if (produce.mock.callCount() > 0)
+          throw new Error("background origin failed");
+        return {
+          content: "stale",
+          date: new Date(Date.now() - 10_000),
+          directives: {
+            freshUntilAge: 1,
+            maxStale: {
+              whileRevalidate: 60,
+              ifError: 60,
+              withoutRevalidation: 0,
+            },
+          },
+        };
+      });
+      const wrapped = wrapProducer({ cache: gatedCache }, produce);
+      await wrapped({ id: "x" });
+      const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+      const stale = await wrapped(
+        { id: "x" },
+        { onStore: (stored) => captured.resolve({ stored }) },
+      );
+      assert.equal(stale.content, "stale");
+      assert.equal(produce.mock.callCount(), 2);
+      store.releaseAll();
+      await (
+        await captured.promise
+      ).stored;
+    });
+
+    it("pending stale-if-error falls back on refresh failure and exposes its write failure", async () => {
+      const produce = mock.fn(async () => {
+        if (produce.mock.callCount() > 0) throw new Error("origin failed");
+        return {
+          content: "fallback",
+          date: new Date(Date.now() - 10_000),
+          directives: {
+            freshUntilAge: 1,
+            maxStale: {
+              whileRevalidate: 0,
+              ifError: 60,
+              withoutRevalidation: 0,
+            },
+          },
+        };
+      });
+      const wrapped = wrapProducer({ cache: gatedCache }, produce);
+      await wrapped({ id: "x" });
+      const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+      const fallback = await wrapped(
+        { id: "x" },
+        { onStore: (stored) => captured.resolve({ stored }) },
+      );
+      assert.equal(fallback.content, "fallback");
+      const failure = new Error("fallback write failed");
+      const rejected = assert.rejects(
+        (await captured.promise).stored,
+        (error) => error === failure,
+      );
+      store.failAll(failure);
+      await rejected;
+      await assert.rejects(wrapped({ id: "x" }), /origin failed/);
+    });
+
+    it("pending stale-if-error returns a successful refresh and observes its new write", async () => {
+      const produce = mock.fn(async () =>
+        produce.mock.callCount() === 0
+          ? {
+              content: "stale",
+              date: new Date(Date.now() - 10_000),
+              directives: {
+                freshUntilAge: 1,
+                maxStale: {
+                  whileRevalidate: 0,
+                  ifError: 60,
+                  withoutRevalidation: 0,
+                },
+              },
+            }
+          : { content: "fresh", directives: { freshUntilAge: 100 } },
+      );
+      const wrapped = wrapProducer({ cache: gatedCache }, produce);
+      await wrapped({ id: "x" });
+      const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+      const fresh = await wrapped(
+        { id: "x" },
+        { onStore: (stored) => captured.resolve({ stored }) },
+      );
+      assert.equal(fresh.content, "fresh");
+      const failure = new Error("refresh write failed");
+      const rejected = assert.rejects(
+        (await captured.promise).stored,
+        (error) => error === failure,
+      );
+      assert.equal(store.gates.length, 2);
+      store.gates[1]!.fail(failure);
+      await rejected;
+    });
+
+    it("a persisted fresh entry takes precedence over a pending stale entry", async () => {
+      const persisted = gatedCache.store([
+        {
+          id: "x",
+          content: "persisted-fresh",
+          directives: { freshUntilAge: 100 },
+        },
+      ]);
+      await Promise.resolve();
+      store.releaseAll();
+      await persisted;
+      const produce = mock.fn(async () => ({
+        content: "pending-stale",
+        date: new Date(Date.now() - 10_000),
+        directives: {
+          freshUntilAge: 1,
+          maxStale: {
+            whileRevalidate: 60,
+            ifError: 60,
+            withoutRevalidation: 0,
+          },
+        },
+      }));
+      const wrapped = wrapProducer({ cache: gatedCache }, produce);
+      await wrapped({ id: "x", directives: { maxAge: 0 } });
+      const hit = await wrapped({ id: "x" });
+      assert.equal(hit.content, "persisted-fresh");
+      assert.equal(produce.mock.callCount(), 1);
+    });
+
+    it("pending selection uses the same equal-date tie rule as Cache.get", async () => {
+      const date = new Date();
+      const produce = mock.fn(
+        async (request: { params: Partial<AnyParams> }) => ({
+          content: request.params["language"] === "en" ? "specific" : "general",
+          vary: request.params["language"] === "en" ? { language: "en" } : {},
+          date,
+          directives: { freshUntilAge: 100 },
+        }),
+      );
+      const wrapped = wrapProducer({ cache: gatedCache }, produce);
+      await wrapped({ id: "x", directives: { maxAge: 0 } });
+      const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+      await wrapped(
+        { id: "x", params: { language: "en" }, directives: { maxAge: 0 } },
+        { onStore: (stored) => captured.resolve({ stored }) },
+      );
+      const pending = await wrapped({ id: "x", params: { language: "en" } });
+      assert.equal(pending.content, "specific");
+      store.releaseAll();
+      await (
+        await captured.promise
+      ).stored;
+      const persisted = await gatedCache.get({
+        id: "x",
+        params: { language: "en" },
+        directives: {},
+      });
+      assert.equal(persisted.usable?.content, pending.content);
     });
 
     it("the overlay is per wrapper: a second wrapper over the same cache reads the store", async () => {

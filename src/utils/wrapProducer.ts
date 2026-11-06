@@ -44,6 +44,10 @@ import {
 } from "./normalization.js";
 import { PendingStores } from "./pendingStores.js";
 import {
+  classifyCacheEntries,
+  mergeCacheLookups,
+} from "./normalizedProducerResultResourceHelpers.js";
+import {
   completeRequest,
   primaryNormalizedResultResourceFromRequestPairedProducerResult,
   requestPairedProducerResultToResources,
@@ -489,23 +493,23 @@ export function throwUnreachableAbort(signal: AbortSignal | undefined): never {
  *   `cache.store()` settled is answered from the wrapper's own in-memory
  *   overlay of in-flight writes -- consulted before the cache read, and
  *   honoring the request's params against each entry's `vary` and the
- *   caller's directives exactly as a stored entry would be -- provided the
- *   entry would be a fresh hit had the write landed. So a plain sequential
- *   repeat (`await f(x); await f(x)`) runs the producer once, whatever the
- *   store's write latency. Such a serve reports `served-from-cache` on the
- *   fetch channel and, like a bypass request, emits no `read` message (no
- *   store read happened).
+ *   caller's directives through the same lookup rules as stored entries.
+ *   A fresh pending hit avoids the store read. Pending stale candidates merge
+ *   with the store lookup, so a persisted fresh entry takes precedence.
+ *   Stale-while-revalidate starts a background refresh; stale-if-error serves
+ *   the selected entry only if production fails. Fresh pending hits report
+ *   `served-from-cache` and emit no `read` message because no read happened.
  * - Once the store call settles the overlay forgets the entry, on success
  *   (the store answers for it now) and on failure alike: a failed write is
  *   never pinned, so the next call reads the store, misses, and runs the
  *   producer again.
  * - The overlay is per wrapper instance and in-process. It does not cover a
- *   different wrapper over the same cache, a different process, or the
- *   stale-while-revalidate / stale-if-error paths (a pending entry that is
- *   already stale falls through to the store read, as before).
+ *   different wrapper over the same cache or a different process.
  *
  * Await the promise passed to `onStore` when subsequent work requires
- * persistence. Overlay hits expose the selected entry's original write.
+ * persistence. Overlay hits and stale fallbacks expose the selected entry's
+ * original write. A stale return excludes its background refresh write;
+ * a successful foreground refresh exposes that refresh's write.
  * Store shutdown guarantees differ: SQLite drains its writer, while MemoryStore
  * and PostgresStore do not drain outstanding writes. Postgres callers own the
  * database connection and must await persistence before closing that connection.
@@ -784,6 +788,24 @@ export default function wrapProducer<
       throwAborted(false);
     }
 
+    const pendingWrites = new Map<LooseEntry, Promise<void>>();
+    const lookupPending = (): LooseLookupResult => {
+      if (directivesImpliedBypass || cache.closed || !pendingStores.has(id))
+        return { validatable: [] };
+      const entries = pendingStores.matching(id, normalizeParamsBound(params));
+      entries.forEach(({ entry, stored }) => pendingWrites.set(entry, stored));
+      return classifyCacheEntries(
+        entries.map(({ entry }) => entry),
+        directives,
+        new Date(),
+      ).result;
+    };
+    const pendingWritesFor = (entry: LooseEntry): Promise<void>[] => {
+      const stored = pendingWrites.get(entry);
+      return stored === undefined ? [] : [stored];
+    };
+    const pendingLookup = lookupPending();
+
     // Awaits an in-flight producer invocation on behalf of this caller:
     // races the caller's wait against its signal, settles the fetch message,
     // and applies the caller's own usableIfError fallback on producer error.
@@ -824,7 +846,7 @@ export default function wrapProducer<
             disposition: "served-stale-after-error",
             vary: usableIfError.vary,
           });
-          notifyStore([], callOptions?.onStore);
+          notifyStore(pendingWritesFor(usableIfError), callOptions?.onStore);
           return usableIfError;
         }
 
@@ -860,34 +882,21 @@ export default function wrapProducer<
       );
     }
 
-    // An entry this wrapper produced whose store() has not settled yet is a
-    // hit (see the function docs): it is what the store read would return had
-    // the write already landed, so it settles the fetch the same way.
-    const pendingEntry =
-      !cache.closed && pendingStores.has(id)
-        ? pendingStores.findUsable(
-            id,
-            normalizeParamsBound(params),
-            directives,
-            new Date(),
-          )
-        : undefined;
-    if (pendingEntry !== undefined) {
-      logTrace(`serving an entry whose store is still in flight`, {
-        id,
-        params,
-      });
+    // A fresh pending entry can answer without a store read. Stale candidates
+    // must also consult the store so persisted fresh entries take precedence.
+    if (pendingLookup.usable !== undefined) {
+      const usable = pendingLookup.usable;
       publishFetch(false, {
         disposition: "served-from-cache",
-        vary: pendingEntry.entry.vary,
+        vary: usable.vary,
       });
-      notifyStore([pendingEntry.stored], callOptions?.onStore);
-      return pendingEntry.entry;
+      notifyStore(pendingWritesFor(usable), callOptions?.onStore);
+      return usable;
     }
 
     logTrace(`asking the cache for a response`, { id, params });
 
-    const cacheRes = await cache
+    const storedLookup = await cache
       .get<SpecOf<RT>["id"]>(finalRequest, callOptions)
       .catch((e: unknown) => {
         // If the errror was the signal being aborted, propagate that (as an
@@ -911,7 +920,10 @@ export default function wrapProducer<
         }
       });
 
-    const { usable, usableIfError, usableWhileRevalidate } = cacheRes;
+    const { usable, usableIfError, usableWhileRevalidate } = mergeCacheLookups([
+      storedLookup,
+      lookupPending(),
+    ]);
 
     // We have ready-to-go content from the cache, w/ no refresh required.
     if (usable) {
@@ -919,7 +931,7 @@ export default function wrapProducer<
         disposition: "served-from-cache",
         vary: usable.vary,
       });
-      notifyStore([], callOptions?.onStore);
+      notifyStore(pendingWritesFor(usable), callOptions?.onStore);
       return usable;
     }
 
@@ -976,7 +988,10 @@ export default function wrapProducer<
         disposition: "served-stale-while-revalidating",
         vary: usableWhileRevalidate.vary,
       });
-      notifyStore([], callOptions?.onStore);
+      notifyStore(
+        pendingWritesFor(usableWhileRevalidate),
+        callOptions?.onStore,
+      );
       return usableWhileRevalidate;
     }
 
