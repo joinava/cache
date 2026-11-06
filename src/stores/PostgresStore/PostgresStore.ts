@@ -1,6 +1,6 @@
 import { chunk } from "es-toolkit";
 import { sortCooperatively } from "../../utils/cooperative.js";
-import { timeSlicedMap, timeSlicedForEach, timeSlicedMapFromEntries } from "../../utils/time-slicing.js";
+import { timeSlicedMap, timeSlicedForEach } from "../../utils/time-slicing.js";
 import type { ColumnType, PostgresPool, RawBuilder, SqlBool } from "kysely";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import type { Tagged } from "type-fest";
@@ -381,12 +381,16 @@ export default class PostgresStore<
     // concurrent calls whose batches share >= 2 slots in DIFFERENT orders
     // could otherwise deadlock (each holding a row the other is waiting on).
     // With a consistent order, the later call just waits for the earlier one.
+    const resourceIds = new Set<string>();
     const rows = await sortCooperatively(
-      await timeSlicedMap(deduped, ({ it }) => ({
-        resource_id: it.entry.id,
-        vary: this.serializeVary(it.entry.vary),
-        entry: this.serializeEntry(it.entry),
-      })),
+      await timeSlicedMap(deduped, ({ it }) => {
+        resourceIds.add(it.entry.id);
+        return {
+          resource_id: it.entry.id,
+          vary: this.serializeVary(it.entry.vary),
+          entry: this.serializeEntry(it.entry),
+        };
+      }),
       (a, b) =>
         a.resource_id < b.resource_id
           ? -1
@@ -398,10 +402,6 @@ export default class PostgresStore<
                 ? 1
                 : 0,
     );
-    const resourceIds = new Set<string>();
-    await timeSlicedForEach(deduped, ({ it }) => {
-      resourceIds.add(it.entry.id);
-    });
     type OldRow = {
       resource_id: string;
       vary: Readonly<NormalizedVary<Params>>;
@@ -416,6 +416,14 @@ export default class PostgresStore<
           "validators",
         ),
       ]);
+    const upsert = (batch: typeof rows) =>
+      this.db
+        .insertInto(this.tableName)
+        .values(batch)
+        .onConflict((oc) =>
+          oc.columns(["resource_id", "vary"])
+            .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") })),
+        );
     const batchSize = 1_000;
     let oldRows: readonly OldRow[];
     try {
@@ -425,16 +433,7 @@ export default class PostgresStore<
           .with("old", () =>
             oldQuery.where("resource_id", "in", [...resourceIds]),
           )
-          .with("upsert", (c) =>
-            c
-              .insertInto(this.tableName)
-              .values(rows)
-              .onConflict((oc) =>
-                oc
-                  .columns(["resource_id", "vary"])
-                  .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") })),
-              ),
-          )
+          .with("upsert", () => upsert(rows))
           .selectFrom("old")
           .selectAll("old")
           .execute()) as unknown as readonly OldRow[];
@@ -454,15 +453,9 @@ export default class PostgresStore<
           // Sort the whole call before batching. The identical JS comparator
           // preserves global lock order with older one-statement writers.
           for (let start = 0; start < rows.length; start += batchSize) {
-            await trx
-              .insertInto(this.tableName)
-              .values(rows.slice(start, start + batchSize))
-              .onConflict((oc) =>
-                oc
-                  .columns(["resource_id", "vary"])
-                  .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") })),
-              )
-              .execute();
+            await trx.executeQuery(
+              upsert(rows.slice(start, start + batchSize)).compile(),
+            );
           }
           return previous.rows;
         });
@@ -477,36 +470,26 @@ export default class PostgresStore<
     // snapshot. A concurrent writer may still commit between that snapshot
     // and an upsert, so this metadata remains approximate under same-slot races.
     // Build comparison metadata after the transaction releases its connection.
-    const oldValidatorsBySlot = await timeSlicedMapFromEntries(
-      await timeSlicedMap(
-        oldRows,
-        (row) =>
-          [
-            this.slotKey({ id: row.resource_id, vary: row.vary }),
-            row.validators,
-          ] as const,
-      ),
-    );
-
-    // Each deduped ("winner") entry reports its relationship, keyed back to its
-    // original input index.
-    const resultByInputIndex = await timeSlicedMapFromEntries(
-      await timeSlicedMap(
-        deduped,
-        ({ it, originalIndex }) =>
-          [
-            originalIndex,
-            this.#relationshipToExisting(it.entry, oldValidatorsBySlot),
-          ] as const,
-      ),
-    );
+    const oldValidatorsBySlot = new Map<string, Partial<Validators>>();
+    await timeSlicedForEach(oldRows, (row) => {
+      oldValidatorsBySlot.set(
+        this.slotKey({ id: row.resource_id, vary: row.vary }),
+        row.validators,
+      );
+    });
 
     // Map back onto the full input order; every input that isn't a winner (a
-    // dropped within-call duplicate) isn't in the map and so is omitted.
-    return timeSlicedMap(
-      entries,
-      (_entry, index) => resultByInputIndex.get(index) ?? {},
-    );
+    // dropped within-call duplicate) is omitted.
+    const results = await timeSlicedMap(entries, (): StoreEntryResult => ({}));
+    // Each deduped ("winner") entry reports its relationship, keyed back to its
+    // original input index.
+    await timeSlicedForEach(deduped, ({ it, originalIndex }) => {
+      results[originalIndex] = this.#relationshipToExisting(
+        it.entry,
+        oldValidatorsBySlot,
+      );
+    });
+    return results;
   }
 
   /**
