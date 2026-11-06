@@ -794,8 +794,9 @@ export default function wrapProducer<
 
     const pendingWrites = new Map<LooseEntry, Promise<void>>();
     const lookupPending = (): LooseLookupResult => {
-      if (directivesImpliedBypass || cache.closed || !pendingStores.has(id))
-        return { validatable: [] };
+      // Bypass calls return before this lookup runs. Closed caches and absent
+      // IDs contribute no pending candidates to the combined lookup.
+      if (cache.closed || !pendingStores.has(id)) return { validatable: [] };
       const entries = pendingStores.matching(id, normalizeParamsBound(params));
       entries.forEach(({ entry, stored }) => pendingWrites.set(entry, stored));
       return classifyCacheEntries(
