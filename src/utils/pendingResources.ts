@@ -46,13 +46,18 @@ type PendingEntry<
  * the read and merges it with the stored candidates. Both sources use the
  * same freshness classification and selection rules.
  *
+ * The overlay models an idealized store that retains every eligible pending
+ * entry, including duplicates within one write. The backing store may retain
+ * fewer entries because of eviction, capacity, or per-slot deduplication.
+ * Selection therefore need not equal a lookup after the write completes.
+ *
  * ## What it does NOT do
  *
- * - It never serves an entry the store would not retain (`storeFor: 0`, or
+ * - It never serves an entry whose directives prohibit retention (`storeFor: 0`, or
  *   an entry already past every usefulness bound), so a producer that asked
  *   for its response not to be stored is not silently memoized for one call.
  * - It never outlives the write. An entry leaves the overlay when its store
- *   call settles, on SUCCESS (the store now answers for it) and on FAILURE
+ *   call settles, on SUCCESS (the store may now answer for it) and on FAILURE
  *   alike. A failed write is forgotten, not pinned: the next caller reads the
  *   store, misses, and runs the producer again, exactly as if the overlay
  *   did not exist. An already-running lookup can retain its own snapshot

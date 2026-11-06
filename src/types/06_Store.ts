@@ -161,11 +161,12 @@ export type Store<
    * should reject if storage fails, but specific errors are not currently
    * defined.
    *
-   * If multiple entries in one call target the same (id, vary) slot, only the
-   * entry with the newest birth date (see entryUtils.birthDate) is stored;
-   * the dropped duplicates persist nothing and omit
-   * `relationshipToExistingStoredData` in their result slots. Which duplicate
-   * wins among entries tied on birth date is implementation-defined.
+   * Stores may retain a subset of eligible entries because of capacity limits,
+   * eviction, or storage strategy. Stores commonly keep only the newest birth
+   * date per (id, vary) slot; other implementations may retain several entries.
+   * Dropped duplicates persist nothing and omit
+   * `relationshipToExistingStoredData` in their result slots. Retention choices
+   * do not change the per-entry result contract.
    */
   store(
     entries: readonly StoreEntryInput<Spec, Validators, Params>[],

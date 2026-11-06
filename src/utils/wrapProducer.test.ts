@@ -720,6 +720,42 @@ describe("wrapProducer", () => {
       await gatedCache.close();
     });
 
+    for (const newerStoreFor of [undefined, 0]) {
+      it(`retains eligible duplicate-slot candidates when the newer duplicate has storeFor ${newerStoreFor}`, async () => {
+        const now = Date.now();
+        const produce = mock.fn(async () => ({
+          content: "primary",
+          directives: { freshUntilAge: 100 },
+          supplementalResources: [
+            {
+              id: "supplemental",
+              content: "older-fresh",
+              date: new Date(now - 2000),
+              directives: { freshUntilAge: 100 },
+            },
+            {
+              id: "supplemental",
+              content: "newer-stale",
+              date: new Date(now - 1000),
+              directives: {
+                freshUntilAge: 0,
+                ...(newerStoreFor === undefined
+                  ? {}
+                  : { storeFor: newerStoreFor }),
+              },
+            },
+          ],
+        }));
+        const wrapped = wrapProducer({ cache: gatedCache }, produce);
+        await wrapped({ id: "x" });
+        assert.equal(
+          (await wrapped({ id: "supplemental" })).content,
+          "older-fresh",
+        );
+        assert.equal(produce.mock.callCount(), 1);
+      });
+    }
+
     it("an immediate sequential repeat is a hit while the store is in flight: the producer runs once", async () => {
       const storeGet = mock.method(store, "getMany");
       const storeSpy = mock.method(gatedCache, "store");
