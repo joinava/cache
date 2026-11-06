@@ -344,17 +344,15 @@ export function mergeCacheLookups<
   lookups: readonly CacheLookupResult<Spec, Validators, Params>[],
 ): CacheLookupResult<Spec, Validators, Params> {
   return selectCacheLookup({
-    usable: lookups.flatMap((lookup) =>
-      lookup.usable === undefined ? [] : [lookup.usable],
-    ),
-    usableWhileRevalidate: lookups.flatMap((lookup) =>
-      lookup.usableWhileRevalidate === undefined
-        ? []
-        : [lookup.usableWhileRevalidate],
-    ),
-    usableIfError: lookups.flatMap((lookup) =>
-      lookup.usableIfError === undefined ? [] : [lookup.usableIfError],
-    ),
+    usable: lookups
+      .map((lookup) => lookup.usable)
+      .filter((entry) => entry !== undefined),
+    usableWhileRevalidate: lookups
+      .map((lookup) => lookup.usableWhileRevalidate)
+      .filter((entry) => entry !== undefined),
+    usableIfError: lookups
+      .map((lookup) => lookup.usableIfError)
+      .filter((entry) => entry !== undefined),
     validatable: lookups.flatMap((lookup) => lookup.validatable),
   }).result;
 }
