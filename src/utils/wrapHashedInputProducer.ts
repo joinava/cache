@@ -843,7 +843,7 @@ export function wrapBulkHashedInputProducer(
             ? {}
             : { directives: callOptions.directives }),
         })) as unknown as Parameters<typeof wrapped>[0],
-        { ...(signal ? { signal } : {}), ...(callOptions?.waitForStore === undefined ? {} : { waitForStore: callOptions.waitForStore }) },
+        callOptions,
       );
     } finally {
       ids.forEach((id) => registry.release(id));

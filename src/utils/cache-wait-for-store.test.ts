@@ -1,3 +1,4 @@
+import { setImmediate as nextTurn } from "node:timers/promises";
 import assert from "node:assert/strict";
 import { describe, it, mock } from "node:test";
 import {
@@ -102,9 +103,7 @@ describe("wrapBulkProducer waitForStore", () => {
 
     const settledBeforeRelease = await Promise.race([
       call.then(() => true),
-      new Promise<boolean>((resolve) => {
-        setImmediate(() => resolve(false));
-      }),
+      nextTurn(false),
     ]);
     assert.strictEqual(settledBeforeRelease, false);
 
@@ -228,7 +227,7 @@ describe("wrapBulkProducer waitForStore", () => {
       return results;
     });
     await store.started;
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await nextTurn();
     assert.strictEqual(state.settled, false);
 
     store.release();
@@ -274,9 +273,7 @@ describe("wrapBulkProducer waitForStore", () => {
 
     const riderSettledBeforeRelease = await Promise.race([
       riderCall.then(() => true),
-      new Promise<boolean>((resolve) => {
-        setImmediate(() => resolve(false));
-      }),
+      nextTurn(false),
     ]);
     assert.strictEqual(producerResults.length, 1);
     assert.strictEqual(producerCalls.mock.callCount(), 1);
@@ -300,9 +297,7 @@ describe("wrapBulkProducer waitForStore", () => {
 
     const settledBeforeRelease = await Promise.race([
       call.then(() => true),
-      new Promise<boolean>((resolve) => {
-        setImmediate(() => resolve(false));
-      }),
+      nextTurn(false),
     ]);
     assert.strictEqual(settledBeforeRelease, false);
 
