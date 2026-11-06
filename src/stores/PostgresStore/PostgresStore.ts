@@ -426,29 +426,26 @@ export default class PostgresStore<
         )
         .selectFrom("old").selectAll("old");
     const batchSize = 1_000;
-    let oldRows: readonly OldRow[];
-    try {
-      if (rows.length <= batchSize) {
-        // Keep the one-statement fast path for ordinary small cache writes.
-        oldRows = (await readOldAndUpsert(rows).execute()) as unknown as readonly OldRow[];
-      } else {
-        oldRows = await this.db.transaction().execute(async (trx) => {
-          const previous: OldRow[] = [];
-          // Sort the whole call before batching to preserve global lock order.
-          // Each batch reads only its own slots before replacing them.
-          for (let start = 0; start < rows.length; start += batchSize) {
-            const result = await trx.executeQuery<OldRow>(
-              readOldAndUpsert(rows.slice(start, start + batchSize)).compile(),
-            );
-            previous.push(...result.rows);
-          }
-          return previous;
-        });
-      }
-    } catch (error: unknown) {
+    // Keep the one-statement fast path for ordinary small cache writes.
+    const oldRows = (await (
+      rows.length <= batchSize
+        ? readOldAndUpsert(rows).execute()
+        : this.db.transaction().execute(async (trx) => {
+            const previous: OldRow[] = [];
+            // Sort the whole call before batching to preserve global lock order.
+            // Each batch reads only its own slots before replacing them.
+            for (let start = 0; start < rows.length; start += batchSize) {
+              const result = await trx.executeQuery<OldRow>(
+                readOldAndUpsert(rows.slice(start, start + batchSize)).compile(),
+              );
+              previous.push(...result.rows);
+            }
+            return previous;
+          })
+    ).catch((error: unknown) => {
       this.logError("failed to store entries", error);
       throw error;
-    }
+    })) as unknown as readonly OldRow[];
     this.logTrace("stored entries successfully");
 
     // Comparisons use each batch statement's pre-write snapshot.
