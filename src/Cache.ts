@@ -1,5 +1,5 @@
 import { timeSlicedMap } from "./utils/time-slicing.js";
-import { groupBy, sortBy, sumBy } from "es-toolkit";
+import { sumBy } from "es-toolkit";
 import { EventEmitter } from "events";
 import type { InvariantOf, ReadonlyDeep } from "type-fest";
 import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
@@ -7,7 +7,6 @@ import {
   cacheStoreEntryChannel,
   publishCacheRead,
   publishCacheStoreEntry,
-  type CacheReadOutcome,
 } from "./diagnostics.js";
 import type { ReadonlyConsumerRequest } from "./types/03_ConsumerRequest.js";
 import {
@@ -47,6 +46,11 @@ import {
   normalizeVary,
 } from "./utils/normalization.js";
 import * as entryUtils from "./utils/normalizedProducerResultResourceHelpers.js";
+import {
+  classifyCacheEntries,
+  type CacheLookupResult,
+  type CacheReadOutcome,
+} from "./utils/cacheHelpers.js";
 import {
   StoreReadBatcher,
   type ReadBatchOptions,
@@ -112,21 +116,6 @@ export class AmbiguousResourceTypeError extends Error {
     this.matchedResourceTypes = args.matchedResourceTypes;
   }
 }
-
-/**
- * The result of a cache lookup. MatchingSpecs is the subset of CacheSpec
- * variants whose id is compatible with the request's id (`Id`).
- */
-export type CacheLookupResult<
-  MatchingSpecs extends CacheSpec,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-> = {
-  usable?: Entry<MatchingSpecs, Validators, Params> | undefined;
-  usableWhileRevalidate?: Entry<MatchingSpecs, Validators, Params> | undefined;
-  usableIfError?: Entry<MatchingSpecs, Validators, Params> | undefined;
-  validatable: Entry<MatchingSpecs, Validators, Params>[];
-};
 
 /**
  * A backing store that supports `StoreSupportedTypes` and must cover
@@ -311,17 +300,6 @@ export default class Cache<
       options.normalizeParamValue ??
       (<K extends keyof Params>(_name: K, v: AnyParamValue) =>
         v as Params[K] & AnyParamValue);
-  }
-
-  private static bestEntry<
-    EntrySpec extends CacheSpec,
-    Validators extends AnyValidators,
-    Params extends AnyParams,
-  >(suitableEntries: readonly Entry<EntrySpec, Validators, Params>[]) {
-    // "When more than one suitable response is stored, a cache MUST use
-    // the most recent response (as determined by the Date header field)."
-    // https://tools.ietf.org/html/rfc7234#section-4
-    return sortBy(suitableEntries, [(it) => entryUtils.birthDate(it)]).at(-1);
   }
 
   // Create this as an instance member to get `this` binding
@@ -721,7 +699,10 @@ export default class Cache<
         it,
         now,
       );
-      return { entry, maxStoreForSeconds: calculateStoreFor(entry, now) };
+      return {
+        entry,
+        maxStoreForSeconds: entryUtils.calculateStoreFor(entry, now),
+      };
     });
 
     this.#logger(
@@ -795,6 +776,11 @@ export default class Cache<
     return this.#dataStore.delete(id);
   }
 
+  /** Whether close has started; pending-write overlays must not bypass closure. */
+  public get closed(): boolean {
+    return this.#closed;
+  }
+
   public async close(timeout?: number) {
     this.#closed = true;
     // A batched read that `get()` accepted before this call still runs: start
@@ -814,11 +800,10 @@ export default class Cache<
   /**
    * Processes cache entries for a single request, returning both the
    * CacheLookupResult and the {@link CacheReadOutcome} that describes it for
-   * the read channel. The outcome is returned rather than re-derived from
-   * `result` because this is where it is actually decided -- each branch below
-   * knows its own answer, including which entry (if any) it selected and hence
-   * which slot to name, so there is nothing to reconstruct. This is the core
-   * logic shared between get() and getMany().
+   * the read channel. Shared entry helpers own classification and selection,
+   * including the selected entry and diagnostic outcome. This method adds
+   * request-scoped logging for get() and getMany(). Pending-write lookups use
+   * the same helpers, so they cannot drift from the cache's selection rules.
    */
   #processCacheEntries<Id extends SpecOf<RT>["id"]>(
     entries: readonly Entry<SpecForId<SpecOf<RT>, Id>, Validators, Params>[],
@@ -829,74 +814,20 @@ export default class Cache<
     result: CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>;
     outcome: CacheReadOutcome;
   } {
-    const classifiedEntries = groupBy(entries, (it) =>
-      entryUtils.classify(it, directives, now),
+    const { result, outcome, classifiedEntries } = classifyCacheEntries(
+      entries,
+      directives,
+      now,
     );
-
     this.#logger("trace", "classified stored entries for request", {
       requestIndex: context.requestIndex,
       classifiedEntries,
     });
-
-    const logAndReturn = (
-      result: CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>,
-      outcome: CacheReadOutcome,
-    ) => {
-      this.#logger("trace", "chose/returned this data for request", {
-        requestIndex: context.requestIndex,
-        res: result,
-      });
-      return { result, outcome };
-    };
-
-    const usableEntries =
-      classifiedEntries[entryUtils.EntryClassification.Usable];
-
-    if (usableEntries) {
-      // Non-null assertion is safe because of groupBy mechanics.
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      const selected = Cache.bestEntry(usableEntries)!;
-      return logAndReturn(
-        { usable: selected, validatable: [] },
-        { found: "usable", vary: selected.vary },
-      );
-    }
-
-    const validatableEntries = entries.filter(entryUtils.isValidatable);
-
-    const usableWhileRevalidateEntries =
-      classifiedEntries[entryUtils.EntryClassification.UsableWhileRevalidate];
-
-    if (usableWhileRevalidateEntries) {
-      // Non-null assertion is safe because of groupBy mechanics.
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      const selected = Cache.bestEntry(usableWhileRevalidateEntries)!;
-      return logAndReturn(
-        {
-          usableWhileRevalidate: selected,
-          validatable: validatableEntries,
-        },
-        { found: "usable-while-revalidate", vary: selected.vary },
-      );
-    }
-
-    const usableIfErrorEntries =
-      classifiedEntries[entryUtils.EntryClassification.UsableIfError];
-
-    if (usableIfErrorEntries) {
-      // Non-null assertion is safe because of groupBy mechanics.
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      const selected = Cache.bestEntry(usableIfErrorEntries)!;
-      return logAndReturn(
-        { usableIfError: selected, validatable: validatableEntries },
-        { found: "usable-if-error", vary: selected.vary },
-      );
-    }
-
-    return logAndReturn(
-      { usableIfError: undefined, validatable: validatableEntries },
-      { found: "none" },
-    );
+    this.#logger("trace", "chose/returned this data for request", {
+      requestIndex: context.requestIndex,
+      res: result,
+    });
+    return { result, outcome };
   }
 }
 
@@ -918,33 +849,6 @@ type GetManyResults<
     Params
   >;
 };
-
-/**
- * Calculates the maximum amount of time -- in seconds! -- that the backing
- * store may store the entry. It considers the producer's requested storeFor
- * time, and when the data will become definitively useless.
- *
- * @param entry The entry who's time-to-store should be calculated
- * @param at The date when the entry will be stored. This effects how long it
- *   should be stored for because, as entries get closer to the end of their
- *   freshness lifetime, the suggested storeFor time may go down (when it isn't
- *   dictated by the producer's directives).
- */
-function calculateStoreFor(
-  entry: Entry<CacheSpec, AnyValidators, AnyParams>,
-  at: Date,
-) {
-  const producerStoreFor = entry.directives.storeFor;
-  const requestedStoreFor =
-    producerStoreFor !== undefined
-      ? producerStoreFor - entry.initialAge
-      : Infinity;
-
-  return Math.max(
-    0,
-    Math.min(requestedStoreFor, entryUtils.potentiallyUsefulFor(entry, at)),
-  );
-}
 
 /**
  * The one-entry registry {@link singleTypeCacheOptions} builds. Keyed by an

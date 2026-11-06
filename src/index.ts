@@ -10,11 +10,14 @@ export {
   default as Cache,
   singleTypeCacheOptions,
   UnclassifiableIdError,
-  type CacheLookupResult,
   type CacheOptions,
   type SingleTypeCacheOptionsBuilder,
   type SingleTypeRegistry,
 } from "./Cache.js";
+export type {
+  CacheLookupResult,
+  CacheReadOutcome,
+} from "./utils/cacheHelpers.js";
 export { default as MemoryStore } from "./stores/MemoryStore/MemoryStore.js";
 export { default as PostgresStore } from "./stores/PostgresStore/PostgresStore.js";
 export type {
@@ -91,7 +94,6 @@ export {
   cacheReadChannel,
   type CacheReadFound,
   type CacheReadFoundWithEntry,
-  type CacheReadOutcome,
   type CacheReadMessage,
   CACHE_STORE_ENTRY_CHANNEL_NAME,
   cacheStoreEntryChannel,

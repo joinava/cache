@@ -110,7 +110,8 @@ describe("NormalizedProducerResultResourceHelpers", () => {
             const { freshUntilAge, maxStale } = producerDirs;
             const initialAge = Math.min(MAX_INITIAL_AGE, freshUntilAge / 2);
             const freshEntry = dummyEntryData({ freshUntilAge }, initialAge);
-            const now = new Date();
+            // Evaluate at the entry timestamp, including freshUntilAge: 0.
+            const now = freshEntry.date;
 
             expect(sut.classify(freshEntry, { maxStale }, now)).to.eq(
               sut.EntryClassification.Usable,

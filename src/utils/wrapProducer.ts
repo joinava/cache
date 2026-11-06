@@ -3,7 +3,6 @@ import type { ReadonlyDeep } from "type-fest";
 import type { PublicInterface } from "type-party";
 
 import type Cache from "../Cache.js";
-import type { CacheLookupResult } from "../Cache.js";
 import {
   NoProducerForResourceTypeError,
   rethrowUnroutableWithCacheName,
@@ -31,13 +30,19 @@ import type {
   Logger,
   RequestPairedProducerResult,
   Vary,
-  PartialReadonlyConsumerRequest
+  PartialReadonlyConsumerRequest,
 } from "../types/index.js";
 import {
   collapsedInvocationTaskCreator,
   type CollapsedInvocation,
 } from "./collapsedTaskCreator.js";
-import { normalizeVary } from "./normalization.js";
+import { normalizeParams, normalizeVary } from "./normalization.js";
+import { PendingResources } from "./pendingResources.js";
+import {
+  classifyCacheEntries,
+  mergeCacheLookups,
+  type CacheLookupResult,
+} from "./cacheHelpers.js";
 import {
   completeRequest,
   primaryNormalizedResultResourceFromRequestPairedProducerResult,
@@ -53,7 +58,10 @@ import {
 export type OnStore = (stored: Promise<void>) => void;
 
 /** Bulk persistence settles every write before exposing the first failure. */
-export function notifyStore(stores: readonly Promise<void>[], onStore: OnStore | undefined): void {
+export function notifyStore(
+  stores: readonly Promise<void>[],
+  onStore: OnStore | undefined,
+): void {
   if (onStore === undefined) return;
   const stored = Promise.allSettled(stores).then((results) => {
     const failure = results.find((result) => result.status === "rejected");
@@ -224,7 +232,6 @@ export type CoveringProducer<
   Params extends AnyParams = AnyParams,
 > = ResourceTypeProducer<RT, Covered, Validators, Params> &
   CoveredTypesCarrier<RT, Covered>;
-
 
 /**
  * The conditionally-required {@link coveredTypes} carrier: optional when
@@ -460,13 +467,52 @@ export function throwUnreachableAbort(signal: AbortSignal | undefined): never {
  *
  * Critically, bailing out does NOT prevent the producer's result from being
  * stored: the collapsed invocation always fires a (non-awaited)
- * `cache.store()` after the producer resolves, so the work is never wasted.
- * The trade-off is that the producer itself cannot observe the signal to
- * cancel its own in-progress work (e.g., an outgoing HTTP request).
- * Supporting that would require either (a) aborting the shared task only
- * when *all* callers have aborted, which adds significant complexity, or (b)
- * giving up request collapsing for callers that pass a signal, which would
- * defeat its purpose.
+ * `cache.store()` after the producer resolves (see the next section), so the
+ * work is never wasted. The trade-off is that the producer itself cannot
+ * observe the signal to cancel its own in-progress work (e.g., an outgoing
+ * HTTP request). Supporting that would require either (a) aborting the shared
+ * task only when *all* callers have aborted, which adds significant
+ * complexity, or (b) giving up request collapsing for callers that pass a
+ * signal, which would defeat its purpose.
+ *
+ * ## The store is fire-and-forget; in-flight writes still count as hits
+ *
+ * The returned function resolves as soon as the producer has a value; the
+ * `cache.store()` of that value (primary and supplemental resources alike) is
+ * fired but NOT awaited, so a caller never waits on a store round trip and a
+ * failed write never fails the call (it is logged and dropped). The precise
+ * guarantee about repeated calls is then:
+ *
+ * - Identical calls that overlap the producer invocation share it, subject to
+ *   the collapse time window (request collapsing, above).
+ * - A call that arrives after the producer resolved but before its
+ *   `cache.store()` settled is answered from the wrapper's own in-memory
+ *   overlay of in-flight writes -- consulted before the cache read, and
+ *   honoring the request's params against each entry's `vary` and the
+ *   caller's directives through the same lookup rules as stored entries.
+ *   Every lookup consults the store and merges its candidates with a snapshot
+ *   of matching pending entries. A newer persisted fresh entry can therefore
+ *   beat an older pending fresh entry. Equal birth dates prefer the pending
+ *   candidate, which comes later in the combined candidate order.
+ *   Stale-while-revalidate starts a background refresh; stale-if-error serves
+ *   the selected entry only if production fails. The read diagnostic reports
+ *   the store lookup; the fetch diagnostic reports the combined result.
+ * - Once the store call settles the overlay forgets the entry, on success
+ *   (the store answers for it now) and on failure alike: a failed write is
+ *   never pinned, so the next call reads the store, misses, and runs the
+ *   producer again. An ongoing lookup retains its candidate snapshot across
+ *   the store read, including when a write settles during that read. Its
+ *   onStore promise still reports that candidate's persistence result.
+ * - The overlay is per wrapper instance and in-process. It does not cover a
+ *   different wrapper over the same cache or a different process.
+ *
+ * Await the promise passed to `onStore` when subsequent work requires
+ * persistence. Overlay hits and stale fallbacks expose the selected entry's
+ * original write. A stale return excludes its background refresh write;
+ * a successful foreground refresh exposes that refresh's write.
+ * Store shutdown guarantees differ: SQLite drains its writer, while MemoryStore
+ * and PostgresStore do not drain outstanding writes. Postgres callers own the
+ * database connection and must await persistence before closing that connection.
  *
  * @param options - The cache to wrap, plus the wrapping behaviour; see
  *   {@link WrapProducerOptions}. `options.cache` is where values returned by
@@ -513,6 +559,21 @@ export default function wrapProducer<
   type LooseResult = LooseResultFor<RT, Validators, Params>;
   type LooseEntry = LooseEntryFor<RT, Validators, Params>;
   type LooseLookupResult = LooseLookupResultFor<RT, Validators, Params>;
+
+  const normalizeVaryBound = (vary: Vary<Params>) =>
+    normalizeVary(cache.normalizeParamName, cache.normalizeParamValue, vary);
+  const normalizeParamsBound = (params: LooseRequest["params"]) =>
+    normalizeParams(
+      cache.normalizeParamName,
+      cache.normalizeParamValue,
+      params,
+    );
+
+  // Entries whose cache.store() is still in flight, consulted before every
+  // cache read; see the function docs and PendingResources.
+  const pendingResources = new PendingResources<SpecOf<RT>, Validators, Params>(
+    normalizeVaryBound,
+  );
 
   const callProducerAndLog = async (req: LooseRequest) => {
     logTrace("contacting producer", req);
@@ -598,6 +659,13 @@ export default function wrapProducer<
   // ensuring it isn't wasted even when the caller that triggered it has
   // aborted.
   //
+  // Because the store is not awaited, the collapse map alone leaves a window
+  // -- from the producer resolving until the write lands -- in which an
+  // identical call would read the store, miss, and run the producer again.
+  // The entries handed to cache.store() are therefore also held in
+  // `pendingResources` until that store call settles (see PendingResources), and
+  // the wrapped function consults that overlay before reading the store.
+  //
   // It also publishes the invocation's `produce` diagnostics message when the
   // producer settles (one message per actual invocation; collapsed callers
   // share one).
@@ -636,10 +704,21 @@ export default function wrapProducer<
       publishProduce("success");
 
       logTrace(`attempting to store response.`);
-      const stored = Promise.try(() => cache.store(
-        requestPairedProducerResultToResources(requestPairedResult, req.id),
-      )).then(() => { logTrace(`successfully stored producer's response`); });
-      void stored.catch((error: unknown) => { logTrace(`error storing producer's response`, error); });
+      // Share one fallback date with the actual write and any later pending
+      // lookup. Lazy normalization must not reset the resource's age.
+      const now = new Date();
+      const resources = requestPairedProducerResultToResources(
+        requestPairedResult,
+        req.id,
+      ).map((resource) => ({ ...resource, date: resource.date ?? now }));
+      const stored = Promise.try(() => cache.store(resources)).then(() => {
+        logTrace(`successfully stored producer's response`);
+      });
+      void stored.catch((error: unknown) => {
+        logTrace(`error storing producer's response`, error);
+      });
+
+      pendingResources.track(resources, stored, now);
 
       return { result: requestPairedResult, stored };
     },
@@ -648,9 +727,6 @@ export default function wrapProducer<
     // resourceType arg, which is derived from the id and so adds nothing.
     ([req]) => stableStringify(req),
   );
-
-  const normalizeVaryBound = (vary: Vary<Params>) =>
-    normalizeVary(cache.normalizeParamName, cache.normalizeParamValue, vary);
 
   const wrappedProducer = async function (
     req: PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>,
@@ -701,11 +777,39 @@ export default function wrapProducer<
       throwAborted(false);
     }
 
+    // This call retains the selected entries' write promises even after the
+    // shared overlay removes its records, so onStore can observe those writes.
+    const storePromisesByEntry = new Map<LooseEntry, Promise<void>>();
+    const lookupPending = (): LooseLookupResult => {
+      // Bypass calls return before this lookup runs. Closed caches and absent
+      // IDs contribute no pending candidates to the combined lookup.
+      if (cache.closed || !pendingResources.has(id)) return { validatable: [] };
+      const entries = pendingResources.matching(
+        id,
+        normalizeParamsBound(params),
+      );
+      entries.forEach(({ entry, stored }) =>
+        storePromisesByEntry.set(entry, stored),
+      );
+      return classifyCacheEntries(
+        entries.map(({ entry }) => entry),
+        directives,
+        new Date(),
+      ).result;
+    };
+    const storePromisesForEntry = (entry: LooseEntry): Promise<void>[] => {
+      const stored = storePromisesByEntry.get(entry);
+      return stored === undefined ? [] : [stored];
+    };
+
     // Awaits an in-flight producer invocation on behalf of this caller:
     // races the caller's wait against its signal, settles the fetch message,
     // and applies the caller's own usableIfError fallback on producer error.
     const settleOnProducer = async (
-      attached: { promise: Promise<{ result: LooseResult; stored: Promise<void> }>; rode: boolean },
+      attached: {
+        promise: Promise<{ result: LooseResult; stored: Promise<void> }>;
+        rode: boolean;
+      },
       usableIfError: LooseEntry | undefined,
     ): Promise<LooseEntry> => {
       let result: LooseEntry;
@@ -738,7 +842,10 @@ export default function wrapProducer<
             disposition: "served-stale-after-error",
             vary: usableIfError.vary,
           });
-          notifyStore([], callOptions?.onStore);
+          notifyStore(
+            storePromisesForEntry(usableIfError),
+            callOptions?.onStore,
+          );
           return usableIfError;
         }
 
@@ -776,29 +883,38 @@ export default function wrapProducer<
 
     logTrace(`asking the cache for a response`, { id, params });
 
-    const cacheRes = await cache
-      .get<SpecOf<RT>["id"]>(finalRequest, callOptions)
-      .catch((e: unknown) => {
-        // If the errror was the signal being aborted, propagate that (as an
-        // `aborted` settlement); don't assume a read failure.
-        if (signal?.aborted) {
-          throwAborted(false);
-        }
+    const cacheRes = await Promise.try(async () => {
+      // Keep the pending snapshot across the read. The store can snapshot a
+      // miss before a write lands and removes its entry from the overlay.
+      const pendingLookup = lookupPending();
+      const storedLookup = await cache.get<SpecOf<RT>["id"]>(
+        finalRequest,
+        callOptions,
+      );
+      // Stored candidates precede pending candidates. The canonical selector
+      // chooses the later pending candidate when birth dates are equal.
+      return mergeCacheLookups([storedLookup, pendingLookup]);
+    }).catch((e: unknown) => {
+      // If the errror was the signal being aborted, propagate that (as an
+      // `aborted` settlement); don't assume a read failure.
+      if (signal?.aborted) {
+        throwAborted(false);
+      }
 
-        switch (onCacheReadFailure) {
-          case "throw":
-            // The request never reached a disposition: no fetch message.
-            throw e;
-          case "call-producer":
-            // Pretend the cache returned no results so that we'll fall through to
-            // the producer
-            return {
-              validatable: [],
-            } satisfies LooseLookupResult as LooseLookupResult;
-          default:
-            assertUnreachable(onCacheReadFailure);
-        }
-      });
+      switch (onCacheReadFailure) {
+        case "throw":
+          // The request never reached a disposition: no fetch message.
+          throw e;
+        case "call-producer":
+          // Pretend the cache returned no results so that we'll fall through to
+          // the producer
+          return {
+            validatable: [],
+          } satisfies LooseLookupResult as LooseLookupResult;
+        default:
+          assertUnreachable(onCacheReadFailure);
+      }
+    });
 
     const { usable, usableIfError, usableWhileRevalidate } = cacheRes;
 
@@ -808,7 +924,7 @@ export default function wrapProducer<
         disposition: "served-from-cache",
         vary: usable.vary,
       });
-      notifyStore([], callOptions?.onStore);
+      notifyStore(storePromisesForEntry(usable), callOptions?.onStore);
       return usable;
     }
 
@@ -865,7 +981,10 @@ export default function wrapProducer<
         disposition: "served-stale-while-revalidating",
         vary: usableWhileRevalidate.vary,
       });
-      notifyStore([], callOptions?.onStore);
+      notifyStore(
+        storePromisesForEntry(usableWhileRevalidate),
+        callOptions?.onStore,
+      );
       return usableWhileRevalidate;
     }
 

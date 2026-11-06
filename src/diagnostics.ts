@@ -148,43 +148,6 @@ export type CacheReadFoundWithEntry =
 export type CacheReadFound = CacheReadFoundWithEntry | "none";
 
 /**
- * What a *completed* lookup contributes to its read message: the `found`
- * value paired with the variant it identifies, if any.
- *
- * Exported because `Cache`'s lookup evaluation returns one and spreads it into
- * the message -- the same reason {@link CacheFetchDisposition} is exported for
- * the wrappers. Pairing the two fields in one value is what keeps "which
- * `found` values carry a `vary`" stated once instead of re-derived at each of
- * the four publish sites.
- */
-export type CacheReadOutcome =
-  | {
-      found: CacheReadFoundWithEntry;
-      /**
-       * The SELECTED entry's (normalized) vary -- identifying the
-       * `(resourceId, vary)` variant this lookup matched, which is the same
-       * key `store-entry` reports for the write that put the value there (see
-       * {@link CacheStoreEntryMessage.vary}). Reads and stores can therefore
-       * be joined per variant rather than per id, which is the only way to
-       * get correct per-variant counts out of a varying producer.
-       *
-       * When more than one entry qualified, this is the one the lookup
-       * actually chose (the freshest), matching the entry handed back in the
-       * lookup result.
-       */
-      vary: Vary<AnyParams>;
-    }
-  | {
-      found: "none";
-      /**
-       * No entry was selected, so there is no variant to identify. Absent
-       * rather than `{}`, which identifies a real variant (see this file's
-       * overview).
-       */
-      vary?: undefined;
-    };
-
-/**
  * The message type published to the read diagnostics channel.
  *
  * A discriminated union rather than a flat object with an optional `error`:
@@ -192,10 +155,21 @@ export type CacheReadOutcome =
  * narrows on `found === "read-failed"` gets the error without a non-null
  * assertion, and one that handles the result cases can't reach for an `error`
  * that isn't there. `vary` rides the same discriminant -- present exactly on
- * the entry-selecting results.
+ * the entry-selecting results. This wire contract stays independent of the
+ * cache helpers' return types, so helper changes require an explicit decision
+ * about diagnostic message changes.
  */
 export type CacheReadMessage = Attribution & { resourceId: string } & (
-    | CacheReadOutcome
+    | {
+        found: CacheReadFoundWithEntry;
+        /** The selected entry's normalized vary identifies its stored variant. */
+        vary: Vary<AnyParams>;
+      }
+    | {
+        found: "none";
+        /** No entry was selected, so there is no variant. */
+        vary?: undefined;
+      }
     | {
         /**
          * The store threw; no lookup result exists. The error still propagates
@@ -261,6 +235,11 @@ export type CacheFetchDisposition =
       // so a same-millisecond entry has age 0 ≤ 0, and cross-pod clock skew
       // makes age *negative* -- the producer-stamped `date` is the birth
       // basis.)
+      //
+      // Wrappers combine persisted entries with their own pending writes.
+      // A pending entry can therefore produce a cache-served disposition even
+      // when the store read reported a miss. The read channel reports the
+      // actual store lookup; this channel reports the combined caller result.
       disposition:
         | "served-from-cache"
         | "served-stale-while-revalidating"
