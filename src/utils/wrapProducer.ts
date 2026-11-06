@@ -3,7 +3,6 @@ import type { ReadonlyDeep } from "type-fest";
 import type { PublicInterface } from "type-party";
 
 import type Cache from "../Cache.js";
-import type { CacheLookupResult } from "../Cache.js";
 import {
   NoProducerForResourceTypeError,
   rethrowUnroutableWithCacheName,
@@ -43,7 +42,11 @@ import {
   normalizeVary,
 } from "./normalization.js";
 import { PendingStores } from "./pendingStores.js";
-import { classifyCacheEntries, mergeCacheLookups } from "./cacheHelpers.js";
+import {
+  classifyCacheEntries,
+  mergeCacheLookups,
+  type CacheLookupResult,
+} from "./cacheHelpers.js";
 import {
   completeRequest,
   primaryNormalizedResultResourceFromRequestPairedProducerResult,

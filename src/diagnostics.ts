@@ -1,3 +1,4 @@
+import type { CacheReadOutcome } from "./utils/cacheHelpers.js";
 import type { Channel } from "node:diagnostics_channel";
 import * as diagnosticsChannel from "node:diagnostics_channel";
 import type { AnyParams } from "./types/01_Params.js";
@@ -128,10 +129,10 @@ export const CACHE_READ_CHANNEL_NAME = "@zingage/cache:read";
  * that can identify a variant: a selected entry has a `vary`, and "none" has
  * no entry to take one from.
  */
-export type CacheReadFoundWithEntry =
-  | "usable"
-  | "usable-while-revalidate"
-  | "usable-if-error";
+export type CacheReadFoundWithEntry = Exclude<
+  CacheReadOutcome["found"],
+  "none"
+>;
 
 /**
  * What a *completed* lookup found, evaluated against the request's directives:
@@ -145,44 +146,7 @@ export type CacheReadFoundWithEntry =
  * {@link CacheReadMessage}. Keeping the two apart lets the mapping from a
  * lookup result to a `found` value stay total.
  */
-export type CacheReadFound = CacheReadFoundWithEntry | "none";
-
-/**
- * What a *completed* lookup contributes to its read message: the `found`
- * value paired with the variant it identifies, if any.
- *
- * Exported because `Cache`'s lookup evaluation returns one and spreads it into
- * the message -- the same reason {@link CacheFetchDisposition} is exported for
- * the wrappers. Pairing the two fields in one value is what keeps "which
- * `found` values carry a `vary`" stated once instead of re-derived at each of
- * the four publish sites.
- */
-export type CacheReadOutcome =
-  | {
-      found: CacheReadFoundWithEntry;
-      /**
-       * The SELECTED entry's (normalized) vary -- identifying the
-       * `(resourceId, vary)` variant this lookup matched, which is the same
-       * key `store-entry` reports for the write that put the value there (see
-       * {@link CacheStoreEntryMessage.vary}). Reads and stores can therefore
-       * be joined per variant rather than per id, which is the only way to
-       * get correct per-variant counts out of a varying producer.
-       *
-       * When more than one entry qualified, this is the one the lookup
-       * actually chose (the freshest), matching the entry handed back in the
-       * lookup result.
-       */
-      vary: Vary<AnyParams>;
-    }
-  | {
-      found: "none";
-      /**
-       * No entry was selected, so there is no variant to identify. Absent
-       * rather than `{}`, which identifies a real variant (see this file's
-       * overview).
-       */
-      vary?: undefined;
-    };
+export type CacheReadFound = CacheReadOutcome["found"];
 
 /**
  * The message type published to the read diagnostics channel.

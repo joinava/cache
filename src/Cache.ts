@@ -7,7 +7,6 @@ import {
   cacheStoreEntryChannel,
   publishCacheRead,
   publishCacheStoreEntry,
-  type CacheReadOutcome,
 } from "./diagnostics.js";
 import type { ReadonlyConsumerRequest } from "./types/03_ConsumerRequest.js";
 import {
@@ -47,7 +46,11 @@ import {
   normalizeVary,
 } from "./utils/normalization.js";
 import * as entryUtils from "./utils/normalizedProducerResultResourceHelpers.js";
-import { classifyCacheEntries } from "./utils/cacheHelpers.js";
+import {
+  classifyCacheEntries,
+  type CacheLookupResult,
+  type CacheReadOutcome,
+} from "./utils/cacheHelpers.js";
 import {
   StoreReadBatcher,
   type ReadBatchOptions,
@@ -113,21 +116,6 @@ export class AmbiguousResourceTypeError extends Error {
     this.matchedResourceTypes = args.matchedResourceTypes;
   }
 }
-
-/**
- * The result of a cache lookup. MatchingSpecs is the subset of CacheSpec
- * variants whose id is compatible with the request's id (`Id`).
- */
-export type CacheLookupResult<
-  MatchingSpecs extends CacheSpec,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-> = {
-  usable?: Entry<MatchingSpecs, Validators, Params> | undefined;
-  usableWhileRevalidate?: Entry<MatchingSpecs, Validators, Params> | undefined;
-  usableIfError?: Entry<MatchingSpecs, Validators, Params> | undefined;
-  validatable: Entry<MatchingSpecs, Validators, Params>[];
-};
 
 /**
  * A backing store that supports `StoreSupportedTypes` and must cover

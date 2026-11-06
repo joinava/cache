@@ -1,13 +1,12 @@
 import { groupBy, sortBy } from "es-toolkit";
 import type { ReadonlyDeep } from "type-fest";
-import type { CacheLookupResult } from "../Cache.js";
-import type { CacheReadOutcome } from "../diagnostics.js";
 import type {
   AnyParams,
   AnyValidators,
   CacheSpec,
   ConsumerDirectives,
   Entry,
+  Vary,
 } from "../types/index.js";
 import {
   birthDate,
@@ -15,6 +14,58 @@ import {
   EntryClassification,
   isValidatable,
 } from "./normalizedProducerResultResourceHelpers.js";
+
+/**
+ * The result of a cache lookup. MatchingSpecs is the subset of CacheSpec
+ * variants whose id is compatible with the request's id (`Id`).
+ */
+export type CacheLookupResult<
+  MatchingSpecs extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = {
+  usable?: Entry<MatchingSpecs, Validators, Params> | undefined;
+  usableWhileRevalidate?: Entry<MatchingSpecs, Validators, Params> | undefined;
+  usableIfError?: Entry<MatchingSpecs, Validators, Params> | undefined;
+  validatable: Entry<MatchingSpecs, Validators, Params>[];
+};
+
+/**
+ * What a *completed* lookup contributes to its read message: the `found`
+ * value paired with the variant it identifies, if any.
+ *
+ * Exported because `Cache`'s lookup evaluation returns one and spreads it into
+ * the message -- the same reason `CacheFetchDisposition` is exported for
+ * the wrappers. Pairing the two fields in one value is what keeps "which
+ * `found` values carry a `vary`" stated once instead of re-derived at each of
+ * the four publish sites.
+ */
+export type CacheReadOutcome =
+  | {
+      found: "usable" | "usable-while-revalidate" | "usable-if-error";
+      /**
+       * The SELECTED entry's (normalized) vary -- identifying the
+       * `(resourceId, vary)` variant this lookup matched, which is the same
+       * key `store-entry` reports for the write that put the value there (see
+       * `CacheStoreEntryMessage.vary` in diagnostics.ts). Reads and stores can therefore
+       * be joined per variant rather than per id, which is the only way to
+       * get correct per-variant counts out of a varying producer.
+       *
+       * When more than one entry qualified, this is the one the lookup
+       * actually chose (the freshest), matching the entry handed back in the
+       * lookup result.
+       */
+      vary: Vary<AnyParams>;
+    }
+  | {
+      found: "none";
+      /**
+       * No entry was selected, so there is no variant to identify. Absent
+       * rather than `{}`, which identifies a real variant (see the diagnostics
+       * module overview).
+       */
+      vary?: undefined;
+    };
 
 /** Select the newest suitable entry; equal birth dates select the later candidate. */
 function bestEntry<
