@@ -37,8 +37,9 @@ type PendingEntry<
  *
  * This overlay closes that window: every entry handed to `cache.store()` is
  * held here until that store call settles, and the wrapper consults the
- * overlay before reading the store. Pending entries use the same freshness
- * classification and selection rules as stored entries.
+ * overlay before reading the store. The wrapper retains that snapshot across
+ * the read and merges it with the stored candidates. Both sources use the
+ * same freshness classification and selection rules.
  *
  * ## What it does NOT do
  *
@@ -49,7 +50,8 @@ type PendingEntry<
  *   call settles, on SUCCESS (the store now answers for it) and on FAILURE
  *   alike. A failed write is forgotten, not pinned: the next caller reads the
  *   store, misses, and runs the producer again, exactly as if the overlay
- *   did not exist.
+ *   did not exist. An already-running lookup can retain its own snapshot
+ *   after settlement; its persistence promise still reports the write result.
  * - It is per wrapper instance and in-process. Two wrappers over the same
  *   cache do not share it, and neither does another process.
  *

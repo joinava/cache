@@ -262,12 +262,10 @@ export type CacheFetchDisposition =
       // makes age *negative* -- the producer-stamped `date` is the birth
       // basis.)
       //
-      // One `served-from-cache` source is not a STORE read: a wrapper serves
-      // an entry it produced itself whose `cache.store()` is still in flight
-      // (see `wrapProducer`'s docs). That is a hit from the consumer's side
-      // -- the value the store read would have returned had the write landed
-      // -- so it is reported as one, but it emits no `read` message, since
-      // the read channel counts store reads.
+      // Wrappers combine persisted entries with their own pending writes.
+      // A pending entry can therefore produce a cache-served disposition even
+      // when the store read reported a miss. The read channel reports the
+      // actual store lookup; this channel reports the combined caller result.
       disposition:
         | "served-from-cache"
         | "served-stale-while-revalidating"

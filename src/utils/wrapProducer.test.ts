@@ -732,8 +732,8 @@ describe("wrapProducer", () => {
       const second = await gatedSut({ id: "x" });
       expect(producer.mock.callCount()).to.eq(1);
       expect(second.content).to.eq(first.content);
-      // Served from the overlay, so the store was not even read.
-      expect(storeGet.mock.callCount()).to.eq(1);
+      // The store is also consulted; its miss merges with the pending entry.
+      expect(storeGet.mock.callCount()).to.eq(2);
 
       // Once the write lands, the store answers and the overlay is empty:
       // the next call is a store read that hits.
@@ -742,7 +742,7 @@ describe("wrapProducer", () => {
       const third = await gatedSut({ id: "x" });
       expect(producer.mock.callCount()).to.eq(1);
       expect(third.content).to.eq(first.content);
-      expect(storeGet.mock.callCount()).to.eq(2);
+      expect(storeGet.mock.callCount()).to.eq(3);
     });
 
     it("a failed store does not pin the entry: the next call goes back to the producer", async () => {
@@ -1062,11 +1062,15 @@ describe("wrapProducer", () => {
       const refreshWrite = Promise.withResolvers<{
         stored: Promise<readonly unknown[]>;
       }>();
-      mock.method(gatedCache, "store", (entries: Parameters<TestCache["store"]>[0]) => {
-        const stored = originalStore(entries);
-        if (entries[0]?.content === "fresh") refreshWrite.resolve({ stored });
-        return stored;
-      });
+      mock.method(
+        gatedCache,
+        "store",
+        (entries: Parameters<TestCache["store"]>[0]) => {
+          const stored = originalStore(entries);
+          if (entries[0]?.content === "fresh") refreshWrite.resolve({ stored });
+          return stored;
+        },
+      );
       const wrapped = wrapProducer({ cache: gatedCache }, produce);
       await wrapped({ id: "x" });
       const captured = Promise.withResolvers<{ stored: Promise<void> }>();
@@ -1249,6 +1253,128 @@ describe("wrapProducer", () => {
       });
       assert.equal(persisted.usable?.content, pending.content);
     });
+
+    it("newer persisted fresh data beats an older pending fresh variant", async () => {
+      const newer = new Date();
+      const persisted = gatedCache.store([
+        {
+          id: "x",
+          content: "persisted-newer",
+          vary: { language: "en" },
+          date: newer,
+          directives: { freshUntilAge: 100 },
+        },
+      ]);
+      await Promise.resolve();
+      store.releaseAll();
+      await persisted;
+      const produce = mock.fn(async () => ({
+        content: "pending-older",
+        date: new Date(newer.valueOf() - 10_000),
+        directives: { freshUntilAge: 100 },
+      }));
+      const wrapped = wrapProducer({ cache: gatedCache }, produce);
+      await wrapped({ id: "x", directives: { maxAge: 0 } });
+      const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+      const hit = await wrapped(
+        { id: "x", params: { language: "en" } },
+        { onStore: (stored) => captured.resolve({ stored }) },
+      );
+      assert.equal(hit.content, "persisted-newer");
+      assert.equal(produce.mock.callCount(), 1);
+      // The selected stored entry has no pending persistence dependency.
+      await (
+        await captured.promise
+      ).stored;
+      assert.equal(store.gates.length, 1);
+    });
+
+    it("retains a pending snapshot when its write lands after the store snapshots a miss", async () => {
+      const firstWrite = Promise.withResolvers<{ stored: Promise<void> }>();
+      const first = await gatedSut(
+        { id: "x" },
+        { onStore: (stored) => firstWrite.resolve({ stored }) },
+      );
+      const readStarted = Promise.withResolvers<void>();
+      const releaseRead = Promise.withResolvers<void>();
+      const getMany = store.getMany.bind(store);
+      mock.method(
+        store,
+        "getMany",
+        async (...args: Parameters<typeof store.getMany>) => {
+          const snapshot = await getMany(...args);
+          readStarted.resolve();
+          await releaseRead.promise;
+          return snapshot;
+        },
+      );
+      const pending = gatedSut({ id: "x" });
+      await readStarted.promise;
+      store.releaseAll();
+      await (
+        await firstWrite.promise
+      ).stored;
+      releaseRead.resolve();
+      const hit = await pending;
+      assert.equal(hit.content, first.content);
+      assert.equal(producer.mock.callCount(), 1);
+    });
+
+    for (const behavior of ["throw", "call-producer", "abort"] as const) {
+      it(`pending variant normalization follows ${behavior}`, async () => {
+        const failure = new Error("normalization failed");
+        const aborted = new Error("caller aborted during normalization");
+        const controller = new AbortController();
+        const policy = behavior === "throw" ? "throw" : "call-producer";
+        const state = { fail: false };
+        const normalize = mock.fn<
+          NonNullable<
+            ConstructorParameters<typeof Cache>[0]["normalizeParamValue"]
+          >
+        >((_name, value) => {
+          if (state.fail) {
+            if (behavior === "abort") controller.abort(aborted);
+            throw failure;
+          }
+          return value;
+        });
+        const cache = new Cache({
+          store,
+          ...testCacheOptions,
+          normalizeParamValue: normalize,
+        });
+        const produce = mock.fn(async () =>
+          produce.mock.callCount() === 0
+            ? {
+                content: "pending-fr",
+                vary: { language: "fr" },
+                directives: { freshUntilAge: 100 },
+              }
+            : { content: "produced-again", directives: { freshUntilAge: 100 } },
+        );
+        const wrapped = wrapProducer(
+          { cache, onCacheReadFailure: policy },
+          produce,
+        );
+        await wrapped({ id: "x", params: { language: "fr" } });
+        state.fail = true;
+        const call = wrapped(
+          { id: "x", params: { language: "en" } },
+          { signal: controller.signal },
+        );
+        if (behavior === "abort") {
+          await assert.rejects(call, (error) => error === aborted);
+          assert.equal(produce.mock.callCount(), 1);
+        } else if (policy === "throw") {
+          await assert.rejects(call, (error) => error === failure);
+          assert.equal(produce.mock.callCount(), 1);
+        } else {
+          assert.equal((await call).content, "produced-again");
+          assert.equal(produce.mock.callCount(), 2);
+        }
+        await cache.close();
+      });
+    }
 
     it("the overlay is per wrapper: a second wrapper over the same cache reads the store", async () => {
       const otherProducer = mock.fn(async () => ({

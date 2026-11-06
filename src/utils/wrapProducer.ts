@@ -494,15 +494,19 @@ export function throwUnreachableAbort(signal: AbortSignal | undefined): never {
  *   overlay of in-flight writes -- consulted before the cache read, and
  *   honoring the request's params against each entry's `vary` and the
  *   caller's directives through the same lookup rules as stored entries.
- *   A fresh pending hit avoids the store read. Pending stale candidates merge
- *   with the store lookup, so a persisted fresh entry takes precedence.
+ *   Every lookup consults the store and merges its candidates with a snapshot
+ *   of matching pending entries. A newer persisted fresh entry can therefore
+ *   beat an older pending fresh entry. Equal birth dates prefer the pending
+ *   candidate, which comes later in the combined candidate order.
  *   Stale-while-revalidate starts a background refresh; stale-if-error serves
- *   the selected entry only if production fails. Fresh pending hits report
- *   `served-from-cache` and emit no `read` message because no read happened.
+ *   the selected entry only if production fails. The read diagnostic reports
+ *   the store lookup; the fetch diagnostic reports the combined result.
  * - Once the store call settles the overlay forgets the entry, on success
  *   (the store answers for it now) and on failure alike: a failed write is
  *   never pinned, so the next call reads the store, misses, and runs the
- *   producer again.
+ *   producer again. An ongoing lookup retains its candidate snapshot across
+ *   the store read, including when a write settles during that read. Its
+ *   onStore promise still reports that candidate's persistence result.
  * - The overlay is per wrapper instance and in-process. It does not cover a
  *   different wrapper over the same cache or a different process.
  *
@@ -804,7 +808,6 @@ export default function wrapProducer<
       const stored = pendingWrites.get(entry);
       return stored === undefined ? [] : [stored];
     };
-    const pendingLookup = lookupPending();
 
     // Awaits an in-flight producer invocation on behalf of this caller:
     // races the caller's wait against its signal, settles the fetch message,
@@ -882,48 +885,42 @@ export default function wrapProducer<
       );
     }
 
-    // A fresh pending entry can answer without a store read. Stale candidates
-    // must also consult the store so persisted fresh entries take precedence.
-    if (pendingLookup.usable !== undefined) {
-      const usable = pendingLookup.usable;
-      publishFetch(false, {
-        disposition: "served-from-cache",
-        vary: usable.vary,
-      });
-      notifyStore(pendingWritesFor(usable), callOptions?.onStore);
-      return usable;
-    }
-
     logTrace(`asking the cache for a response`, { id, params });
 
-    const storedLookup = await cache
-      .get<SpecOf<RT>["id"]>(finalRequest, callOptions)
-      .catch((e: unknown) => {
-        // If the errror was the signal being aborted, propagate that (as an
-        // `aborted` settlement); don't assume a read failure.
-        if (signal?.aborted) {
-          throwAborted(false);
-        }
+    const cacheRes = await Promise.try(async () => {
+      // Keep the pending snapshot across the read. The store can snapshot a
+      // miss before a write lands and removes its entry from the overlay.
+      const pendingLookup = lookupPending();
+      const storedLookup = await cache.get<SpecOf<RT>["id"]>(
+        finalRequest,
+        callOptions,
+      );
+      // Stored candidates precede pending candidates. The canonical selector
+      // chooses the later pending candidate when birth dates are equal.
+      return mergeCacheLookups([storedLookup, pendingLookup]);
+    }).catch((e: unknown) => {
+      // If the errror was the signal being aborted, propagate that (as an
+      // `aborted` settlement); don't assume a read failure.
+      if (signal?.aborted) {
+        throwAborted(false);
+      }
 
-        switch (onCacheReadFailure) {
-          case "throw":
-            // The request never reached a disposition: no fetch message.
-            throw e;
-          case "call-producer":
-            // Pretend the cache returned no results so that we'll fall through to
-            // the producer
-            return {
-              validatable: [],
-            } satisfies LooseLookupResult as LooseLookupResult;
-          default:
-            assertUnreachable(onCacheReadFailure);
-        }
-      });
+      switch (onCacheReadFailure) {
+        case "throw":
+          // The request never reached a disposition: no fetch message.
+          throw e;
+        case "call-producer":
+          // Pretend the cache returned no results so that we'll fall through to
+          // the producer
+          return {
+            validatable: [],
+          } satisfies LooseLookupResult as LooseLookupResult;
+        default:
+          assertUnreachable(onCacheReadFailure);
+      }
+    });
 
-    const { usable, usableIfError, usableWhileRevalidate } = mergeCacheLookups([
-      storedLookup,
-      lookupPending(),
-    ]);
+    const { usable, usableIfError, usableWhileRevalidate } = cacheRes;
 
     // We have ready-to-go content from the cache, w/ no refresh required.
     if (usable) {
