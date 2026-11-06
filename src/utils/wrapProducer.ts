@@ -49,6 +49,21 @@ import {
   raceWithSignal,
 } from "./utils.js";
 
+/** Observe foreground persistence without delaying the produced result. */
+export type OnStore = (stored: Promise<void>) => void;
+
+/** Bulk persistence settles every write before exposing the first failure. */
+export function notifyStore(stores: readonly Promise<void>[], onStore: OnStore | undefined): void {
+  if (onStore === undefined) return;
+  const stored = Promise.allSettled(stores).then((results) => {
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  });
+  // Callers may ignore persistence or attach a handler after the result arrives.
+  void stored.catch(() => {});
+  onStore(stored);
+}
+
 /**
  * Everything the producer wrappers need besides the producer itself, as one
  * bag. The cache is a FIELD rather than a separate positional argument because
@@ -346,7 +361,7 @@ type WrappedProducerFn<
   Params extends AnyParams,
 > = <Id extends IdOfResourceType<RT[Covered]>>(
   req: PartialReadonlyConsumerRequest<Params, Id>,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; onStore?: OnStore },
 ) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>>;
 
 /**
@@ -621,18 +636,12 @@ export default function wrapProducer<
       publishProduce("success");
 
       logTrace(`attempting to store response.`);
-      cache
-        .store(
-          requestPairedProducerResultToResources(requestPairedResult, req.id),
-        )
-        .then(() => {
-          logTrace(`successfully stored producer's response`);
-        })
-        .catch((e) => {
-          logTrace(`error storing producer's response`, e);
-        });
+      const stored = Promise.try(() => cache.store(
+        requestPairedProducerResultToResources(requestPairedResult, req.id),
+      )).then(() => { logTrace(`successfully stored producer's response`); });
+      void stored.catch((error: unknown) => { logTrace(`error storing producer's response`, error); });
 
-      return requestPairedResult;
+      return { result: requestPairedResult, stored };
     },
     collapseOverlappingRequestsTime * 1000,
     // The key covers the full request (id, params, directives) but not the
@@ -645,7 +654,7 @@ export default function wrapProducer<
 
   const wrappedProducer = async function (
     req: PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>,
-    callOptions?: { signal?: AbortSignal },
+    callOptions?: { signal?: AbortSignal; onStore?: OnStore },
   ): Promise<LooseEntry> {
     const signal = callOptions?.signal;
 
@@ -696,13 +705,13 @@ export default function wrapProducer<
     // races the caller's wait against its signal, settles the fetch message,
     // and applies the caller's own usableIfError fallback on producer error.
     const settleOnProducer = async (
-      attached: { promise: Promise<LooseResult>; rode: boolean },
+      attached: { promise: Promise<{ result: LooseResult; stored: Promise<void> }>; rode: boolean },
       usableIfError: LooseEntry | undefined,
     ): Promise<LooseEntry> => {
       let result: LooseEntry;
       try {
         result = await raceWithSignal(
-          attached.promise.then((it) =>
+          attached.promise.then(({ result: it }) =>
             primaryNormalizedResultResourceFromRequestPairedProducerResult<
               SpecOf<RT>,
               Validators,
@@ -729,6 +738,7 @@ export default function wrapProducer<
             disposition: "served-stale-after-error",
             vary: usableIfError.vary,
           });
+          notifyStore([], callOptions?.onStore);
           return usableIfError;
         }
 
@@ -743,6 +753,10 @@ export default function wrapProducer<
         disposition: "served-from-producer",
         directivesImpliedBypass,
       });
+      if (callOptions?.onStore !== undefined) {
+        const invocation = await attached.promise;
+        notifyStore([invocation.stored], callOptions.onStore);
+      }
       return result;
     };
 
@@ -794,6 +808,7 @@ export default function wrapProducer<
         disposition: "served-from-cache",
         vary: usable.vary,
       });
+      notifyStore([], callOptions?.onStore);
       return usable;
     }
 
@@ -850,6 +865,7 @@ export default function wrapProducer<
         disposition: "served-stale-while-revalidating",
         vary: usableWhileRevalidate.vary,
       });
+      notifyStore([], callOptions?.onStore);
       return usableWhileRevalidate;
     }
 

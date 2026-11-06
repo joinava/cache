@@ -1,3 +1,4 @@
+import type { OnStore } from "./wrapProducer.js";
 import pLimit from "p-limit";
 import type { ReadonlyDeep } from "type-fest";
 
@@ -307,7 +308,7 @@ type WrappedHashedInputProducer<
   Params extends AnyParams,
 > = (
   input: Input,
-  options?: { directives?: ConsumerDirectives; signal?: AbortSignal },
+  options?: { directives?: ConsumerDirectives; signal?: AbortSignal; onStore?: OnStore },
 ) => Promise<
   Entry<
     SpecForId<SpecOf<RT>, Extract<MintedId, SpecOf<RT>["id"]>>,
@@ -326,7 +327,7 @@ type WrappedBulkHashedInputProducer<
   ErrorType extends Error,
 > = (
   inputs: readonly Input[],
-  options?: { directives?: ConsumerDirectives; signal?: AbortSignal },
+  options?: { directives?: ConsumerDirectives; signal?: AbortSignal; onStore?: OnStore },
 ) => Promise<
   (
     | Entry<
@@ -609,7 +610,7 @@ export function wrapHashedInputProducer(
 
   return async (
     input: never,
-    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal },
+    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal; onStore?: OnStore },
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
@@ -639,7 +640,7 @@ export function wrapHashedInputProducer(
             ? {}
             : { directives: callOptions.directives }),
         } as unknown as Parameters<typeof wrapped>[0],
-        signal ? { signal } : undefined,
+        callOptions,
       );
     } finally {
       registry.release(id);
@@ -795,7 +796,7 @@ export function wrapBulkHashedInputProducer(
 
   return async (
     inputs: readonly never[],
-    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal },
+    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal; onStore?: OnStore },
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
@@ -842,7 +843,7 @@ export function wrapBulkHashedInputProducer(
             ? {}
             : { directives: callOptions.directives }),
         })) as unknown as Parameters<typeof wrapped>[0],
-        signal ? { signal } : undefined,
+        callOptions,
       );
     } finally {
       ids.forEach((id) => registry.release(id));

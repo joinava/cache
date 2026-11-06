@@ -47,7 +47,10 @@ import {
   type LooseRequestFor,
   type LooseResultFor,
   type WrapProducerOptions,
+  type OnStore,
+  notifyStore,
 } from "./wrapProducer.js";
+
 
 /**
  * The bulk counterpart of `wrapProducer`'s `CoveringProducer` (see it for why
@@ -96,7 +99,7 @@ type WrappedBulkProducerFn<
   >[],
 >(
   reqs: Reqs,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; onStore?: OnStore },
 ) => Promise<{
   -readonly [K in keyof Reqs]:
     | EntryForId<
@@ -332,20 +335,9 @@ export function wrapBulkProducer<
         resourcesToStore,
       });
 
-      if (resourcesToStore.length === 0) {
-        logTrace(`no resources to store; skipping store`);
-      } else {
-        cache
-          .store(resourcesToStore)
-          .then(() => {
-            logTrace(`successfully stored bulk producer's response`);
-          })
-          .catch((e) => {
-            logTrace(`error storing bulk producer's response`, e);
-          });
-      }
-
-      return requestPairedProducerResults;
+      const stored = (resourcesToStore.length === 0 ? Promise.resolve() : Promise.try(() => cache.store(resourcesToStore))).then(() => undefined);
+      void stored.catch((error: unknown) => { logTrace(`error storing bulk producer's response`, error); });
+      return { results: requestPairedProducerResults, stored };
     },
     collapseOverlappingRequestsTime * 1000,
     // See the COLLAPSE GRANULARITY note above.
@@ -357,11 +349,12 @@ export function wrapBulkProducer<
 
   const wrappedBulkProducer = async function (
     reqs: readonly PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>[],
-    callOptions?: { signal?: AbortSignal },
+    callOptions?: { signal?: AbortSignal; onStore?: OnStore },
   ): Promise<(LooseEntry | ErrorType)[]> {
     const signal = callOptions?.signal;
 
     if (reqs.length === 0) {
+      notifyStore([], callOptions?.onStore);
       return [];
     }
 
@@ -481,6 +474,7 @@ export function wrapBulkProducer<
       items: readonly RequestItem[];
       rode: boolean;
       handled: Promise<(LooseEntry | ErrorType)[]>;
+      stored: Promise<void>;
     };
 
     /**
@@ -513,8 +507,10 @@ export function wrapBulkProducer<
       const bareItems = groupItems.map(({ item }) => item);
       const attached = collapsedCallProducerAndStore(trigger, bareItems);
 
+      const stored = attached.promise.then(({ stored }) => stored, () => undefined);
+      void stored.catch(() => {});
       const handled = attached.promise.then(
-        (producerResults): (LooseEntry | ErrorType)[] =>
+        ({ results: producerResults }): (LooseEntry | ErrorType)[] =>
           // zip is safe: the invocation task validates result completeness
           // before resolving (an under-return rejects the whole invocation,
           // handled below)
@@ -568,7 +564,7 @@ export function wrapBulkProducer<
         },
       );
 
-      return [{ items: bareItems, rode: attached.rode, handled }];
+      return [{ items: bareItems, rode: attached.rode, handled, stored }];
     };
 
     // Kick off the bypass requests' producer calls immediately (in parallel
@@ -734,6 +730,8 @@ export function wrapBulkProducer<
         orderedResults[item.index] = result;
       });
     });
+
+    notifyStore(foregroundGroups.map((group) => group.stored), callOptions?.onStore);
 
     return orderedResults;
   };

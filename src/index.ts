@@ -109,3 +109,5 @@ export {
   variantMatchesRequest,
 } from "./utils/varyHelpers.js";
 export type { VariantKey, VaryKeys } from "./utils/varyHelpers.js";
+
+export type { OnStore } from "./utils/wrapProducer.js";
