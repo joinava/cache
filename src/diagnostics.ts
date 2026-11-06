@@ -1,4 +1,3 @@
-import type { CacheReadOutcome } from "./utils/cacheHelpers.js";
 import type { Channel } from "node:diagnostics_channel";
 import * as diagnosticsChannel from "node:diagnostics_channel";
 import type { AnyParams } from "./types/01_Params.js";
@@ -129,10 +128,10 @@ export const CACHE_READ_CHANNEL_NAME = "@zingage/cache:read";
  * that can identify a variant: a selected entry has a `vary`, and "none" has
  * no entry to take one from.
  */
-export type CacheReadFoundWithEntry = Exclude<
-  CacheReadOutcome["found"],
-  "none"
->;
+export type CacheReadFoundWithEntry =
+  | "usable"
+  | "usable-while-revalidate"
+  | "usable-if-error";
 
 /**
  * What a *completed* lookup found, evaluated against the request's directives:
@@ -146,7 +145,7 @@ export type CacheReadFoundWithEntry = Exclude<
  * {@link CacheReadMessage}. Keeping the two apart lets the mapping from a
  * lookup result to a `found` value stay total.
  */
-export type CacheReadFound = CacheReadOutcome["found"];
+export type CacheReadFound = CacheReadFoundWithEntry | "none";
 
 /**
  * The message type published to the read diagnostics channel.
@@ -156,10 +155,21 @@ export type CacheReadFound = CacheReadOutcome["found"];
  * narrows on `found === "read-failed"` gets the error without a non-null
  * assertion, and one that handles the result cases can't reach for an `error`
  * that isn't there. `vary` rides the same discriminant -- present exactly on
- * the entry-selecting results.
+ * the entry-selecting results. This wire contract stays independent of the
+ * cache helpers' return types, so helper changes require an explicit decision
+ * about diagnostic message changes.
  */
 export type CacheReadMessage = Attribution & { resourceId: string } & (
-    | CacheReadOutcome
+    | {
+        found: CacheReadFoundWithEntry;
+        /** The selected entry's normalized vary identifies its stored variant. */
+        vary: Vary<AnyParams>;
+      }
+    | {
+        found: "none";
+        /** No entry was selected, so there is no variant. */
+        vary?: undefined;
+      }
     | {
         /**
          * The store threw; no lookup result exists. The error still propagates
