@@ -135,6 +135,9 @@ export type Store<
    * An Error affects only its request slot. Reject the whole promise when the
    * operation cannot provide individual outcomes. Preserve request order and
    * return one slot per request, including duplicates.
+   * Consumers choose whether to keep successful slots or reject their own call.
+   * MemoryStore, PostgresStore, and SqliteStore currently reject the whole
+   * operation on read failure; they do not return per-request errors.
    *
    * This method follows the same matching logic as the `get` method: entries
    * are returned if their `vary` value is a subset of the provided params.
@@ -220,7 +223,11 @@ export type StoreGetManyRequest<
   readonly params: Readonly<NormalizedParams<Params>>;
 };
 
-/** ErrorType is never for stores that only report failures by rejecting the call. */
+/**
+ * Each request retains its position and ID-narrowed entry type. ErrorType
+ * defaults to Error; use never when an implementation returns only entry arrays
+ * and reports failures by rejecting the call.
+ */
 export type StoreGetManyResult<
   Spec extends CacheSpec,
   Reqs extends readonly { id: Spec["id"] }[],

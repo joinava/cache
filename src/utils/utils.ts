@@ -146,9 +146,11 @@ export async function keepMaxPerGroupCooperatively<T>(opts: {
  * This implementation is provided as a default fallback for stores that don't
  * implement their own optimized `getMany` method. It calls `store.get` for each
  * request with up to 10 concurrent operations to improve performance.
- * Each failed read becomes an Error in its request slot. Non-Error rejections
- * are wrapped with their original cause. Caller cancellation still rejects the
- * operation rather than becoming a partial read failure.
+ * Each failed read becomes an Error in its request slot while other reads
+ * continue. Existing Error objects keep their identity. Non-Error rejections
+ * are wrapped with their original cause. Request order and duplicate slots
+ * are preserved. Caller cancellation still rejects the operation rather than
+ * becoming a partial read failure.
  *
  * @param store The store instance to use for retrieving entries
  * @param requests Array of requests, each containing an id and params
