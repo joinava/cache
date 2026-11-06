@@ -146,12 +146,15 @@ export async function keepMaxPerGroupCooperatively<T>(opts: {
  * This implementation is provided as a default fallback for stores that don't
  * implement their own optimized `getMany` method. It calls `store.get` for each
  * request with up to 10 concurrent operations to improve performance.
+ * Each failed read becomes an Error in its request slot. Non-Error rejections
+ * are wrapped with their original cause. Caller cancellation still rejects the
+ * operation rather than becoming a partial read failure.
  *
  * @param store The store instance to use for retrieving entries
  * @param requests Array of requests, each containing an id and params
  * @param maxConcurrency Maximum number of concurrent requests (default: 10)
  * @returns A promise that resolves to a tuple-typed array, where each output
- *  slot holds the matching entries for the corresponding input request, with
+ *  slot holds matching entries or an Error for the corresponding request, with
  *  content narrowed to the spec variants compatible with that request's id.
  */
 export async function naiveGetMany<
@@ -167,27 +170,35 @@ export async function naiveGetMany<
   requests: Reqs,
   maxConcurrency = 10,
   options?: { signal?: AbortSignal },
-): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params, never>> {
+): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
   options?.signal?.throwIfAborted();
 
   const limit = pLimit(maxConcurrency);
 
-  // Process all requests with controlled concurrency
+  // Process all requests with controlled concurrency.
   const promises = requests.map(async (request) =>
-    limit(async () => store.get(request.id, request.params, options)),
+    limit(async () => {
+      options?.signal?.throwIfAborted();
+      try {
+        return await store.get(request.id, request.params, options);
+      } catch (error) {
+        options?.signal?.throwIfAborted();
+        return error instanceof Error
+          ? error
+          : new Error("Store.get failed", { cause: error });
+      }
+    }),
   );
 
   const res = await Promise.all(promises);
-  return res satisfies Entry<
-    SpecForId<Spec, Spec["id"]>,
-    Validators,
-    Params
-  >[][] as {
-    -readonly [K in keyof Reqs]: Entry<
-      SpecForId<Spec, Reqs[K]["id"]>,
-      Validators,
-      Params
-    >[];
+  options?.signal?.throwIfAborted();
+  return res satisfies (
+    | Entry<SpecForId<Spec, Spec["id"]>, Validators, Params>[]
+    | Error
+  )[] as {
+    -readonly [K in keyof Reqs]:
+      | Entry<SpecForId<Spec, Reqs[K]["id"]>, Validators, Params>[]
+      | Error;
   };
 }
 
