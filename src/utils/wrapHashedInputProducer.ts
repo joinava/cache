@@ -1,4 +1,4 @@
-import type { WaitForStoreOptions } from "./wrapBulkProducer.js";
+import type { WaitForStoreOptions } from "./wrapProducer.js";
 import pLimit from "p-limit";
 import type { ReadonlyDeep } from "type-fest";
 
@@ -308,7 +308,7 @@ type WrappedHashedInputProducer<
   Params extends AnyParams,
 > = (
   input: Input,
-  options?: { directives?: ConsumerDirectives; signal?: AbortSignal },
+  options?: { directives?: ConsumerDirectives; signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
 ) => Promise<
   Entry<
     SpecForId<SpecOf<RT>, Extract<MintedId, SpecOf<RT>["id"]>>,
@@ -610,7 +610,7 @@ export function wrapHashedInputProducer(
 
   return async (
     input: never,
-    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal },
+    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
@@ -640,7 +640,7 @@ export function wrapHashedInputProducer(
             ? {}
             : { directives: callOptions.directives }),
         } as unknown as Parameters<typeof wrapped>[0],
-        signal ? { signal } : undefined,
+        callOptions,
       );
     } finally {
       registry.release(id);

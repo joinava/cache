@@ -49,6 +49,28 @@ import {
   raceWithSignal,
 } from "./utils.js";
 
+/** A bounded wait for this call's foreground persistence. Failures remain callback outcomes. */
+export type WaitForStoreOptions = {
+  maxWaitMs: number;
+  onUnstored?: (outcome: { reason: "store-failed" | "producer-error"; error: unknown } | { reason: "timed-out" }) => void;
+};
+export type StoreOutcome = { ok: true } | { ok: false; reason: "store-failed" | "producer-error"; error: unknown };
+
+
+/** Keep shared persistence alive while each caller owns its timeout and abort. */
+export async function waitForStores(stores: readonly Promise<StoreOutcome>[], wait: WaitForStoreOptions, signal?: AbortSignal): Promise<void> {
+  const timeout = Promise.withResolvers<{ reason: "timed-out" }>();
+  const timer = setTimeout(() => timeout.resolve({ reason: "timed-out" }), wait.maxWaitMs);
+  try {
+    const completion = Promise.all(stores).then((outcomes) => outcomes.find((outcome) => !outcome.ok) ?? { ok: true } satisfies StoreOutcome);
+    const outcome = await raceWithSignal(Promise.race([completion, timeout.promise]), signal);
+    if ("reason" in outcome) {
+      if (outcome.reason === "timed-out") wait.onUnstored?.({ reason: "timed-out" });
+      else wait.onUnstored?.({ reason: outcome.reason, error: outcome.error });
+    }
+  } finally { clearTimeout(timer); }
+}
+
 /**
  * Everything the producer wrappers need besides the producer itself, as one
  * bag. The cache is a FIELD rather than a separate positional argument because
@@ -346,7 +368,7 @@ type WrappedProducerFn<
   Params extends AnyParams,
 > = <Id extends IdOfResourceType<RT[Covered]>>(
   req: PartialReadonlyConsumerRequest<Params, Id>,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
 ) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>>;
 
 /**
@@ -621,18 +643,14 @@ export default function wrapProducer<
       publishProduce("success");
 
       logTrace(`attempting to store response.`);
-      cache
-        .store(
-          requestPairedProducerResultToResources(requestPairedResult, req.id),
-        )
-        .then(() => {
-          logTrace(`successfully stored producer's response`);
-        })
-        .catch((e) => {
-          logTrace(`error storing producer's response`, e);
-        });
+      const stored: Promise<StoreOutcome> = Promise.try(() => cache.store(
+        requestPairedProducerResultToResources(requestPairedResult, req.id),
+      )).then(
+        () => { logTrace(`successfully stored producer's response`); return { ok: true }; },
+        (error: unknown) => { logTrace(`error storing producer's response`, error); return { ok: false, reason: "store-failed", error }; },
+      );
 
-      return requestPairedResult;
+      return { result: requestPairedResult, stored };
     },
     collapseOverlappingRequestsTime * 1000,
     // The key covers the full request (id, params, directives) but not the
@@ -645,7 +663,7 @@ export default function wrapProducer<
 
   const wrappedProducer = async function (
     req: PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>,
-    callOptions?: { signal?: AbortSignal },
+    callOptions?: { signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
   ): Promise<LooseEntry> {
     const signal = callOptions?.signal;
 
@@ -696,13 +714,13 @@ export default function wrapProducer<
     // races the caller's wait against its signal, settles the fetch message,
     // and applies the caller's own usableIfError fallback on producer error.
     const settleOnProducer = async (
-      attached: { promise: Promise<LooseResult>; rode: boolean },
+      attached: { promise: Promise<{ result: LooseResult; stored: Promise<StoreOutcome> }>; rode: boolean },
       usableIfError: LooseEntry | undefined,
     ): Promise<LooseEntry> => {
       let result: LooseEntry;
       try {
         result = await raceWithSignal(
-          attached.promise.then((it) =>
+          attached.promise.then(({ result: it }) =>
             primaryNormalizedResultResourceFromRequestPairedProducerResult<
               SpecOf<RT>,
               Validators,
@@ -729,6 +747,7 @@ export default function wrapProducer<
             disposition: "served-stale-after-error",
             vary: usableIfError.vary,
           });
+          callOptions?.waitForStore?.onUnstored?.({ reason: "producer-error", error });
           return usableIfError;
         }
 
@@ -743,6 +762,10 @@ export default function wrapProducer<
         disposition: "served-from-producer",
         directivesImpliedBypass,
       });
+      if (callOptions?.waitForStore !== undefined) {
+        const invocation = await attached.promise;
+        await waitForStores([invocation.stored], callOptions.waitForStore, signal);
+      }
       return result;
     };
 

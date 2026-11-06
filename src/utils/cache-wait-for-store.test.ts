@@ -6,6 +6,9 @@ import {
   MemoryStore,
   singleTypeCacheOptions,
   wrapBulkProducer,
+  wrapProducer,
+  wrapHashedInputProducer,
+  wrapBulkHashedInputProducer,
 } from "../index.js";
 
 function deferred() {
@@ -323,4 +326,48 @@ describe("wrapBulkProducer waitForStore", () => {
     store.release();
     await store.stored;
   });
+});
+
+
+describe("persistence waits across all producer wrappers", () => {
+  for (const kind of ["single", "bulk", "hashed", "bulk-hashed"] as const) {
+    it(`${kind} waits for its store before returning`, async () => {
+      const store = makeGatedMemoryStore();
+      const cache = new Cache(singleTypeCacheOptions<string>()({ name: kind, store: store.store }));
+      const options = { waitForStore: { maxWaitMs: 1_000 } };
+      const result = { content: "value", directives: { freshUntilAge: 60 } };
+      const call = kind === "single"
+        ? wrapProducer({ cache }, async () => result)({ id: "key" }, options)
+        : kind === "bulk"
+          ? wrapBulkProducer({ cache }, async (requests) => requests.map(() => result))([{ id: "key" }], options)
+          : kind === "hashed"
+            ? wrapHashedInputProducer({ cache, hashInput: (input: string) => input, produce: async () => result })("key", options)
+            : wrapBulkHashedInputProducer({ cache, hashInput: (input: string) => input, produce: async (inputs) => inputs.map(() => result) })(["key"], options);
+      await store.started;
+      assert.equal(await Promise.race([call.then(() => true), nextTurn(false)]), false);
+      store.release();
+      await call;
+      assert.equal(store.isStored(), true);
+      await cache.close();
+    });
+  }
+});
+
+
+it("single producer reports failed persistence when a producer error serves stale content", async () => {
+  const cache = new Cache(singleTypeCacheOptions<string>()({ name: "stale-fallback", store: new MemoryStore() }));
+  await cache.store([{ id: "key", content: "stale", directives: { freshUntilAge: 60 } }]);
+  const originalGet = cache.get.bind(cache);
+  cache.get = async (request, options) => {
+    const lookup = await originalGet(request, options);
+    assert.ok(lookup.usable);
+    return { validatable: [], usableIfError: lookup.usable };
+  };
+  const error = new Error("producer unavailable");
+  const onUnstored = mock.fn();
+  const produce = wrapProducer({ cache }, async () => { throw error; });
+  const result = await produce({ id: "key" }, { waitForStore: { maxWaitMs: 1_000, onUnstored } });
+  assert.equal(result.content, "stale");
+  assert.deepEqual(onUnstored.mock.calls[0]?.arguments, [{ reason: "producer-error", error }]);
+  await cache.close();
 });

@@ -47,14 +47,11 @@ import {
   type LooseRequestFor,
   type LooseResultFor,
   type WrapProducerOptions,
+  type WaitForStoreOptions,
+  type StoreOutcome,
+  waitForStores,
 } from "./wrapProducer.js";
 
-/** A bounded wait for this call's foreground persistence. Failures remain callback outcomes. */
-export type WaitForStoreOptions = {
-  maxWaitMs: number;
-  onUnstored?: (outcome: { reason: "store-failed" | "producer-error"; error: unknown } | { reason: "timed-out" }) => void;
-};
-type StoreOutcome = { ok: true } | { ok: false; reason: "store-failed" | "producer-error"; error: unknown };
 
 /**
  * The bulk counterpart of `wrapProducer`'s `CoveringProducer` (see it for why
@@ -737,19 +734,7 @@ export function wrapBulkProducer<
     });
 
     if (callOptions?.waitForStore !== undefined) {
-      const wait = callOptions.waitForStore;
-      const timeout = Promise.withResolvers<{ reason: "timed-out" }>();
-      const timer = setTimeout(() => timeout.resolve({ reason: "timed-out" }), wait.maxWaitMs);
-      try {
-        const completion = Promise.all(foregroundGroups.map((group) => group.stored)).then((outcomes) => outcomes.find((outcome) => !outcome.ok) ?? { ok: true } satisfies StoreOutcome);
-        const outcome = await raceWithSignal(Promise.race([completion, timeout.promise]), signal);
-        if ("reason" in outcome) {
-          if (outcome.reason === "timed-out") wait.onUnstored?.({ reason: "timed-out" });
-          else wait.onUnstored?.({ reason: outcome.reason, error: outcome.error });
-        }
-      } finally {
-        clearTimeout(timer);
-      }
+      await waitForStores(foregroundGroups.map((group) => group.stored), callOptions.waitForStore, signal);
     }
 
     return orderedResults;
