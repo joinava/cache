@@ -314,3 +314,21 @@ const result = await produce(request, {
 });
 await stored; // Optional: require persistence before starting subsequent work.
 ```
+
+### Partial store reads
+
+`Store.getMany()` returns one ordered slot per request. A slot contains an array
+of matching entries, an empty array for a miss, or an `Error` for that request.
+Stores may still reject the entire promise when they cannot provide individual
+outcomes. Duplicate requests keep separate result slots.
+
+Automatic `Cache.get()` batching rejects only callers whose slots contain errors.
+Other callers retain their hits or misses. Public `Cache.getMany()` keeps its
+existing all-or-nothing result contract: an error slot rejects the whole call,
+using the first error in request order. Producer contracts do not change.
+
+Built-in stores and `naiveGetMany` retain their existing whole-call rejection
+behavior and narrower successful result types. This change enables custom stores
+to provide partial outcomes; it does not add new partial-failure modes to built-in
+stores. `StoreGetManyResult` defaults to `Error` slots; its optional final type
+parameter is `never` for implementations that return only entry arrays.

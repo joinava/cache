@@ -425,6 +425,8 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         { id: "one", params: unmatchedParams },
       ] as const);
 
+      assert.ok(!(result[0] instanceof Error));
+      assert.ok(!(result[3] instanceof Error));
       assert.deepEqual(result[0].map(({ content }) => content.value).sort(), [
         "one-any",
         "one-json",
@@ -483,7 +485,8 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         const single = await store.get(id, matchingParams);
         const [bulk] = await store.getMany([{ id, params: matchingParams }]);
         assert.ok(single.every((entry) => entry.id === id));
-        assert.ok(bulk!.every((entry) => entry.id === id));
+        assert.ok(bulk !== undefined && !(bulk instanceof Error));
+        assert.ok(bulk.every((entry) => entry.id === id));
         if (id !== "\ud800x") {
           assert.deepEqual(single, []);
           assert.deepEqual(bulk, []);
@@ -561,7 +564,8 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
           const [bulk] = await store.getMany([
             { id: "stored-vary-unicode", params },
           ]);
-          for (const entry of [...single, ...bulk!]) {
+          assert.ok(bulk !== undefined && !(bulk instanceof Error));
+          for (const entry of [...single, ...bulk]) {
             assert.equal(entry.id, "stored-vary-unicode");
             assert.equal(entry.vary.format, requestedFormat);
             assert.equal(entry.content.value, requestedFormat);
@@ -662,7 +666,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
               "a request built from a stored entry's vary must match it",
             );
             assert.deepEqual(
-              viaGetMany.map(inCanonicalOrder),
+              viaGetMany.map((entries) => {
+                assert.ok(!(entries instanceof Error));
+                return inCanonicalOrder(entries);
+              }),
               viaGet.map(inCanonicalOrder),
             );
           },
@@ -731,7 +738,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
 
       assert.deepEqual(
         result
-          .flatMap((entries) => entries.map(({ content }) => content.value))
+          .flatMap((entries) => {
+            assert.ok(!(entries instanceof Error));
+            return entries.map(({ content }) => content.value);
+          })
           .sort(),
         ids.map((_, i) => `value:${i}`).sort(),
       );

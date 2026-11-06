@@ -616,6 +616,12 @@ export default class Cache<
         })),
         options,
       )
+      .then((results) =>
+        results.map((entries) => {
+          if (entries instanceof Error) throw entries;
+          return entries;
+        }),
+      )
       .catch((error: unknown) => {
         // One `read-failed` message PER REQUEST, not one per call: the channel
         // is one-message-per-lookup, and a batch read is N lookups that all

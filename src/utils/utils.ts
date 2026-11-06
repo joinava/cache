@@ -167,7 +167,7 @@ export async function naiveGetMany<
   requests: Reqs,
   maxConcurrency = 10,
   options?: { signal?: AbortSignal },
-): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
+): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params, never>> {
   options?.signal?.throwIfAborted();
 
   const limit = pLimit(maxConcurrency);

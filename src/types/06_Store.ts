@@ -131,7 +131,10 @@ export type Store<
    * This method returns stored cache entries for multiple resources in a single
    * operation. It takes an array of requests, each containing an `id` and
    * `params`, and returns an array whose elements are arrays of matching
-   * entries for each request.
+   * entries or an Error for each request. A miss is an empty array.
+   * An Error affects only its request slot. Reject the whole promise when the
+   * operation cannot provide individual outcomes. Preserve request order and
+   * return one slot per request, including duplicates.
    *
    * This method follows the same matching logic as the `get` method: entries
    * are returned if their `vary` value is a subset of the provided params.
@@ -217,16 +220,15 @@ export type StoreGetManyRequest<
   readonly params: Readonly<NormalizedParams<Params>>;
 };
 
+/** ErrorType is never for stores that only report failures by rejecting the call. */
 export type StoreGetManyResult<
   Spec extends CacheSpec,
   Reqs extends readonly { id: Spec["id"] }[],
   Validators extends AnyValidators,
   Params extends AnyParams,
+  ErrorType extends Error = Error,
 > = {
-  -readonly [K in keyof Reqs]: EntryForId<
-    Spec,
-    Validators,
-    Params,
-    Reqs[K]["id"]
-  >[];
+  -readonly [K in keyof Reqs]:
+    | EntryForId<Spec, Validators, Params, Reqs[K]["id"]>[]
+    | ErrorType;
 };
