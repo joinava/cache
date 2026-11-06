@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe, it, mock } from "node:test";
 import pg from "pg";
+import { normalizeVary } from "../../utils/normalization.js";
 import type {
   AnyValidators,
   CacheSpec,
@@ -140,19 +141,18 @@ describe(
             23_000,
           );
           const inserts = observed.statements.filter((statement) =>
-            /^insert into /i.test(statement.sql),
+            /^with "old"/i.test(statement.sql),
           );
           assert.equal(inserts.length, 23);
           assert.ok(
-            inserts.every((statement) => statement.parameters.length <= 3_000),
+            inserts.every((statement) => statement.parameters.length <= 5_000),
           );
           const metadata = observed.statements.filter(
             (statement) =>
               /^select /i.test(statement.sql) &&
               statement.sql.includes("'validators'"),
           );
-          assert.equal(metadata.length, 1);
-          assert.equal(metadata[0]!.parameters.length, 1);
+          assert.equal(metadata.length, 0);
           const rows = await f.pool.query<{ count: number }>(
             `select count(*)::int as count from ${f.qualified}`,
           );
@@ -177,6 +177,31 @@ describe(
       },
     );
 
+    it("compares only each batch's slots when one id has variants across batches", async () => {
+      const f = await fixture();
+      const entries = Array.from({ length: 1_001 }, (_, index) => {
+        const value = input("shared", 1);
+        return {
+          ...value,
+          entry: {
+            ...value.entry,
+            vary: normalizeVary<Params>((name) => name, (_name, item) => String(item), { variant: index }),
+          },
+        };
+      });
+      try {
+        await f.store.store(entries);
+        const results = await f.store.store(entries.map((value) => ({
+          ...value,
+          entry: { ...value.entry, validators: { etag: "2" } },
+        })));
+        assert.equal(results.length, entries.length);
+        assert.ok(results.every((result) => result.relationshipToExistingStoredData === "changed"));
+      } finally {
+        await f.cleanup();
+      }
+    });
+
     it("rolls every batch back if a later batch fails", async () => {
       const f = await fixture();
       await f.store.store([input("id:00000", 1)]);
@@ -199,7 +224,7 @@ describe(
         );
         assert.equal(
           observed.statements.filter((statement) =>
-            /^insert into /i.test(statement.sql),
+            /^with "old"/i.test(statement.sql),
           ).length,
           2,
         );
@@ -221,7 +246,7 @@ describe(
       }
     });
 
-    it("compares every batch against one pre-write metadata snapshot", async () => {
+    it("compares each batch against its own pre-write metadata snapshot", async () => {
       const f = await fixture();
       const keys = Array.from(
         { length: 2_001 },
@@ -231,7 +256,7 @@ describe(
       const lateId = keys[1_500]!;
       const progress = { writes: 0, interfered: false };
       const observed = observeQueries((statement) => {
-        if (/^insert into /i.test(statement.sql)) {
+        if (/^with "old"/i.test(statement.sql)) {
           progress.writes += 1;
           if (progress.writes === 2) {
             return f.pool
@@ -252,7 +277,7 @@ describe(
         );
         assert.equal(progress.interfered, true);
         assert.deepEqual(results[1_500], {
-          relationshipToExistingStoredData: "unchanged",
+          relationshipToExistingStoredData: "changed",
         });
         assert.deepEqual(results[0], {
           relationshipToExistingStoredData: "changed",
@@ -295,7 +320,7 @@ describe(
         const state = { firstWrites: 0 };
         const observed = observeQueries((statement) => {
           if (
-            /^insert into /i.test(statement.sql) &&
+            (/^with "old"/i.test(statement.sql) || /^insert into /i.test(statement.sql)) &&
             statement.sql.includes(f.qualified) &&
             state.firstWrites < 2
           ) {
@@ -312,13 +337,13 @@ describe(
           ]);
           const newWrites = observed.statements.filter(
             (statement) =>
-              /^insert into /i.test(statement.sql) &&
+              /^with "old"/i.test(statement.sql) &&
               statement.parameters.length > 0 &&
-              JSON.parse(String(statement.parameters[2])).content.value === 2,
+              JSON.parse(String(statement.parameters[statement.parameters.length * 2 / 5 + 2])).content.value === 2,
           );
           assert.deepEqual(
             newWrites.flatMap((statement) =>
-              statement.parameters.filter(
+              statement.parameters.slice(statement.parameters.length * 2 / 5).filter(
                 (_parameter, index) => index % 3 === 0,
               ),
             ),

@@ -381,10 +381,8 @@ export default class PostgresStore<
     // concurrent calls whose batches share >= 2 slots in DIFFERENT orders
     // could otherwise deadlock (each holding a row the other is waiting on).
     // With a consistent order, the later call just waits for the earlier one.
-    const resourceIds = new Set<string>();
     const rows = await sortCooperatively(
       await timeSlicedMap(deduped, ({ it }) => {
-        resourceIds.add(it.entry.id);
         return {
           resource_id: it.entry.id,
           vary: this.serializeVary(it.entry.vary),
@@ -407,57 +405,44 @@ export default class PostgresStore<
       vary: Readonly<NormalizedVary<Params>>;
       validators: Partial<Validators>;
     };
-    const oldQuery = this.db
-      .selectFrom(this.tableName)
-      .select((eb) => [
-        "resource_id",
-        "vary",
-        sql<Partial<Validators>>`${eb.ref("entry")} -> 'validators'`.as(
-          "validators",
-        ),
-      ]);
-    const upsert = (batch: typeof rows) =>
+    const readOldAndUpsert = (batch: typeof rows) =>
       this.db
-        .insertInto(this.tableName)
-        .values(batch)
-        .onConflict((oc) =>
-          oc.columns(["resource_id", "vary"])
-            .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") })),
-        );
+        .with("old", (db) =>
+          db.selectFrom(this.tableName)
+            .where((eb) => eb.or(batch.map((row) => eb.and([
+              eb("resource_id", "=", row.resource_id),
+              eb("vary", "=", sql<Readonly<NormalizedVary<Params>>>`${row.vary}::jsonb`),
+            ]))))
+            .select((eb) => [
+              "resource_id",
+              "vary",
+              sql<Partial<Validators>>`${eb.ref("entry")} -> 'validators'`.as("validators"),
+            ]),
+        )
+        .with("upsert", (db) =>
+          db.insertInto(this.tableName).values(batch)
+            .onConflict((oc) => oc.columns(["resource_id", "vary"])
+              .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") }))),
+        )
+        .selectFrom("old").selectAll("old");
     const batchSize = 1_000;
     let oldRows: readonly OldRow[];
     try {
       if (rows.length <= batchSize) {
         // Keep the one-statement fast path for ordinary small cache writes.
-        oldRows = (await this.db
-          .with("old", () =>
-            oldQuery.where("resource_id", "in", [...resourceIds]),
-          )
-          .with("upsert", () => upsert(rows))
-          .selectFrom("old")
-          .selectAll("old")
-          .execute()) as unknown as readonly OldRow[];
+        oldRows = (await readOldAndUpsert(rows).execute()) as unknown as readonly OldRow[];
       } else {
-        // One encoded parameter avoids both expanded IN parameters and a
-        // full-cohort synchronous array-encoding pass in the Postgres driver.
-        const resourceIdsJson = `[${(await timeSlicedMap(resourceIds, (id) => JSON.stringify(id))).join(",")}]`;
-        const previousQuery = oldQuery.where(
-          sql<SqlBool>`${sql.ref("resource_id")} IN (SELECT jsonb_array_elements_text(${resourceIdsJson}::jsonb))`,
-        );
         oldRows = await this.db.transaction().execute(async (trx) => {
-          // Capture ONE pre-write statement snapshot for every input slot.
-          // Repeating this SELECT per batch would change comparison metadata.
-          const previous = await trx.executeQuery<OldRow>(
-            previousQuery.compile(),
-          );
-          // Sort the whole call before batching. The identical JS comparator
-          // preserves global lock order with older one-statement writers.
+          const previous: OldRow[] = [];
+          // Sort the whole call before batching to preserve global lock order.
+          // Each batch reads only its own slots before replacing them.
           for (let start = 0; start < rows.length; start += batchSize) {
-            await trx.executeQuery(
-              upsert(rows.slice(start, start + batchSize)).compile(),
+            const result = await trx.executeQuery<OldRow>(
+              readOldAndUpsert(rows.slice(start, start + batchSize)).compile(),
             );
+            previous.push(...result.rows);
           }
-          return previous.rows;
+          return previous;
         });
       }
     } catch (error: unknown) {
@@ -466,8 +451,8 @@ export default class PostgresStore<
     }
     this.logTrace("stored entries successfully");
 
-    // Like the former one-statement path, comparisons use the pre-write
-    // snapshot. A concurrent writer may still commit between that snapshot
+    // Comparisons use each batch statement's pre-write snapshot.
+    // A concurrent writer may still commit between that snapshot
     // and an upsert, so this metadata remains approximate under same-slot races.
     // Build comparison metadata after the transaction releases its connection.
     const oldValidatorsBySlot = new Map<string, Partial<Validators>>();
