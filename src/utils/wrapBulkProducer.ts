@@ -49,6 +49,13 @@ import {
   type WrapProducerOptions,
 } from "./wrapProducer.js";
 
+/** A bounded wait for this call's foreground persistence. Failures remain callback outcomes. */
+export type WaitForStoreOptions = {
+  maxWaitMs: number;
+  onUnstored?: (outcome: { reason: "store-failed" | "producer-error"; error: unknown } | { reason: "timed-out" }) => void;
+};
+type StoreOutcome = { ok: true } | { ok: false; reason: "store-failed" | "producer-error"; error: unknown };
+
 /**
  * The bulk counterpart of `wrapProducer`'s `CoveringProducer` (see it for why
  * the covered-set property carries a runtime value, and why it is optional for
@@ -96,7 +103,7 @@ type WrappedBulkProducerFn<
   >[],
 >(
   reqs: Reqs,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
 ) => Promise<{
   -readonly [K in keyof Reqs]:
     | EntryForId<
@@ -332,20 +339,12 @@ export function wrapBulkProducer<
         resourcesToStore,
       });
 
-      if (resourcesToStore.length === 0) {
-        logTrace(`no resources to store; skipping store`);
-      } else {
-        cache
-          .store(resourcesToStore)
-          .then(() => {
-            logTrace(`successfully stored bulk producer's response`);
-          })
-          .catch((e) => {
-            logTrace(`error storing bulk producer's response`, e);
-          });
-      }
-
-      return requestPairedProducerResults;
+      const producerError = requestPairedProducerResults.find((result) => result instanceof Error);
+      const stored: Promise<StoreOutcome> = (resourcesToStore.length === 0 ? Promise.resolve() : Promise.try(() => cache.store(resourcesToStore))).then(
+        () => producerError === undefined ? { ok: true } : { ok: false, reason: "producer-error", error: producerError },
+        (error: unknown) => { logTrace(`error storing bulk producer's response`, error); return { ok: false, reason: "store-failed", error }; },
+      );
+      return { results: requestPairedProducerResults, stored };
     },
     collapseOverlappingRequestsTime * 1000,
     // See the COLLAPSE GRANULARITY note above.
@@ -357,7 +356,7 @@ export function wrapBulkProducer<
 
   const wrappedBulkProducer = async function (
     reqs: readonly PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>[],
-    callOptions?: { signal?: AbortSignal },
+    callOptions?: { signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
   ): Promise<(LooseEntry | ErrorType)[]> {
     const signal = callOptions?.signal;
 
@@ -481,6 +480,7 @@ export function wrapBulkProducer<
       items: readonly RequestItem[];
       rode: boolean;
       handled: Promise<(LooseEntry | ErrorType)[]>;
+      stored: Promise<StoreOutcome>;
     };
 
     /**
@@ -513,8 +513,9 @@ export function wrapBulkProducer<
       const bareItems = groupItems.map(({ item }) => item);
       const attached = collapsedCallProducerAndStore(trigger, bareItems);
 
+      const stored = attached.promise.then(({ stored }) => stored, (): StoreOutcome => ({ ok: true }));
       const handled = attached.promise.then(
-        (producerResults): (LooseEntry | ErrorType)[] =>
+        ({ results: producerResults }): (LooseEntry | ErrorType)[] =>
           // zip is safe: the invocation task validates result completeness
           // before resolving (an under-return rejects the whole invocation,
           // handled below)
@@ -568,7 +569,7 @@ export function wrapBulkProducer<
         },
       );
 
-      return [{ items: bareItems, rode: attached.rode, handled }];
+      return [{ items: bareItems, rode: attached.rode, handled, stored }];
     };
 
     // Kick off the bypass requests' producer calls immediately (in parallel
@@ -734,6 +735,22 @@ export function wrapBulkProducer<
         orderedResults[item.index] = result;
       });
     });
+
+    if (callOptions?.waitForStore !== undefined) {
+      const wait = callOptions.waitForStore;
+      const timeout = Promise.withResolvers<{ reason: "timed-out" }>();
+      const timer = setTimeout(() => timeout.resolve({ reason: "timed-out" }), wait.maxWaitMs);
+      try {
+        const completion = Promise.all(foregroundGroups.map((group) => group.stored)).then((outcomes) => outcomes.find((outcome) => !outcome.ok) ?? { ok: true } satisfies StoreOutcome);
+        const outcome = await raceWithSignal(Promise.race([completion, timeout.promise]), signal);
+        if ("reason" in outcome) {
+          if (outcome.reason === "timed-out") wait.onUnstored?.({ reason: "timed-out" });
+          else wait.onUnstored?.({ reason: outcome.reason, error: outcome.error });
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    }
 
     return orderedResults;
   };

@@ -285,3 +285,17 @@ Overlapping `store()` and `delete()` calls have no ordering guarantee, including
 ## Store shutdown
 
 MemoryStore close only stops periodic expiration cleanup; pending operations continue. PostgresStore disposal leaves operations and connection-pool shutdown to the caller. SqliteStore close drains accepted worker tasks unless shutdown fails or times out. Await operation promises when their completion or errors matter. Finish Postgres operations before shutting down the supplied pool. See [store shutdown details](docs/implementing-a-store.md#store-shutdown), including timeout behavior and `Cache.close()`.
+
+### Waiting for bulk persistence
+
+`wrapBulkProducer` and `wrapBulkHashedInputProducer` accept a per-call
+`waitForStore: { maxWaitMs, onUnstored? }` option. It waits for all foreground
+stores, including a shared producer invocation that this caller joins. Cache hits
+and background revalidation do not add stores to this wait.
+
+Without this option, persistence remains asynchronous. With the option, a timeout,
+store failure, or per-item producer error invokes `onUnstored` and preserves the
+returned producer results. A throwing callback rejects the call. Abort signals
+reject the caller's wait; they do not cancel shared persistence. The timeout starts
+after foreground producer results arrive. This option does not guarantee durable
+storage after a timeout and does not add a database transaction.

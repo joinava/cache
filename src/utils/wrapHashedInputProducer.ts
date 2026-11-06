@@ -1,3 +1,4 @@
+import type { WaitForStoreOptions } from "./wrapBulkProducer.js";
 import pLimit from "p-limit";
 import type { ReadonlyDeep } from "type-fest";
 
@@ -326,7 +327,7 @@ type WrappedBulkHashedInputProducer<
   ErrorType extends Error,
 > = (
   inputs: readonly Input[],
-  options?: { directives?: ConsumerDirectives; signal?: AbortSignal },
+  options?: { directives?: ConsumerDirectives; signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
 ) => Promise<
   (
     | Entry<
@@ -795,7 +796,7 @@ export function wrapBulkHashedInputProducer(
 
   return async (
     inputs: readonly never[],
-    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal },
+    callOptions?: { directives?: ConsumerDirectives; signal?: AbortSignal; waitForStore?: WaitForStoreOptions },
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
@@ -842,7 +843,7 @@ export function wrapBulkHashedInputProducer(
             ? {}
             : { directives: callOptions.directives }),
         })) as unknown as Parameters<typeof wrapped>[0],
-        signal ? { signal } : undefined,
+        { ...(signal ? { signal } : {}), ...(callOptions?.waitForStore === undefined ? {} : { waitForStore: callOptions.waitForStore }) },
       );
     } finally {
       ids.forEach((id) => registry.release(id));
