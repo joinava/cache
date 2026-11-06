@@ -798,6 +798,11 @@ export default class Cache<
     return this.#dataStore.delete(id);
   }
 
+  /** Whether close has started; pending-write overlays must not bypass closure. */
+  public get closed(): boolean {
+    return this.#closed;
+  }
+
   public async close(timeout?: number) {
     this.#closed = true;
     // A batched read that `get()` accepted before this call still runs: start

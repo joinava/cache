@@ -14,7 +14,17 @@ import {
   classify,
   EntryClassification,
 } from "./normalizedProducerResultResourceHelpers.js";
-import { variantMatchesRequest } from "./varyHelpers.js";
+import { resultVariantKey, variantMatchesRequest } from "./varyHelpers.js";
+
+type PendingEntry<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = {
+  entry: Entry<Spec, Validators, Params>;
+  stored: Promise<void>;
+  variantKey: ReturnType<typeof resultVariantKey>;
+};
 
 /**
  * The producer wrappers' overlay of entries whose `cache.store()` is still in
@@ -62,11 +72,6 @@ import { variantMatchesRequest } from "./varyHelpers.js";
  *
  * @internal
  */
-type PendingEntry<Spec extends CacheSpec, Validators extends AnyValidators, Params extends AnyParams> = {
-  entry: Entry<Spec, Validators, Params>;
-  stored: Promise<void>;
-};
-
 export class PendingStores<
   Spec extends CacheSpec,
   Validators extends AnyValidators,
@@ -78,7 +83,10 @@ export class PendingStores<
    * twice in quick succession (two invocations whose collapse windows did
    * not overlap); {@link findUsable} picks among them the way the cache does.
    */
-  readonly #byId = new Map<Spec["id"], Set<PendingEntry<Spec, Validators, Params>>>();
+  readonly #byId = new Map<
+    Spec["id"],
+    Set<PendingEntry<Spec, Validators, Params>>
+  >();
 
   /**
    * Holds `entries` in the overlay until `stored` settles, then drops them
@@ -94,9 +102,13 @@ export class PendingStores<
     stored: Promise<void>,
     now: Date,
   ): void {
-    const tracked = entries.filter(
-      (entry) => calculateStoreFor(entry, now) > 0,
-    ).map((entry) => ({ entry, stored }));
+    const tracked = entries
+      .filter((entry) => calculateStoreFor(entry, now) > 0)
+      .map((entry) => ({
+        entry,
+        stored,
+        variantKey: resultVariantKey(entry.vary),
+      }));
     if (tracked.length === 0) {
       return;
     }
@@ -111,12 +123,21 @@ export class PendingStores<
       }
     });
 
-    const untrack = () => {
+    const untrack = (succeeded: boolean) => {
       tracked.forEach((pendingEntry) => {
         const { entry } = pendingEntry;
         const pending = this.#byId.get(entry.id);
         if (pending === undefined) {
           return;
+        }
+        if (succeeded && pending.has(pendingEntry)) {
+          // A later completed write must not expose an older pending value.
+          // Store mutation order remains unchanged.
+          for (const previous of pending) {
+            if (previous === pendingEntry) break;
+            if (previous.variantKey === pendingEntry.variantKey)
+              pending.delete(previous);
+          }
         }
         pending.delete(pendingEntry);
         if (pending.size === 0) {
@@ -126,7 +147,14 @@ export class PendingStores<
     };
     // `.then(f, f)` rather than `.finally(f)`: the latter would re-reject and
     // create an unhandled rejection of its own when the store fails.
-    void stored.then(untrack, untrack);
+    void stored.then(
+      () => untrack(true),
+      () => untrack(false),
+    );
+  }
+
+  has(id: Spec["id"]): boolean {
+    return this.#byId.has(id);
   }
 
   /**

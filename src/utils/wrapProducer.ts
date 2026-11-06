@@ -31,7 +31,7 @@ import type {
   Logger,
   RequestPairedProducerResult,
   Vary,
-  PartialReadonlyConsumerRequest
+  PartialReadonlyConsumerRequest,
 } from "../types/index.js";
 import {
   collapsedInvocationTaskCreator,
@@ -58,7 +58,10 @@ import {
 export type OnStore = (stored: Promise<void>) => void;
 
 /** Bulk persistence settles every write before exposing the first failure. */
-export function notifyStore(stores: readonly Promise<void>[], onStore: OnStore | undefined): void {
+export function notifyStore(
+  stores: readonly Promise<void>[],
+  onStore: OnStore | undefined,
+): void {
   if (onStore === undefined) return;
   const stored = Promise.allSettled(stores).then((results) => {
     const failure = results.find((result) => result.status === "rejected");
@@ -229,7 +232,6 @@ export type CoveringProducer<
   Params extends AnyParams = AnyParams,
 > = ResourceTypeProducer<RT, Covered, Validators, Params> &
   CoveredTypesCarrier<RT, Covered>;
-
 
 /**
  * The conditionally-required {@link coveredTypes} carrier: optional when
@@ -502,15 +504,11 @@ export function throwUnreachableAbort(signal: AbortSignal | undefined): never {
  *   stale-while-revalidate / stale-if-error paths (a pending entry that is
  *   already stale falls through to the store read, as before).
  *
- * The point at which a value is DURABLE is therefore not the wrapped call's
- * resolution but the settlement of its store call, which the wrapper does not
- * expose per call. `await cache.close()` is the flush: every store call the
- * wrapper has fired has already been handed to the backing store by the time
- * the wrapped call resolves, and the bundled stores' `close()` drains their
- * pending writes before resolving. A short-lived process (a script, a
- * one-shot job) that skips `close()` can lose its last writes; that is a
- * property of the stores, not of the wrappers, but it is the one place a
- * wrapper user has to think about it.
+ * Await the promise passed to `onStore` when subsequent work requires
+ * persistence. Overlay hits expose the selected entry's original write.
+ * Store shutdown guarantees differ: SQLite drains its writer, while MemoryStore
+ * and PostgresStore do not drain outstanding writes. Postgres callers own the
+ * database connection and must await persistence before closing that connection.
  *
  * @param options - The cache to wrap, plus the wrapping behaviour; see
  *   {@link WrapProducerOptions}. `options.cache` is where values returned by
@@ -723,7 +721,10 @@ export default function wrapProducer<
           now,
         );
       } catch (error) {
-        logTrace(`not holding producer's response as pending: normalization failed`, error);
+        logTrace(
+          `not holding producer's response as pending: normalization failed`,
+          error,
+        );
       }
 
       return { result: requestPairedResult, stored };
@@ -787,7 +788,10 @@ export default function wrapProducer<
     // races the caller's wait against its signal, settles the fetch message,
     // and applies the caller's own usableIfError fallback on producer error.
     const settleOnProducer = async (
-      attached: { promise: Promise<{ result: LooseResult; stored: Promise<void> }>; rode: boolean },
+      attached: {
+        promise: Promise<{ result: LooseResult; stored: Promise<void> }>;
+        rode: boolean;
+      },
       usableIfError: LooseEntry | undefined,
     ): Promise<LooseEntry> => {
       let result: LooseEntry;
@@ -859,12 +863,15 @@ export default function wrapProducer<
     // An entry this wrapper produced whose store() has not settled yet is a
     // hit (see the function docs): it is what the store read would return had
     // the write already landed, so it settles the fetch the same way.
-    const pendingEntry = pendingStores.findUsable(
-      id,
-      normalizeParamsBound(params),
-      directives,
-      new Date(),
-    );
+    const pendingEntry =
+      !cache.closed && pendingStores.has(id)
+        ? pendingStores.findUsable(
+            id,
+            normalizeParamsBound(params),
+            directives,
+            new Date(),
+          )
+        : undefined;
     if (pendingEntry !== undefined) {
       logTrace(`serving an entry whose store is still in flight`, {
         id,

@@ -114,7 +114,21 @@ describe("wrapHashedInputProducer", () => {
 
       const first = await compute({ text: "a" });
       expect(store.gates).to.have.lengthOf(1); // the write is parked
-      const second = await compute({ text: "a" });
+      const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+      const second = await compute(
+        { text: "a" },
+        { onStore: (stored) => captured.resolve({ stored }) },
+      );
+      const stored = (await captured.promise).stored;
+      let settled = false;
+      void stored.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      assert.equal(settled, false);
+      store.gates.splice(0).forEach((release) => release());
+      await stored;
+      assert.equal(settled, true);
       expect(second.content).to.eq(first.content);
       expect(produce.mock.callCount()).to.eq(1);
     } finally {
