@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import DataLoader from "dataloader";
+import { cacheReadBatchChannel } from "../diagnostics.js";
 import type { CacheSpec } from "../types/00_CacheSpec.js";
 import type { AnyParams } from "../types/01_Params.js";
 import type { AnyValidators } from "../types/02_Validators.js";
@@ -23,6 +24,7 @@ export class StoreReadBatcher<
     {
       request: StoreGetManyRequest<Spec, Params>;
       signal: AbortSignal | undefined;
+      enqueuedAt: number;
     },
     EntryForId<Spec, Validators, Params, Spec["id"]>[]
   >;
@@ -31,6 +33,7 @@ export class StoreReadBatcher<
   constructor(
     store: Store<Spec, Validators, Params>,
     options: ReadBatchOptions,
+    cache: string,
   ) {
     this.#loader = new DataLoader(
       async (reads) => {
@@ -38,10 +41,41 @@ export class StoreReadBatcher<
         if (live.length === 0) return reads.map(() => []);
         // Let a rejection propagate: DataLoader rejects every load in this
         // batch, and Cache.get reports each non-aborted read failure.
-        const results = await store.getMany(live.map(({ request }) => request));
+        const observed = cacheReadBatchChannel.hasSubscribers;
+        const startedAt = observed ? performance.now() : 0;
+        const queueWaitTotalMs = observed
+          ? live.reduce((total, read) => total + startedAt - read.enqueuedAt, 0)
+          : 0;
+        const publishBatch = (
+          outcome: "success" | "failure",
+          entryCount: number,
+        ) => {
+          if (!observed) return;
+          cacheReadBatchChannel.publish({
+            cache,
+            outcome,
+            requestCount: live.length,
+            entryCount,
+            durationMs: performance.now() - startedAt,
+            queueWaitTotalMs,
+          });
+        };
+        const results = await Promise.try(() =>
+          store.getMany(live.map(({ request }) => request)),
+        ).catch((error: unknown) => {
+          publishBatch("failure", 0);
+          throw error;
+        });
         if (results.length !== live.length) {
+          publishBatch("failure", 0);
           throw new Error(
             `store.getMany() returned ${results.length} results for ${live.length} requests; it must return one result per request`,
+          );
+        }
+        if (observed) {
+          publishBatch(
+            "success",
+            results.reduce((total, entries) => total + entries.length, 0),
           );
         }
         // Results cover only live reads; DataLoader needs one slot for every
@@ -75,7 +109,10 @@ export class StoreReadBatcher<
     signal: AbortSignal | undefined,
   ) {
     signal?.throwIfAborted();
-    return raceWithSignal(this.#loader.load({ request, signal }), signal);
+    return raceWithSignal(
+      this.#loader.load({ request, signal, enqueuedAt: performance.now() }),
+      signal,
+    );
   }
 
   /** Start accepted reads before closing the store, without awaiting them. */

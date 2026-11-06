@@ -288,7 +288,11 @@ export default class Cache<
     this.#dataStore = options.store;
     this.#readBatcher =
       options.batchReads !== false
-        ? new StoreReadBatcher(this.#dataStore, options.batchReads ?? {})
+        ? new StoreReadBatcher(
+            this.#dataStore,
+            options.batchReads ?? {},
+            options.name,
+          )
         : undefined;
     this.#onGetAfterClose = options.onGetAfterClose ?? "throw";
     this.#onStoreAfterClose = options.onStoreAfterClose ?? "throw";
@@ -413,6 +417,7 @@ export default class Cache<
     req: ReadonlyConsumerRequest<Params, Id>,
     options?: { signal?: AbortSignal },
   ): Promise<CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>> {
+    const readStartedAt = performance.now();
     options?.signal?.throwIfAborted();
 
     const { id, params, directives } = req;
@@ -428,6 +433,7 @@ export default class Cache<
         "received request when closed, so returning no entries",
       );
       publishCacheRead({
+        durationMs: performance.now() - readStartedAt,
         cache: this.name,
         resourceType,
         resourceId: id,
@@ -476,6 +482,7 @@ export default class Cache<
       // inflating read-failure rates with client cancellations.
       if (options?.signal?.aborted !== true) {
         publishCacheRead({
+          durationMs: performance.now() - readStartedAt,
           cache: this.name,
           resourceType,
           resourceId: id,
@@ -499,6 +506,7 @@ export default class Cache<
     );
 
     publishCacheRead({
+      durationMs: performance.now() - readStartedAt,
       cache: this.name,
       resourceType,
       resourceId: id,
@@ -543,6 +551,7 @@ export default class Cache<
     requests: Reqs,
     options?: { signal?: AbortSignal },
   ): Promise<GetManyResults<Reqs, RT, Validators, Params>> {
+    const readStartedAt = performance.now();
     options?.signal?.throwIfAborted();
 
     if (!isNonEmptyArray(requests)) {
@@ -555,6 +564,7 @@ export default class Cache<
 
     const publishRead = (requestIndex: number, outcome: CacheReadOutcome) => {
       publishCacheRead({
+        durationMs: performance.now() - readStartedAt,
         cache: this.name,
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         resourceType: resourceTypes[requestIndex]!,
@@ -616,6 +626,7 @@ export default class Cache<
         if (options?.signal?.aborted !== true) {
           requests.forEach((req, i) => {
             publishCacheRead({
+              durationMs: performance.now() - readStartedAt,
               cache: this.name,
               // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
               resourceType: resourceTypes[i]!,
