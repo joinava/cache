@@ -47,6 +47,7 @@ import {
   normalizeVary,
 } from "./utils/normalization.js";
 import * as entryUtils from "./utils/normalizedProducerResultResourceHelpers.js";
+import { classifyCacheEntries } from "./utils/cacheHelpers.js";
 import {
   StoreReadBatcher,
   type ReadBatchOptions,
@@ -825,8 +826,11 @@ export default class Cache<
     result: CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>;
     outcome: CacheReadOutcome;
   } {
-    const { result, outcome, classifiedEntries } =
-      entryUtils.classifyCacheEntries(entries, directives, now);
+    const { result, outcome, classifiedEntries } = classifyCacheEntries(
+      entries,
+      directives,
+      now,
+    );
     this.#logger("trace", "classified stored entries for request", {
       requestIndex: context.requestIndex,
       classifiedEntries,

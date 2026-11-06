@@ -43,10 +43,7 @@ import {
   normalizeVary,
 } from "./normalization.js";
 import { PendingStores } from "./pendingStores.js";
-import {
-  classifyCacheEntries,
-  mergeCacheLookups,
-} from "./normalizedProducerResultResourceHelpers.js";
+import { classifyCacheEntries, mergeCacheLookups } from "./cacheHelpers.js";
 import {
   completeRequest,
   primaryNormalizedResultResourceFromRequestPairedProducerResult,
