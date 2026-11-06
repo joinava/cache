@@ -1376,6 +1376,56 @@ describe("wrapProducer", () => {
       });
     }
 
+    it("pending writes compete by origin birth date rather than invocation or completion order", async () => {
+      const now = Date.now();
+      const produce = mock.fn(async () =>
+        produce.mock.callCount() === 0
+          ? {
+              content: "newer-origin-pending",
+              date: new Date(now - 1000),
+              directives: { freshUntilAge: 100 },
+            }
+          : {
+              content: "older-origin-persisted",
+              date: new Date(now - 10_000),
+              directives: { freshUntilAge: 100 },
+            },
+      );
+      const wrapped = wrapProducer({ cache: gatedCache }, produce);
+      const newer = Promise.withResolvers<{ stored: Promise<void> }>();
+      const older = Promise.withResolvers<{ stored: Promise<void> }>();
+      await wrapped(
+        { id: "x", directives: { maxAge: 0 } },
+        { onStore: (stored) => newer.resolve({ stored }) },
+      );
+      await wrapped(
+        { id: "x", params: { distinct: "second" }, directives: { maxAge: 0 } },
+        { onStore: (stored) => older.resolve({ stored }) },
+      );
+      assert.equal(store.gates.length, 2);
+      store.gates[1]!.release();
+      await (
+        await older.promise
+      ).stored;
+      const selected = Promise.withResolvers<{ stored: Promise<void> }>();
+      const hit = await wrapped(
+        { id: "x" },
+        { onStore: (stored) => selected.resolve({ stored }) },
+      );
+      assert.equal(hit.content, "newer-origin-pending");
+      const failure = new Error("newer origin write failed");
+      const rejected = assert.rejects(
+        (await selected.promise).stored,
+        (error) => error === failure,
+      );
+      store.gates[0]!.fail(failure);
+      await rejected;
+      await assert.rejects(
+        (await newer.promise).stored,
+        (error) => error === failure,
+      );
+    });
+
     it("the overlay is per wrapper: a second wrapper over the same cache reads the store", async () => {
       const otherProducer = mock.fn(async () => ({
         content: "other",

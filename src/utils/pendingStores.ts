@@ -6,7 +6,7 @@ import type {
   NormalizedParams,
 } from "../types/index.js";
 import { calculateStoreFor } from "./normalizedProducerResultResourceHelpers.js";
-import { resultVariantKey, variantMatchesRequest } from "./varyHelpers.js";
+import { variantMatchesRequest } from "./varyHelpers.js";
 
 type PendingEntry<
   Spec extends CacheSpec,
@@ -15,7 +15,6 @@ type PendingEntry<
 > = {
   entry: Entry<Spec, Validators, Params>;
   stored: Promise<void>;
-  variantKey: ReturnType<typeof resultVariantKey>;
 };
 
 /**
@@ -95,7 +94,6 @@ export class PendingStores<
       .map((entry) => ({
         entry,
         stored,
-        variantKey: resultVariantKey(entry.vary),
       }));
     if (tracked.length === 0) {
       return;
@@ -111,21 +109,12 @@ export class PendingStores<
       }
     });
 
-    const untrack = (succeeded: boolean) => {
+    const untrack = () => {
       tracked.forEach((pendingEntry) => {
         const { entry } = pendingEntry;
         const pending = this.#byId.get(entry.id);
         if (pending === undefined) {
           return;
-        }
-        if (succeeded && pending.has(pendingEntry)) {
-          // A later completed write must not expose an older pending value.
-          // Store mutation order remains unchanged.
-          for (const previous of pending) {
-            if (previous === pendingEntry) break;
-            if (previous.variantKey === pendingEntry.variantKey)
-              pending.delete(previous);
-          }
         }
         pending.delete(pendingEntry);
         if (pending.size === 0) {
@@ -135,10 +124,7 @@ export class PendingStores<
     };
     // `.then(f, f)` rather than `.finally(f)`: the latter would re-reject and
     // create an unhandled rejection of its own when the store fails.
-    void stored.then(
-      () => untrack(true),
-      () => untrack(false),
-    );
+    void stored.then(untrack, untrack);
   }
 
   has(id: Spec["id"]): boolean {
