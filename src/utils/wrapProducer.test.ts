@@ -1426,6 +1426,89 @@ describe("wrapProducer", () => {
       );
     });
 
+    const withVaryingSupplemental = () => {
+      const produce = mock.fn(async () => ({
+        content: "primary",
+        directives: { freshUntilAge: 100 },
+        supplementalResources: [
+          {
+            id: "supplemental",
+            content: "fr",
+            vary: { language: "fr" },
+            directives: { freshUntilAge: 100 },
+          },
+        ],
+      }));
+      return { produce, wrapped: wrapProducer({ cache: gatedCache }, produce) };
+    };
+
+    for (const outcome of ["success", "failure"] as const) {
+      it(`unread pending writes avoid duplicate normalization through ${outcome}`, async () => {
+        const normalize = mock.method(gatedCache, "normalizeParamValue");
+        const { wrapped } = withVaryingSupplemental();
+        const captured = Promise.withResolvers<{ stored: Promise<void> }>();
+        await wrapped(
+          { id: "primary" },
+          { onStore: (stored) => captured.resolve({ stored }) },
+        );
+        // Only the actual write normalizes the supplemental vary fields.
+        assert.equal(normalize.mock.callCount(), 1);
+        const stored = (await captured.promise).stored;
+        if (outcome === "success") {
+          store.releaseAll();
+          await stored;
+        } else {
+          const failure = new Error("unread write failed");
+          const rejected = assert.rejects(stored, (error) => error === failure);
+          store.failAll(failure);
+          await rejected;
+        }
+        // Cleanup must not evaluate lazy entry getters.
+        assert.equal(normalize.mock.callCount(), 1);
+      });
+    }
+
+    it("normalizes a pending resource once and reuses it across later reads", async () => {
+      const normalize = mock.method(gatedCache, "normalizeParamValue");
+      const { wrapped, produce } = withVaryingSupplemental();
+      await wrapped({ id: "primary" });
+      assert.equal(normalize.mock.callCount(), 1);
+      const first = await wrapped({
+        id: "supplemental",
+        params: { language: "fr" },
+      });
+      assert.equal(first.content, "fr");
+      // Two request normalizations plus the first lazy entry normalization.
+      assert.equal(normalize.mock.callCount(), 4);
+      const second = await wrapped({
+        id: "supplemental",
+        params: { language: "fr" },
+      });
+      assert.equal(second.content, "fr");
+      // Later reads normalize request params, but reuse the normalized entry.
+      assert.equal(normalize.mock.callCount(), 6);
+      assert.equal(produce.mock.callCount(), 1);
+    });
+
+    it("lazy normalization preserves the write-time age instead of refreshing the date", async (context) => {
+      const now = Date.now();
+      context.mock.timers.enable({ apis: ["Date"], now });
+      const produce = mock.fn(async () => ({
+        content: "value",
+        directives: {
+          freshUntilAge: 10,
+          maxStale: { withoutRevalidation: 0, whileRevalidate: 0, ifError: 0 },
+        },
+      }));
+      const wrapped = wrapProducer({ cache: gatedCache }, produce);
+      const first = await wrapped({ id: "x" });
+      assert.equal(first.date.valueOf(), now);
+      context.mock.timers.setTime(now + 20_000);
+      const second = await wrapped({ id: "x" });
+      assert.equal(produce.mock.callCount(), 2);
+      assert.equal(second.date.valueOf(), now + 20_000);
+    });
+
     it("the overlay is per wrapper: a second wrapper over the same cache reads the store", async () => {
       const otherProducer = mock.fn(async () => ({
         content: "other",

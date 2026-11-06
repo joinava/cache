@@ -36,11 +36,7 @@ import {
   collapsedInvocationTaskCreator,
   type CollapsedInvocation,
 } from "./collapsedTaskCreator.js";
-import {
-  normalizeParams,
-  normalizeProducerResultResource,
-  normalizeVary,
-} from "./normalization.js";
+import { normalizeParams, normalizeVary } from "./normalization.js";
 import { PendingStores } from "./pendingStores.js";
 import {
   classifyCacheEntries,
@@ -575,7 +571,9 @@ export default function wrapProducer<
 
   // Entries whose cache.store() is still in flight, consulted before every
   // cache read; see the function docs and PendingStores.
-  const pendingStores = new PendingStores<SpecOf<RT>, Validators, Params>();
+  const pendingStores = new PendingStores<SpecOf<RT>, Validators, Params>(
+    normalizeVaryBound,
+  );
 
   const callProducerAndLog = async (req: LooseRequest) => {
     logTrace("contacting producer", req);
@@ -706,10 +704,13 @@ export default function wrapProducer<
       publishProduce("success");
 
       logTrace(`attempting to store response.`);
+      // Share one fallback date with the actual write and any later pending
+      // lookup. Lazy normalization must not reset the resource's age.
+      const now = new Date();
       const resources = requestPairedProducerResultToResources(
         requestPairedResult,
         req.id,
-      );
+      ).map((resource) => ({ ...resource, date: resource.date ?? now }));
       const stored = Promise.try(() => cache.store(resources)).then(() => {
         logTrace(`successfully stored producer's response`);
       });
@@ -717,23 +718,7 @@ export default function wrapProducer<
         logTrace(`error storing producer's response`, error);
       });
 
-      // Normalize pending entries as Cache.store does. Invalid resources must
-      // fail persistence without changing a successful producer result.
-      try {
-        const now = new Date();
-        pendingStores.track(
-          resources.map((it) =>
-            normalizeProducerResultResource(normalizeVaryBound, it, now),
-          ),
-          stored,
-          now,
-        );
-      } catch (error) {
-        logTrace(
-          `not holding producer's response as pending: normalization failed`,
-          error,
-        );
-      }
+      pendingStores.track(resources, stored, now);
 
       return { result: requestPairedResult, stored };
     },

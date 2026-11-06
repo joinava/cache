@@ -4,7 +4,11 @@ import type {
   AnyValidators,
   Entry,
   NormalizedParams,
+  NormalizedVary,
+  ProducerResultResource,
+  Vary,
 } from "../types/index.js";
+import { normalizeProducerResultResource } from "./normalization.js";
 import { calculateStoreFor } from "./normalizedProducerResultResourceHelpers.js";
 import { variantMatchesRequest } from "./varyHelpers.js";
 
@@ -13,8 +17,10 @@ type PendingEntry<
   Validators extends AnyValidators,
   Params extends AnyParams,
 > = {
-  entry: Entry<Spec, Validators, Params>;
-  stored: Promise<void>;
+  readonly id: Spec["id"];
+  readonly writtenAt: Date;
+  readonly entry: Entry<Spec, Validators, Params>;
+  readonly stored: Promise<void>;
 };
 
 /**
@@ -75,35 +81,54 @@ export class PendingStores<
     Set<PendingEntry<Spec, Validators, Params>>
   >();
 
+  readonly #normalizeVary: (vary: Vary<Params>) => NormalizedVary<Params>;
+
+  constructor(normalizeVary: (vary: Vary<Params>) => NormalizedVary<Params>) {
+    this.#normalizeVary = normalizeVary;
+  }
+
   /**
-   * Holds `entries` in the overlay until `stored` settles, then drops them
+   * Holds `resources` in the overlay until `stored` settles, then drops them
    * (whether it resolved or rejected -- see the class docs). `stored`'s
    * rejection is observed here but not swallowed for other holders of the
    * promise: the wrapper still attaches its own logging handlers.
    *
-   * `entries` must already be normalized, so the same normalization is not
-   * repeated per lookup; entries the store would not retain are skipped.
+   * Retain raw resources and their write-time date. Normalize a resource only
+   * on its first pending lookup, and reuse that normalized entry afterward.
+   * Cleanup uses the raw ID, so unread resources never need normalization.
    */
   track(
-    entries: readonly Entry<Spec, Validators, Params>[],
+    resources: readonly (ProducerResultResource<Spec, Validators, Params> & {
+      date: Date;
+    })[],
     stored: Promise<void>,
     now: Date,
   ): void {
-    const tracked = entries
-      .filter((entry) => calculateStoreFor(entry, now) > 0)
-      .map((entry) => ({
-        entry,
+    const normalizeVary = this.#normalizeVary;
+    const tracked = resources.map((resource) => {
+      const normalized: { entry?: Entry<Spec, Validators, Params> } = {};
+      return {
+        id: resource.id,
+        writtenAt: now,
         stored,
-      }));
+        get entry(): Entry<Spec, Validators, Params> {
+          normalized.entry ??= normalizeProducerResultResource(
+            normalizeVary,
+            resource,
+          );
+          return normalized.entry;
+        },
+      };
+    });
     if (tracked.length === 0) {
       return;
     }
 
     tracked.forEach((pendingEntry) => {
-      const { entry } = pendingEntry;
-      const pending = this.#byId.get(entry.id);
+      const { id } = pendingEntry;
+      const pending = this.#byId.get(id);
       if (pending === undefined) {
-        this.#byId.set(entry.id, new Set([pendingEntry]));
+        this.#byId.set(id, new Set([pendingEntry]));
       } else {
         pending.add(pendingEntry);
       }
@@ -111,14 +136,14 @@ export class PendingStores<
 
     const untrack = () => {
       tracked.forEach((pendingEntry) => {
-        const { entry } = pendingEntry;
-        const pending = this.#byId.get(entry.id);
+        const { id } = pendingEntry;
+        const pending = this.#byId.get(id);
         if (pending === undefined) {
           return;
         }
         pending.delete(pendingEntry);
         if (pending.size === 0) {
-          this.#byId.delete(entry.id);
+          this.#byId.delete(id);
         }
       });
     };
@@ -136,8 +161,10 @@ export class PendingStores<
     id: Spec["id"],
     normalizedParams: Readonly<NormalizedParams<Params>>,
   ): readonly PendingEntry<Spec, Validators, Params>[] {
-    return [...(this.#byId.get(id) ?? [])].filter(({ entry }) =>
-      variantMatchesRequest(entry.vary, normalizedParams),
+    return [...(this.#byId.get(id) ?? [])].filter(
+      ({ entry, writtenAt }) =>
+        calculateStoreFor(entry, writtenAt) > 0 &&
+        variantMatchesRequest(entry.vary, normalizedParams),
     );
   }
 }
