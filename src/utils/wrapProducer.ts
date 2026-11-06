@@ -37,7 +37,7 @@ import {
   type CollapsedInvocation,
 } from "./collapsedTaskCreator.js";
 import { normalizeParams, normalizeVary } from "./normalization.js";
-import { PendingStores } from "./pendingStores.js";
+import { PendingResources } from "./pendingResources.js";
 import {
   classifyCacheEntries,
   mergeCacheLookups,
@@ -570,8 +570,8 @@ export default function wrapProducer<
     );
 
   // Entries whose cache.store() is still in flight, consulted before every
-  // cache read; see the function docs and PendingStores.
-  const pendingStores = new PendingStores<SpecOf<RT>, Validators, Params>(
+  // cache read; see the function docs and PendingResources.
+  const pendingResources = new PendingResources<SpecOf<RT>, Validators, Params>(
     normalizeVaryBound,
   );
 
@@ -663,7 +663,7 @@ export default function wrapProducer<
   // -- from the producer resolving until the write lands -- in which an
   // identical call would read the store, miss, and run the producer again.
   // The entries handed to cache.store() are therefore also held in
-  // `pendingStores` until that store call settles (see PendingStores), and
+  // `pendingResources` until that store call settles (see PendingResources), and
   // the wrapped function consults that overlay before reading the store.
   //
   // It also publishes the invocation's `produce` diagnostics message when the
@@ -718,7 +718,7 @@ export default function wrapProducer<
         logTrace(`error storing producer's response`, error);
       });
 
-      pendingStores.track(resources, stored, now);
+      pendingResources.track(resources, stored, now);
 
       return { result: requestPairedResult, stored };
     },
@@ -777,21 +777,28 @@ export default function wrapProducer<
       throwAborted(false);
     }
 
-    const pendingWrites = new Map<LooseEntry, Promise<void>>();
+    // This call retains the selected entries' write promises even after the
+    // shared overlay removes its records, so onStore can observe those writes.
+    const storePromisesByEntry = new Map<LooseEntry, Promise<void>>();
     const lookupPending = (): LooseLookupResult => {
       // Bypass calls return before this lookup runs. Closed caches and absent
       // IDs contribute no pending candidates to the combined lookup.
-      if (cache.closed || !pendingStores.has(id)) return { validatable: [] };
-      const entries = pendingStores.matching(id, normalizeParamsBound(params));
-      entries.forEach(({ entry, stored }) => pendingWrites.set(entry, stored));
+      if (cache.closed || !pendingResources.has(id)) return { validatable: [] };
+      const entries = pendingResources.matching(
+        id,
+        normalizeParamsBound(params),
+      );
+      entries.forEach(({ entry, stored }) =>
+        storePromisesByEntry.set(entry, stored),
+      );
       return classifyCacheEntries(
         entries.map(({ entry }) => entry),
         directives,
         new Date(),
       ).result;
     };
-    const pendingWritesFor = (entry: LooseEntry): Promise<void>[] => {
-      const stored = pendingWrites.get(entry);
+    const storePromisesForEntry = (entry: LooseEntry): Promise<void>[] => {
+      const stored = storePromisesByEntry.get(entry);
       return stored === undefined ? [] : [stored];
     };
 
@@ -835,7 +842,10 @@ export default function wrapProducer<
             disposition: "served-stale-after-error",
             vary: usableIfError.vary,
           });
-          notifyStore(pendingWritesFor(usableIfError), callOptions?.onStore);
+          notifyStore(
+            storePromisesForEntry(usableIfError),
+            callOptions?.onStore,
+          );
           return usableIfError;
         }
 
@@ -914,7 +924,7 @@ export default function wrapProducer<
         disposition: "served-from-cache",
         vary: usable.vary,
       });
-      notifyStore(pendingWritesFor(usable), callOptions?.onStore);
+      notifyStore(storePromisesForEntry(usable), callOptions?.onStore);
       return usable;
     }
 
@@ -972,7 +982,7 @@ export default function wrapProducer<
         vary: usableWhileRevalidate.vary,
       });
       notifyStore(
-        pendingWritesFor(usableWhileRevalidate),
+        storePromisesForEntry(usableWhileRevalidate),
         callOptions?.onStore,
       );
       return usableWhileRevalidate;

@@ -65,7 +65,7 @@ type PendingEntry<
  *
  * @internal
  */
-export class PendingStores<
+export class PendingResources<
   Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
