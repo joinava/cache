@@ -1,3 +1,4 @@
+import { timeSlicedForEach } from "./time-slicing.js";
 import { default as debug } from "debug";
 import { maxBy } from "es-toolkit";
 
@@ -116,6 +117,26 @@ export function keepMaxPerGroup<T>(opts: {
       group.length > 1 ? maxBy(group, opts.maxBy)! : group[0]!,
     )
     .toArray();
+}
+
+/** Cooperative equivalent of keepMaxPerGroup for bulk store paths. */
+export async function keepMaxPerGroupCooperatively<T>(opts: {
+  items: readonly T[];
+  groupBy: (item: T) => string;
+  maxBy: (item: T) => number;
+}): Promise<T[]> {
+  const winners = new Map<string, { item: T; max: number }>();
+  await timeSlicedForEach(opts.items, (item) => {
+    const key = opts.groupBy(item);
+    const max = opts.maxBy(item);
+    const previous = winners.get(key);
+    if (!previous || max > previous.max) winners.set(key, { item, max });
+  });
+  const result: T[] = [];
+  await timeSlicedForEach(winners.values(), ({ item }) => {
+    result.push(item);
+  });
+  return result;
 }
 
 /**

@@ -1,4 +1,4 @@
-import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
+import { timeSlicedMap, timeSlicedMapFromEntries } from "../../utils/time-slicing.js";
 import type { CacheSpec, SpecForId } from "../../types/00_CacheSpec.js";
 import type {
   StoreEntryResult,
@@ -20,7 +20,10 @@ import {
   validatorsEqual,
 } from "../../utils/normalizedProducerResultResourceHelpers.js";
 import type { JsonOf } from "../../utils/utils.js";
-import { jsonStringify, keepMaxPerGroup } from "../../utils/utils.js";
+import {
+  jsonStringify,
+  keepMaxPerGroupCooperatively,
+} from "../../utils/utils.js";
 import {
   requestVariantKeyForVaryKeys,
   resultVariantKey,
@@ -161,9 +164,9 @@ export default class MemoryStore<
     options?: { signal?: AbortSignal },
   ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
     options?.signal?.throwIfAborted();
-    return isNonEmptyArray(requests)
-      ? mapNonEmpty(requests, (it) => this.#getOneSync(it.id, it.params))
-      : ([] as StoreGetManyResult<Spec, Reqs, Validators, Params>);
+    return (await timeSlicedMap(requests, (it) =>
+      this.#getOneSync(it.id, it.params),
+    )) as StoreGetManyResult<Spec, Reqs, Validators, Params>;
   }
 
   #getOneSync<Id extends Spec["id"]>(
@@ -198,45 +201,45 @@ export default class MemoryStore<
     entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
     // Derive each input's slot (variant + full cache key) once, up front.
-    const prepared = entriesWithTimes.map((input, index) => {
-      const variantKey = resultVariantKey(input.entry.vary);
-      return {
-        input,
-        index,
-        variantKey,
-        cacheKey: makeCacheKey(input.entry.id, variantKey),
-      };
-    });
-
-    // The relationship is measured against what each slot held BEFORE this
-    // call, so snapshot every touched slot's current entry now, before any
-    // write. Reading a slot more than once here is harmless: nothing has been
-    // written yet, so each read of a slot returns the same pre-call value.
-    const preCallBySlot = new Map(
-      prepared.map(({ cacheKey }) => [cacheKey, this.entriesMap.get(cacheKey)] as const),
+    const prepared = await timeSlicedMap(
+      entriesWithTimes,
+      (input, index) => {
+        const variantKey = resultVariantKey(input.entry.vary);
+        return {
+          input,
+          index,
+          variantKey,
+          cacheKey: makeCacheKey(input.entry.id, variantKey),
+        };
+      },
     );
 
     // Dedupe within the call per the contract's uniform rule: for each slot,
     // only the entry with the newest birth date persists (the same rule the
     // other stores apply).
-    const winners = keepMaxPerGroup({
+    const winners = await keepMaxPerGroupCooperatively({
       items: prepared,
       groupBy: (it) => it.cacheKey,
       maxBy: (it) => birthDate(it.input.entry).valueOf(),
     });
-    winners.forEach((it) => this.#persist(it));
-
-    const winnerIndexBySlot = new Map(
-      winners.map(({ cacheKey, index }) => [cacheKey, index] as const),
+    // Read and replace each winning slot in one synchronous callback. Other
+    // mutations can interleave between winners, but not between these two steps.
+    const resultByInputIndex = await timeSlicedMapFromEntries(
+      await timeSlicedMap(winners, (winner) => {
+        const result = this.#relationshipToExisting(
+          winner.input.entry,
+          this.entriesMap.get(winner.cacheKey),
+        );
+        this.#persist(winner);
+        return [winner.index, result] as const;
+      }),
     );
 
     // Each slot's winner reports how its validators relate to that slot's
-    // pre-call entry; every other input (a dropped within-call duplicate) is
-    // omitted.
-    return prepared.map(({ input, index, cacheKey }) =>
-      winnerIndexBySlot.get(cacheKey) === index
-        ? this.#relationshipToExisting(input.entry, preCallBySlot.get(cacheKey))
-        : {},
+    // entry immediately before persistence; every other input (a dropped
+    // within-call duplicate) is omitted.
+    return await timeSlicedMap(prepared, ({ index }) =>
+      resultByInputIndex.get(index) ?? {},
     );
   }
 
@@ -285,7 +288,9 @@ export default class MemoryStore<
 
   #relationshipToExisting(
     entry: Entry<Spec, Validators, Params>,
-    existing: readonly [Entry<Spec, Validators, Params>, Spec["id"]] | undefined,
+    existing:
+      | readonly [Entry<Spec, Validators, Params>, Spec["id"]]
+      | undefined,
   ): StoreEntryResult {
     // This store holds raw in-memory objects, so normalize BOTH sides to their
     // JSON-serialized form before checking emptiness or comparing, to agree

@@ -68,6 +68,10 @@ export type StoreEntryResult = {
  * (on disk, in memory, in a database, etc). The type params have the same
  * meanings as in the ProducerResult type.
  *
+ * Overlapping store() and delete() calls have no ordering guarantee, even on
+ * one instance. Await a mutation before starting another when order matters.
+ * Deleting an entry does not prevent an in-flight producer from storing it later.
+ *
  * `Spec` is the union of cache key shapes the store can hold; see
  * {@link CacheSpec}. The `get`/`getMany` methods are generic over the
  * specific id of an incoming request so that the returned entries' content
@@ -177,6 +181,11 @@ export type Store<
    * connection, closing that is part of this function's responsibility; however,
    * if the store has a db client/connection passed in, it's up to the caller to
    * manage that.
+   *
+   * Shutdown does not imply a uniform drain guarantee. MemoryStore only stops
+   * periodic cleanup. PostgresStore leaves the supplied pool open. SqliteStore
+   * drains accepted worker tasks unless shutdown fails or times out. Await
+   * operation promises when their completion or errors matter.
    */
   [Symbol.asyncDispose](): Promise<void>;
 
