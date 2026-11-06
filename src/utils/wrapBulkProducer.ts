@@ -474,7 +474,7 @@ export function wrapBulkProducer<
       items: readonly RequestItem[];
       rode: boolean;
       handled: Promise<(LooseEntry | ErrorType)[]>;
-      stored: Promise<void>;
+      invocation: ReturnType<typeof collapsedCallProducerAndStore>["promise"];
     };
 
     /**
@@ -507,8 +507,6 @@ export function wrapBulkProducer<
       const bareItems = groupItems.map(({ item }) => item);
       const attached = collapsedCallProducerAndStore(trigger, bareItems);
 
-      const stored = attached.promise.then(({ stored }) => stored, () => undefined);
-      void stored.catch(() => {});
       const handled = attached.promise.then(
         ({ results: producerResults }): (LooseEntry | ErrorType)[] =>
           // zip is safe: the invocation task validates result completeness
@@ -564,7 +562,7 @@ export function wrapBulkProducer<
         },
       );
 
-      return [{ items: bareItems, rode: attached.rode, handled, stored }];
+      return [{ items: bareItems, rode: attached.rode, handled, invocation: attached.promise }];
     };
 
     // Kick off the bypass requests' producer calls immediately (in parallel
@@ -731,7 +729,12 @@ export function wrapBulkProducer<
       });
     });
 
-    notifyStore(foregroundGroups.map((group) => group.stored), callOptions?.onStore);
+    if (callOptions?.onStore !== undefined) {
+      notifyStore(
+        foregroundGroups.map((group) => group.invocation.then(({ stored }) => stored, () => undefined)),
+        callOptions.onStore,
+      );
+    }
 
     return orderedResults;
   };
