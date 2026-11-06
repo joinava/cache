@@ -1,3 +1,4 @@
+import { normalizeParams } from "./utils/normalization.js";
 import assert from "node:assert/strict";
 import { it, mock } from "node:test";
 import Cache from "./Cache.js";
@@ -181,6 +182,58 @@ it("a pre-aborted mixed batch publishes every aborted fetch before any read star
     assert.equal(producer.mock.callCount(), 0);
   } finally {
     cacheFetchChannel.unsubscribe(onFetch);
+    await cache.close();
+  }
+});
+
+// Hold one real scheduling boundary without depending on elapsed wall time.
+async function pauseNextMemoryWrite() {
+  const { TimeSliceBudget } = await import("./utils/time-slicing.js");
+  const paused = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const yieldPoint = mock.method(TimeSliceBudget.prototype, "yieldIfNeeded", () => {
+    yieldPoint.mock.restore();
+    paused.resolve();
+    return resume.promise;
+  });
+  return { paused: paused.promise, resume: resume.resolve, restore: () => yieldPoint.mock.restore() };
+}
+
+it("a delete during a yielded MemoryStore write does not cancel the pending write", async () => {
+  const { cache, store } = makeCache();
+  await cache.store([{ id: "resource:overlap", content: 1, directives: { freshUntilAge: 60 } }]);
+  const gate = await pauseNextMemoryWrite();
+  const pending = cache.store([{ id: "resource:overlap", content: 2, directives: { freshUntilAge: 60 } }]);
+  try {
+    await gate.paused;
+    await cache.delete("resource:overlap");
+    assert.deepEqual(await store.get("resource:overlap", normalizeParams((name) => name, (_name, value) => value, {})), []);
+    gate.resume();
+    await pending;
+    assert.equal((await store.get("resource:overlap", normalizeParams((name) => name, (_name, value) => value, {})))[0]?.content, 2);
+  } finally {
+    gate.resume();
+    gate.restore();
+    await pending;
+    await cache.close();
+  }
+});
+
+it("awaiting a yielded MemoryStore write before deleting keeps the slot absent", async () => {
+  const { cache, store } = makeCache();
+  const gate = await pauseNextMemoryWrite();
+  const pending = cache.store([{ id: "resource:dependent", content: 2, directives: { freshUntilAge: 60 } }]);
+  try {
+    await gate.paused;
+    gate.resume();
+    await pending;
+    assert.equal((await store.get("resource:dependent", normalizeParams((name) => name, (_name, value) => value, {})))[0]?.content, 2);
+    await cache.delete("resource:dependent");
+    assert.deepEqual(await store.get("resource:dependent", normalizeParams((name) => name, (_name, value) => value, {})), []);
+  } finally {
+    gate.resume();
+    gate.restore();
+    await pending;
     await cache.close();
   }
 });
