@@ -53,6 +53,8 @@ import {
 } from "./utils/cacheHelpers.js";
 import {
   StoreReadBatcher,
+  observeStoreRead,
+  summarizeStoreReadResults,
   type ReadBatchOptions,
 } from "./utils/storeReadBatcher.js";
 import { assertUnreachable, defaultLoggersByComponent } from "./utils/utils.js";
@@ -288,7 +290,11 @@ export default class Cache<
     this.#dataStore = options.store;
     this.#readBatcher =
       options.batchReads !== false
-        ? new StoreReadBatcher(this.#dataStore, options.batchReads ?? {})
+        ? new StoreReadBatcher(
+            this.#dataStore,
+            options.batchReads ?? {},
+            options.name,
+          )
         : undefined;
     this.#onGetAfterClose = options.onGetAfterClose ?? "throw";
     this.#onStoreAfterClose = options.onStoreAfterClose ?? "throw";
@@ -413,6 +419,7 @@ export default class Cache<
     req: ReadonlyConsumerRequest<Params, Id>,
     options?: { signal?: AbortSignal },
   ): Promise<CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>> {
+    const readStartedAt = performance.now();
     options?.signal?.throwIfAborted();
 
     const { id, params, directives } = req;
@@ -428,6 +435,7 @@ export default class Cache<
         "received request when closed, so returning no entries",
       );
       publishCacheRead({
+        durationMs: performance.now() - readStartedAt,
         cache: this.name,
         resourceType,
         resourceId: id,
@@ -460,7 +468,20 @@ export default class Cache<
     // duration.
     const storeRead =
       this.#readBatcher === undefined
-        ? this.#dataStore.get(id, normalizedParams, options)
+        ? observeStoreRead(
+            {
+              cache: this.name,
+              operation: "get",
+              requestCount: 1,
+              signal: options?.signal,
+            },
+            async () =>
+              await this.#dataStore.get(id, normalizedParams, options),
+            (entries) => ({
+              entryCount: entries.length,
+              failedRequestCount: 0,
+            }),
+          )
         : this.#readBatcher.read(
             { id, params: normalizedParams },
             options?.signal,
@@ -476,6 +497,7 @@ export default class Cache<
       // inflating read-failure rates with client cancellations.
       if (options?.signal?.aborted !== true) {
         publishCacheRead({
+          durationMs: performance.now() - readStartedAt,
           cache: this.name,
           resourceType,
           resourceId: id,
@@ -499,6 +521,7 @@ export default class Cache<
     );
 
     publishCacheRead({
+      durationMs: performance.now() - readStartedAt,
       cache: this.name,
       resourceType,
       resourceId: id,
@@ -543,6 +566,7 @@ export default class Cache<
     requests: Reqs,
     options?: { signal?: AbortSignal },
   ): Promise<GetManyResults<Reqs, RT, Validators, Params>> {
+    const readStartedAt = performance.now();
     options?.signal?.throwIfAborted();
 
     if (!isNonEmptyArray(requests)) {
@@ -553,8 +577,12 @@ export default class Cache<
     // the whole operation before we touch the store.
     const resourceTypes = mapNonEmpty(requests, (req) => this.classify(req.id));
 
-    const publishRead = (requestIndex: number, outcome: CacheReadOutcome) => {
+    const publishRead = (
+      requestIndex: number,
+      outcome: CacheReadOutcome | { found: "read-failed"; error: unknown },
+    ) => {
       publishCacheRead({
+        durationMs: performance.now() - readStartedAt,
         cache: this.name,
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         resourceType: resourceTypes[requestIndex]!,
@@ -593,14 +621,20 @@ export default class Cache<
     this.#logger("trace", "requested entries from the store via getMany");
 
     // Use the store's optimized getMany method
-    const cacheEntriesForRequests = await this.#dataStore
-      .getMany(
-        mapNonEmpty(requests, (req) => ({
-          id: req.id,
-          params: this.normalizeParams(req.params),
-        })),
-        options,
-      )
+    const storeRequests = mapNonEmpty(requests, (req) => ({
+      id: req.id,
+      params: this.normalizeParams(req.params),
+    }));
+    const cacheEntriesForRequests = await observeStoreRead(
+      {
+        cache: this.name,
+        operation: "getMany",
+        requestCount: requests.length,
+        signal: options?.signal,
+      },
+      async () => await this.#dataStore.getMany(storeRequests, options),
+      summarizeStoreReadResults,
+    )
       .then((results) =>
         results.map((entries) => {
           if (entries instanceof Error) throw entries;
@@ -614,15 +648,8 @@ export default class Cache<
         // subscriber's per-id read counts disagree with the successful path.
         // Aborts stay silent for the reason given in `get`.
         if (options?.signal?.aborted !== true) {
-          requests.forEach((req, i) => {
-            publishCacheRead({
-              cache: this.name,
-              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-              resourceType: resourceTypes[i]!,
-              resourceId: req.id,
-              found: "read-failed",
-              error,
-            });
+          requests.forEach((_req, i) => {
+            publishRead(i, { found: "read-failed", error });
           });
         }
         throw error;

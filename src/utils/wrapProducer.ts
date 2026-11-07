@@ -691,6 +691,7 @@ export default function wrapProducer<
           requests: [{ resourceType, resourceId: req.id }],
           collapsedCallerCount: invocation.attachedCallerCount(),
           outcome,
+          failedRequestCount: outcome === "error" ? 1 : 0,
           durationMs: performance.now() - start,
         });
       };

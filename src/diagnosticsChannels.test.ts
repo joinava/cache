@@ -1902,6 +1902,7 @@ describe("diagnostics channels (§6.5)", () => {
         expect(capture.produce).to.have.lengthOf(1);
         expect(capture.produce[0]?.trigger).to.equal("miss");
         expect(capture.produce[0]?.outcome).to.equal("success");
+        expect(capture.produce[0]?.failedRequestCount).to.equal(1);
         expect(
           sortByResourceId(capture.produce[0]?.requests ?? []),
         ).to.deep.equal([
@@ -1968,6 +1969,7 @@ describe("diagnostics channels (§6.5)", () => {
         // stored.
         expect(capture.produce).to.have.lengthOf(1);
         expect(capture.produce[0]?.outcome).to.equal("error");
+        expect(capture.produce[0]?.failedRequestCount).to.equal(3);
         expect(capture.storeEntry).to.deep.equal([]);
       } finally {
         capture.stop();

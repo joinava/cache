@@ -1,9 +1,11 @@
 import { expect } from "chai";
+import type { DistributedOmit } from "type-fest";
 import assert from "node:assert/strict";
 import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { setTimeout as delay } from "timers/promises";
 
 import {
+  cacheReadChannel,
   idStartsWith,
   resourceType,
   type CacheFetchMessage,
@@ -69,14 +71,16 @@ export const V2_CHANNEL_NAMES = {
   storeEntry: "@zingage/cache:store-entry",
 } as const;
 
+type CapturedReadMessage = DistributedOmit<CacheReadMessage, "durationMs">;
+
 export type CapturedMessage =
-  | { channel: "read"; message: CacheReadMessage }
+  | { channel: "read"; message: CapturedReadMessage }
   | { channel: "fetch"; message: CacheFetchMessage }
   | { channel: "produce"; message: CacheProduceMessage }
   | { channel: "store-entry"; message: CacheStoreEntryMessage };
 
 export type ChannelCapture = {
-  read: CacheReadMessage[];
+  read: CapturedReadMessage[];
   fetch: CacheFetchMessage[];
   produce: CacheProduceMessage[];
   storeEntry: CacheStoreEntryMessage[];
@@ -94,7 +98,7 @@ export type ChannelCapture = {
  * counts.
  */
 export function captureChannels(cacheName: string): ChannelCapture {
-  const read: CacheReadMessage[] = [];
+  const read: CapturedReadMessage[] = [];
   const fetch: CacheFetchMessage[] = [];
   const produce: CacheProduceMessage[] = [];
   const storeEntry: CacheStoreEntryMessage[] = [];
@@ -118,7 +122,18 @@ export function captureChannels(cacheName: string): ChannelCapture {
       all.push({ channel, message } as CapturedMessage);
     };
 
-  const onRead = collect<CacheReadMessage>("read", read);
+  const onRead = (msg: CacheReadMessage) => {
+    if (msg.cache !== cacheName) return;
+    const { durationMs, ...message } = msg;
+    // Validate timing separately so existing payload assertions remain exact.
+    assert.ok(
+      durationMs !== undefined &&
+        Number.isFinite(durationMs) &&
+        durationMs >= 0,
+    );
+    read.push(message);
+    all.push({ channel: "read", message });
+  };
   const onFetch = collect<CacheFetchMessage>("fetch", fetch);
   const onProduce = collect<CacheProduceMessage>("produce", produce);
   const onStoreEntry = collect<CacheStoreEntryMessage>(
@@ -126,7 +141,7 @@ export function captureChannels(cacheName: string): ChannelCapture {
     storeEntry,
   );
 
-  subscribe(V2_CHANNEL_NAMES.read, onRead);
+  cacheReadChannel.subscribe(onRead);
   subscribe(V2_CHANNEL_NAMES.fetch, onFetch);
   subscribe(V2_CHANNEL_NAMES.produce, onProduce);
   subscribe(V2_CHANNEL_NAMES.storeEntry, onStoreEntry);
@@ -138,7 +153,7 @@ export function captureChannels(cacheName: string): ChannelCapture {
     storeEntry,
     all,
     stop: () => {
-      unsubscribe(V2_CHANNEL_NAMES.read, onRead);
+      cacheReadChannel.unsubscribe(onRead);
       unsubscribe(V2_CHANNEL_NAMES.fetch, onFetch);
       unsubscribe(V2_CHANNEL_NAMES.produce, onProduce);
       unsubscribe(V2_CHANNEL_NAMES.storeEntry, onStoreEntry);
@@ -301,6 +316,7 @@ export function expectProduceMessage(
     requests: readonly { resourceType: string; resourceId: string }[];
     collapsedCallerCount: number;
     outcome: "success" | "error";
+    failedRequestCount?: number;
     minDurationMs?: number;
   },
 ): void {
@@ -317,5 +333,8 @@ export function expectProduceMessage(
     trigger: expected.trigger,
     collapsedCallerCount: expected.collapsedCallerCount,
     outcome: expected.outcome,
+    failedRequestCount:
+      expected.failedRequestCount ??
+      (expected.outcome === "error" ? expected.requests.length : 0),
   });
 }
