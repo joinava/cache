@@ -1,7 +1,7 @@
 import { throwIfAnyError } from "./utils/utils.js";
 import { expect } from "chai";
 import fc from "fast-check";
-import { after, before, describe, it, mock } from "node:test";
+import { after, before, describe, it } from "node:test";
 import { makeTestWithFixture } from "test-with-fixture";
 
 import { setTimeout as delay } from "timers/promises";
@@ -542,38 +542,8 @@ describe("Cache", { concurrency: true }, () => {
     });
   });
 
-  describe("events", () => {
-    it("should emit an event for each stored entry", async () => {
-      const cache = cacheOver(memoryStore);
-      const listener = mock.fn();
-      const results = [
-        {
-          id: randomURI(),
-          vary: emptyVary,
-          content: ["myArray"],
-          directives: { freshUntilAge: 0.01 }, // 10ms
-        },
-        {
-          id: randomURI(),
-          vary: emptyVary,
-          content: ["myArray"],
-          directives: { freshUntilAge: 0.01 }, // 10ms
-        },
-      ];
-
-      cache.emitter.on("store", listener);
-      await cache.store(results);
-      expect(listener.mock.calls[0]?.arguments[0]).to.deep.contain(results[0]);
-      expect(listener.mock.calls[0]?.arguments[1]).to.eq(Infinity);
-
-      expect(listener.mock.calls[1]?.arguments[0]).to.deep.contain(results[1]);
-      expect(listener.mock.calls[1]?.arguments[1]).to.eq(Infinity);
-    });
-
-    // The @zingage/cache:store-entry channel's own conformance suite (payload
-    // shape and per-resource-type attribution) lives in
-    // diagnosticsChannels.test.ts.
-  });
+  // The @zingage/cache:store-entry channel's conformance suite (payload
+  // shape and per-resource-type attribution) lives in diagnosticsChannels.test.ts.
 
   describe("AbortSignal support", () => {
     describe("Cache.get", () => {

@@ -2718,3 +2718,63 @@ describe("diagnostics channels (§6.5)", () => {
     });
   });
 });
+
+describe("producer failed request counts", () => {
+  for (const mode of [
+    "scalar-success",
+    "scalar-failure",
+    "partial",
+    "rejection",
+    "contract",
+  ] as const) {
+    it(`counts failed slots for ${mode}`, async () => {
+      const { name, cache } = makeHarness(`failed-count-${mode}`);
+      const capture = captureChannels(name);
+      const scalar = mode.startsWith("scalar");
+      const client = scalar
+        ? wrapProducer({
+            cache,
+            produce: async () => {
+              if (mode === "scalar-failure") throw new Error("scalar failed");
+              return { content: "ok", directives: freshFor100 };
+            },
+          })
+        : wrapProducer({
+            cache,
+            produceMany: async (requests) => {
+              if (mode === "rejection") throw new Error("batch failed");
+              if (mode === "contract") return [];
+              return requests.map((_, index) =>
+                index === 0
+                  ? new Error("slot failed")
+                  : { content: "ok", directives: freshFor100 },
+              );
+            },
+          });
+      try {
+        const pending = client.getMany(
+          scalar ? [{ id: "site:a" }] : [{ id: "site:a" }, { id: "site:b" }],
+        );
+        if (mode === "contract") await assert.rejects(pending, /results for/);
+        else await pending;
+        assert.equal(capture.produce.length, 1);
+        assert.equal(
+          capture.produce[0]?.failedRequestCount,
+          mode === "scalar-success"
+            ? 0
+            : mode === "rejection" || mode === "contract"
+              ? 2
+              : 1,
+        );
+        assert.equal(
+          capture.produce[0]?.outcome,
+          mode === "scalar-success" || mode === "partial" ? "success" : "error",
+        );
+      } finally {
+        capture.stop();
+        await client.close();
+        await cache.close();
+      }
+    });
+  }
+});

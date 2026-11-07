@@ -132,9 +132,11 @@ it("an invalid final bulk store ID prevents writes and events", async () => {
   const { cache, store } = makeCache();
   const write = mock.method(store, "store");
   let events = 0;
-  cache.emitter.on("store", () => {
-    events += 1;
-  });
+  const { cacheStoreEntryChannel } = await import("./diagnostics.js");
+  const onStore = (message: { cache: string }) => {
+    if (message.cache === cache.name) events += 1;
+  };
+  cacheStoreEntryChannel.subscribe(onStore);
   try {
     const inputs = [...requests, { id: "invalid" }].map((req) => ({
       id: req.id,
@@ -145,6 +147,7 @@ it("an invalid final bulk store ID prevents writes and events", async () => {
     assert.equal(write.mock.callCount(), 0);
     assert.equal(events, 0);
   } finally {
+    cacheStoreEntryChannel.unsubscribe(onStore);
     await cache.close();
   }
 });

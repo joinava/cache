@@ -263,6 +263,8 @@ Cache hits without pending writes and empty bulk calls receive a fulfilled promi
 ### Diagnostics
 
 The package publishes typed `read`, `read-batch`, `fetch`, `produce`, and `store-entry` channels from `node:diagnostics_channel`.
+V4 removes `Cache.emitter` and its `store` event. Use `cacheStoreEntryChannel` for store diagnostics.
+Producer messages require `failedRequestCount`. A resolved bulk invocation can report `outcome: "success"` with failed result slots.
 Logical reads and fetches report request outcomes and public-call duration. Physical Store and producer events report actual dispatch duration, request counts, failures, and queue wait.
 An operation failure is distinct from its affected logical slots. Bulk producer events can have a `mixed` trigger when requests have different production reasons.
 Subscribers must use bounded cache names, resource types, operation kinds, and outcomes for metric tags. Resource IDs belong in traces or logs, not metric tags.

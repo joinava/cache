@@ -1,4 +1,3 @@
-import { EventEmitter } from "events";
 import type { InvariantOf, ReadonlyDeep } from "type-fest";
 import {
   cacheReadBatchChannel,
@@ -284,7 +283,6 @@ export default class Cache<
    */
   public readonly resourceTypes: RT;
 
-  public readonly emitter = new EventEmitter();
   public readonly normalizeParamName: NormalizeParamName<Params>;
   public readonly normalizeParamValue: NormalizeParamValue<Params>;
 
@@ -624,10 +622,6 @@ export default class Cache<
       "storing the following entries with (possibly inferred) storeFor times",
       entriesWithTimes,
     );
-
-    entriesWithTimes.forEach(({ entry, maxStoreForSeconds }) => {
-      this.emitter.emit("store", entry, maxStoreForSeconds);
-    });
 
     const results = await this.#track(() =>
       this.#dataStore.store(

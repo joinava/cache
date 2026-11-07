@@ -356,7 +356,8 @@ export type CacheProduceMessage = {
   operation?: "produce" | "produceMany";
   automatic?: boolean;
   requestCount?: number;
-  failedRequestCount?: number;
+  /** Failed result slots, or every request when the invocation rejects. */
+  failedRequestCount: number;
   operationFailed?: boolean;
   queueWaitTotalMs?: number;
   /**
