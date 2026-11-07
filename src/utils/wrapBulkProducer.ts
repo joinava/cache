@@ -51,7 +51,6 @@ import {
   notifyStore,
 } from "./wrapProducer.js";
 
-
 /**
  * The bulk counterpart of `wrapProducer`'s `CoveringProducer` (see it for why
  * the covered-set property carries a runtime value, and why it is optional for
@@ -263,7 +262,10 @@ export function wrapBulkProducer<
     ) => {
       const start = performance.now();
 
-      const publishProduce = (outcome: "success" | "error") => {
+      const publishProduce = (
+        outcome: "success" | "error",
+        failedRequestCount?: number,
+      ) => {
         // Building the arg for publishCacheProduce is O(batch-size), so it is
         // especially worth not building when nobody is listening.
         if (!cacheProduceChannel.hasSubscribers) {
@@ -278,6 +280,12 @@ export function wrapBulkProducer<
           })),
           collapsedCallerCount: invocation.attachedCallerCount(),
           outcome,
+          failedRequestCount:
+            failedRequestCount ??
+            requestPairedProducerResults.reduce(
+              (count, result) => count + (result instanceof Error ? 1 : 0),
+              0,
+            ),
           durationMs: performance.now() - start,
         });
       };
@@ -313,7 +321,7 @@ export function wrapBulkProducer<
           );
         }
       } catch (error) {
-        publishProduce("error");
+        publishProduce("error", reqs.length);
         throw error;
       }
       publishProduce("success");
@@ -335,8 +343,14 @@ export function wrapBulkProducer<
         resourcesToStore,
       });
 
-      const stored = (resourcesToStore.length === 0 ? Promise.resolve() : Promise.try(() => cache.store(resourcesToStore))).then(() => undefined);
-      void stored.catch((error: unknown) => { logTrace(`error storing bulk producer's response`, error); });
+      const stored = (
+        resourcesToStore.length === 0
+          ? Promise.resolve()
+          : Promise.try(() => cache.store(resourcesToStore))
+      ).then(() => undefined);
+      void stored.catch((error: unknown) => {
+        logTrace(`error storing bulk producer's response`, error);
+      });
       return { results: requestPairedProducerResults, stored };
     },
     collapseOverlappingRequestsTime * 1000,
@@ -507,7 +521,10 @@ export function wrapBulkProducer<
       const bareItems = groupItems.map(({ item }) => item);
       const attached = collapsedCallProducerAndStore(trigger, bareItems);
 
-      const stored = attached.promise.then(({ stored }) => stored, () => undefined);
+      const stored = attached.promise.then(
+        ({ stored }) => stored,
+        () => undefined,
+      );
       void stored.catch(() => {});
       const handled = attached.promise.then(
         ({ results: producerResults }): (LooseEntry | ErrorType)[] =>
@@ -731,7 +748,10 @@ export function wrapBulkProducer<
       });
     });
 
-    notifyStore(foregroundGroups.map((group) => group.stored), callOptions?.onStore);
+    notifyStore(
+      foregroundGroups.map((group) => group.stored),
+      callOptions?.onStore,
+    );
 
     return orderedResults;
   };

@@ -313,6 +313,7 @@ export function expectProduceMessage(
     requests: readonly { resourceType: string; resourceId: string }[];
     collapsedCallerCount: number;
     outcome: "success" | "error";
+    failedRequestCount?: number;
     minDurationMs?: number;
   },
 ): void {
@@ -329,5 +330,8 @@ export function expectProduceMessage(
     trigger: expected.trigger,
     collapsedCallerCount: expected.collapsedCallerCount,
     outcome: expected.outcome,
+    failedRequestCount:
+      expected.failedRequestCount ??
+      (expected.outcome === "error" ? expected.requests.length : 0),
   });
 }

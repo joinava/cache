@@ -247,6 +247,7 @@ export type CacheFetchDisposition =
       // A pending entry can therefore produce a cache-served disposition even
       // when the store read reported a miss. The read channel reports the
       // actual store lookup; this channel reports the combined caller result.
+      /** Includes entries selected from the wrapper's pending-write overlay. */
       disposition:
         | "served-from-cache"
         | "served-stale-while-revalidating"
@@ -379,6 +380,8 @@ export type CacheProduceMessage = {
    */
   collapsedCallerCount: number;
   outcome: "success" | "error";
+  /** Error slots in a resolved result; all requests when the invocation rejects or violates its contract. */
+  failedRequestCount: number;
   durationMs: number;
 };
 
