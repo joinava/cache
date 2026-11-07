@@ -272,7 +272,7 @@ The package publishes telemetry on five [`diagnostics_channel`](https://nodejs.o
 | Channel                       | Cardinality                                                                             | Message highlights                                                                                                                                                                                                                                                        |
 | ----------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `@zingage/cache:read`        | One per cache lookup (`Cache.get`; per request for `getMany`) — including direct callers | `found`: `"usable"` \| `"usable-while-revalidate"` \| `"usable-if-error"` \| `"none"`, evaluated against the request's directives; plus `vary` — identifying the selected entry's variant — on the three entry-selecting results, and omitted on the others. Bypass requests never appear (they skip the read). A read the store *failed* publishes `found: "read-failed"` with the `error` — one message per request in the failed call — and *then* the error propagates, which keeps the channel a total denominator; only an **aborted** read emits nothing. |
-| `@zingage/cache:read-batch` | One automatic `Cache.get` batch sent to `store.getMany` | Cache name, success/failure, dispatched request count, returned entry count, elapsed store-call duration, and summed caller queue wait. No resource IDs or payloads. |
+| `@zingage/cache:read-batch` | One actual Store read: automatic or direct | Cache name, Store method, success/failure/cancellation, dispatched and failed request counts, returned entry count, Store duration, and summed caller queue wait. No resource IDs or payloads. |
 | `@zingage/cache:fetch`       | One per call of a wrapped producer (per request element, for bulk), at settlement        | `disposition`: `served-from-cache`, `served-stale-while-revalidating`, `served-stale-after-error`, `served-from-producer`, `producer-error`, or `aborted`; `collapsed` (the settlement rode an in-flight invocation; cache-served settlements report `false` even when they attached a background revalidation as a rider); cache-served dispositions carry `vary` (identifying the served entry's variant) and producer-path dispositions carry `directivesImpliedBypass`.       |
 | `@zingage/cache:produce`     | One per actual producer invocation (foreground misses AND background revalidations)      | `trigger`: `"miss"` \| `"revalidation"` \| `"bypass"` (the invocation's initiating cause; riders never re-label); `requests[]` (`{resourceType, resourceId}`, in the order the producer received them — a bulk batch MAY span resource types, so read each element's own `resourceType`); `collapsedCallerCount`; `outcome`; `durationMs`. Producer latency and error rate live here. |
 | `@zingage/cache:store-entry` | One per entry passed to `Cache.store()` (supplementals attributed to their own type)     | `resourceId`, `vary`, `validators`, `relationshipToExistingStoredData` (`"is-new"` \| `"unchanged"` \| `"changed"` \| `undefined`).                                                                                                                                       |
@@ -298,14 +298,24 @@ message producers. Cache lookups emit elapsed time from method entry through
 classification. Bulk slots share one start time; each slot reports its own
 classification completion. Pre-aborted calls still emit no read event.
 
-`cacheReadBatchChannel` reports automatic read batches only. It does not report
-direct `Cache.getMany` calls, unbatched `Cache.get` calls, or empty batches after
-cancelled requests are removed. `requestCount` counts dispatched requests;
-`entryCount` counts returned entries, including duplicate request slots, and is
-zero on failure. `queueWaitTotalMs / requestCount` gives mean caller queue wait.
-`durationMs` covers dispatch through store result validation, before cache result
-classification. It is not database execution time or a physical query count: a
-store may issue multiple queries or use no database.
+`cacheReadBatchChannel` reports every actual Store read: automatic batches,
+direct `Cache.getMany`, and unbatched `Cache.get`. `operation` identifies the
+Store method. Empty direct calls and entirely cancelled queued batches emit
+nothing. `requestCount` counts dispatched slots, including duplicates.
+`failedRequestCount` counts Error slots or every request on whole-operation
+failure. `outcome` is failure when any slot fails. A direct Store rejection after its
+caller cancels reports cancelled with zero failed requests. `entryCount` counts entries
+in successful slots, even when another slot fails; whole-operation failures
+report zero entries. A direct bulk Cache call can reject all its callers for
+one Store Error slot, so logical failure counts can exceed failed Store slots.
+
+`queueWaitTotalMs / requestCount` gives mean dispatched caller queue wait;
+direct calls report zero. `durationMs` covers the Store call and automatic
+result-length validation, before Cache classification. Caller cancellation
+after dispatch does not erase the Store operation's eventual result. Cancelled
+logical reads retain their existing no-event behavior. This is not database
+execution time or a physical query count: a Store may issue multiple queries
+or use no database.
 
 The package does not calculate returned payload bytes, serialize values for
 telemetry, choose metric tags, or create monitors. Subscribers own aggregation
@@ -335,7 +345,9 @@ it can return results.
 ```typescript
 let stored = Promise.resolve();
 const result = await produce(request, {
-  onStore: (promise) => { stored = promise; },
+  onStore: (promise) => {
+    stored = promise;
+  },
 });
 await stored; // Optional: require persistence before starting subsequent work.
 ```

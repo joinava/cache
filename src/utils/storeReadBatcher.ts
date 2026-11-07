@@ -40,44 +40,31 @@ export class StoreReadBatcher<
         const live = reads.filter(({ signal }) => !signal?.aborted);
         if (live.length === 0) return reads.map(() => []);
         // Let a rejection propagate: DataLoader rejects every load in this
-        // batch, and Cache.get reports each non-aborted read failure.
-        const observed = cacheReadBatchChannel.hasSubscribers;
-        const startedAt = observed ? performance.now() : 0;
-        const queueWaitTotalMs = observed
-          ? live.reduce((total, read) => total + startedAt - read.enqueuedAt, 0)
-          : 0;
-        const publishBatch = (
-          outcome: "success" | "failure",
-          entryCount: number,
-        ) => {
-          if (!observed) return;
-          cacheReadBatchChannel.publish({
+        // batch, while per-entry errors reject only their own loads.
+        const results = await observeStoreRead(
+          {
             cache,
-            outcome,
+            operation: "getMany",
             requestCount: live.length,
-            entryCount,
-            durationMs: performance.now() - startedAt,
-            queueWaitTotalMs,
-          });
-        };
-        const results = await Promise.try(() =>
-          store.getMany(live.map(({ request }) => request)),
-        ).catch((error: unknown) => {
-          publishBatch("failure", 0);
-          throw error;
-        });
-        if (results.length !== live.length) {
-          publishBatch("failure", 0);
-          throw new Error(
-            `store.getMany() returned ${results.length} results for ${live.length} requests; it must return one result per request`,
-          );
-        }
-        if (observed) {
-          publishBatch(
-            "success",
-            results.reduce((total, entries) => total + entries.length, 0),
-          );
-        }
+            queueWaitTotalMs: (startedAt) =>
+              live.reduce(
+                (total, read) => total + startedAt - read.enqueuedAt,
+                0,
+              ),
+          },
+          async () => {
+            const results = await store.getMany(
+              live.map(({ request }) => request),
+            );
+            if (results.length !== live.length) {
+              throw new Error(
+                `store.getMany() returned ${results.length} results for ${live.length} requests; it must return one result per request`,
+              );
+            }
+            return results;
+          },
+          summarizeStoreReadResults,
+        );
         // Results cover only live reads; DataLoader needs one slot for every
         // original load, including reads aborted before dispatch.
         const entriesByRead = new Map(
@@ -119,4 +106,75 @@ export class StoreReadBatcher<
   flushNow(): void {
     for (const dispatch of this.#scheduled) dispatch();
   }
+}
+
+/** Observe an actual Store invocation without including caller classification. */
+export async function observeStoreRead<Result>(
+  context: {
+    cache: string;
+    operation: "get" | "getMany";
+    requestCount: number;
+    signal?: AbortSignal | undefined;
+    queueWaitTotalMs?: (startedAt: number) => number;
+  },
+  read: () => Promise<Result>,
+  summarize: (result: Result) => {
+    entryCount: number;
+    failedRequestCount: number;
+  },
+): Promise<Result> {
+  if (!cacheReadBatchChannel.hasSubscribers) return await read();
+  const startedAt = performance.now();
+  const queueWaitTotalMs = context.queueWaitTotalMs?.(startedAt) ?? 0;
+  const publish = (
+    outcome: "success" | "failure" | "cancelled",
+    entryCount: number,
+    failedRequestCount: number,
+  ) => {
+    cacheReadBatchChannel.publish({
+      cache: context.cache,
+      operation: context.operation,
+      outcome,
+      requestCount: context.requestCount,
+      entryCount,
+      failedRequestCount,
+      durationMs: performance.now() - startedAt,
+      queueWaitTotalMs,
+    });
+  };
+  try {
+    const result = await read();
+    const summary = summarize(result);
+    publish(
+      summary.failedRequestCount === 0 ? "success" : "failure",
+      summary.entryCount,
+      summary.failedRequestCount,
+    );
+    return result;
+  } catch (error) {
+    const cancelled = context.signal?.aborted === true;
+    publish(
+      cancelled ? "cancelled" : "failure",
+      0,
+      cancelled ? 0 : context.requestCount,
+    );
+    throw error;
+  }
+}
+
+/** Count returned entries without traversing or serializing their values. */
+export function summarizeStoreReadResults(
+  results: readonly (readonly unknown[] | Error)[],
+): {
+  entryCount: number;
+  failedRequestCount: number;
+} {
+  return results.reduce(
+    (counts, entries) => {
+      if (entries instanceof Error) counts.failedRequestCount += 1;
+      else counts.entryCount += entries.length;
+      return counts;
+    },
+    { entryCount: 0, failedRequestCount: 0 },
+  );
 }

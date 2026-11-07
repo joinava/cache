@@ -11,8 +11,8 @@ import type { StoreEntryRelationship } from "./types/06_Store.js";
  * - `@zingage/cache:read` -- what did a cache lookup find? Published by
  *   `Cache.get`/`Cache.getMany` (including direct callers that never touch a
  *   wrapper).
- * - `@zingage/cache:read-batch` -- one automatic store-read batch, with queue
- *   wait, store duration, and counts. Direct `Cache.getMany` calls are excluded.
+ * - `@zingage/cache:read-batch` -- one actual Store read, automatic or direct,
+ *   with queue wait, Store duration, and request/entry/failure counts.
  * - `@zingage/cache:fetch` -- how was a logical wrapped-producer request
  *   answered? Published by the producer wrappers, once per call of the
  *   wrapped function (per request element, for bulk), at settlement.
@@ -22,7 +22,7 @@ import type { StoreEntryRelationship } from "./types/06_Store.js";
  * - `@zingage/cache:store-entry` -- one message per entry passed to
  *   `Cache.store()`.
  *
- * Batch-read messages carry only the cache name because they can mix resource
+ * Store-read messages carry only the cache name because they can mix resource
  * types. Other messages carry the same two attribution fields ({@link Attribution};
  * `produce` carries them per element of `requests[]` instead): the cache
  * instance's `name` and the resource-type name from the cache's registry.
@@ -459,18 +459,26 @@ export function publishCacheStoreEntry(message: CacheStoreEntryMessage): void {
 }
 
 /**
- * One automatic Cache.get batch sent to store.getMany. Aborted requests removed
- * before dispatch do not count. An entirely aborted batch emits no event.
- * Duration covers the store call and result-length check, excluding cache result
- * classification. Queue wait is summed across dispatched requests; divide by
- * requestCount for mean caller wait. Failure reports zero returned entries.
+ * One actual Store read invoked by Cache: automatic getMany batches, direct
+ * getMany calls, or unbatched get calls. Empty or entirely cancelled automatic
+ * batches emit nothing. Requests cancelled before dispatch do not count.
+ * Duration covers the Store call and automatic result-length validation,
+ * excluding Cache classification. Direct calls have zero queue wait. Automatic
+ * queue wait is summed across dispatched requests; divide by requestCount for
+ * the mean. Entry errors count as failed requests while successful slots still
+ * contribute entries. Whole-operation failures report no returned entries and
+ * fail every dispatched request. Direct Store rejection after caller cancellation
+ * reports cancelled with zero failed requests. Cancellation after dispatch does not erase
+ * the underlying Store operation's eventual result.
  * No resource IDs, payloads, or error values are included.
  */
 export type CacheReadBatchMessage = {
   cache: string;
-  outcome: "success" | "failure";
+  operation: "get" | "getMany";
+  outcome: "success" | "failure" | "cancelled";
   requestCount: number;
   entryCount: number;
+  failedRequestCount: number;
   durationMs: number;
   queueWaitTotalMs: number;
 };
