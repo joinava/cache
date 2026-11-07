@@ -1,3 +1,4 @@
+import { getOne, throwIfAnyError, getMany } from "../../utils/utils.js";
 import assert from "node:assert/strict";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -52,8 +53,14 @@ describe("SqliteStore", () => {
       await store.store([]);
       await store.delete("missing");
 
-      assert.deepEqual(await store.get("missing", matchingParams), []);
-      assert.deepEqual(await store.getMany([] as const), []);
+      assert.deepEqual(
+        await getOne(store, { id: "missing", params: matchingParams }),
+        [],
+      );
+      assert.deepEqual(
+        await getMany(store, [] as const).then(throwIfAnyError),
+        [],
+      );
     });
   });
 
@@ -80,7 +87,10 @@ describe("SqliteStore", () => {
         databasePath,
       });
       try {
-        const result = await reopened.get("id", matchingParams);
+        const result = await getOne(reopened, {
+          id: "id",
+          params: matchingParams,
+        });
 
         assert.equal(result.length, 1);
         assert.deepEqual(result[0]?.content, entry.content);
@@ -119,7 +129,7 @@ describe("SqliteStore", () => {
         },
       ]);
 
-      const result = await store.get("id", matchingParams);
+      const result = await getOne(store, { id: "id", params: matchingParams });
 
       assert.equal(result.length, 1);
       assert.deepEqual(result[0]?.content, { value: "newest-birth" });
@@ -140,7 +150,7 @@ describe("SqliteStore", () => {
         },
       ]);
 
-      const result = await store.get("id", matchingParams);
+      const result = await getOne(store, { id: "id", params: matchingParams });
 
       assert.equal(result.length, 1);
       assert.deepEqual(result[0]?.content, { value: "replacement" });
@@ -163,8 +173,14 @@ describe("SqliteStore", () => {
 
       await store.delete("id");
 
-      assert.deepEqual(await store.get("id", matchingParams), []);
-      assert.equal((await store.get("other", matchingParams)).length, 1);
+      assert.deepEqual(
+        await getOne(store, { id: "id", params: matchingParams }),
+        [],
+      );
+      assert.equal(
+        (await getOne(store, { id: "other", params: matchingParams })).length,
+        1,
+      );
     });
   });
 
@@ -176,7 +192,10 @@ describe("SqliteStore", () => {
 
       await store.delete("missing");
 
-      assert.equal((await store.get("id", matchingParams)).length, 1);
+      assert.equal(
+        (await getOne(store, { id: "id", params: matchingParams })).length,
+        1,
+      );
     });
   });
 
@@ -191,7 +210,9 @@ describe("SqliteStore", () => {
       ]);
 
       assert.deepEqual(
-        (await store.get("id", matchingParams)).map(({ content }) => content),
+        (await getOne(store, { id: "id", params: matchingParams })).map(
+          ({ content }) => content,
+        ),
         [{ value: "live" }],
       );
       await store.close();
@@ -201,7 +222,7 @@ describe("SqliteStore", () => {
       });
       try {
         assert.deepEqual(
-          (await reopened.get("id", matchingParams)).map(
+          (await getOne(reopened, { id: "id", params: matchingParams })).map(
             ({ content }) => content,
           ),
           [{ value: "live" }],
@@ -222,7 +243,10 @@ describe("SqliteStore", () => {
           },
         ]);
 
-        assert.deepEqual(await store.get("id", matchingParams), []);
+        assert.deepEqual(
+          await getOne(store, { id: "id", params: matchingParams }),
+          [],
+        );
       },
       { fallbackDeleteAfter: -1 },
     );
@@ -239,7 +263,9 @@ describe("SqliteStore", () => {
         ]);
 
         assert.deepEqual(
-          (await store.get("id", matchingParams)).map(({ content }) => content),
+          (await getOne(store, { id: "id", params: matchingParams })).map(
+            ({ content }) => content,
+          ),
           [{ value: "forever" }],
         );
       },
@@ -266,19 +292,19 @@ describe("SqliteStore", () => {
       ]);
 
       assert.deepEqual(
-        (await store.get("id", matchingParams))
+        (await getOne(store, { id: "id", params: matchingParams }))
           .map(({ content }) => content.value)
           .sort(),
         ["empty", "format", "lang"],
       );
       assert.deepEqual(
-        (await store.get("id", missingFormatParams))
+        (await getOne(store, { id: "id", params: missingFormatParams }))
           .map(({ content }) => content.value)
           .sort(),
         ["empty", "lang", "missing-format"],
       );
       assert.deepEqual(
-        (await store.get("id", unmatchedParams))
+        (await getOne(store, { id: "id", params: unmatchedParams }))
           .map(({ content }) => content.value)
           .sort(),
         ["empty", "lang"],
@@ -297,12 +323,12 @@ describe("SqliteStore", () => {
         { entry: makeEntry("two", "two-json"), maxStoreForSeconds: 60 },
       ]);
 
-      const result = await store.getMany([
+      const result = await getMany(store, [
         { id: "one", params: matchingParams },
         { id: "missing", params: matchingParams },
         { id: "two", params: unmatchedParams },
         { id: "one", params: unmatchedParams },
-      ] as const);
+      ] as const).then(throwIfAnyError);
 
       assert.deepEqual(result[0].map(({ content }) => content.value).sort(), [
         "one-any",
@@ -329,9 +355,10 @@ describe("SqliteStore", () => {
         },
       ]);
 
-      const result = await store.getMany(
+      const result = await getMany(
+        store,
         ids.map((id) => ({ id, params: matchingParams })),
-      );
+      ).then(throwIfAnyError);
 
       assert.equal(result.length, requestCount);
       assert.deepEqual(result[0]?.[0]?.content, { value: "first" });
@@ -367,14 +394,16 @@ describe("SqliteStore", () => {
       ]);
 
       assert.deepEqual(
-        (await store.get("user:1", matchingParams))[0]?.content,
+        (await getOne(store, { id: "user:1", params: matchingParams }))[0]
+          ?.content,
         {
           kind: "user",
           name: "Ada",
         },
       );
       assert.deepEqual(
-        (await store.get("posts:1", matchingParams))[0]?.content,
+        (await getOne(store, { id: "posts:1", params: matchingParams }))[0]
+          ?.content,
         {
           kind: "posts",
           count: 3,
@@ -394,8 +423,14 @@ describe("SqliteStore", () => {
       await writeFile(databasePath, "not sqlite", "utf8");
       const store = new SqliteStore<TestSpec, {}, TestParams>({ databasePath });
 
+      const failed = await getMany(store, [
+        { id: "first", params: matchingParams },
+        { id: "second", params: matchingParams },
+      ]);
+      assert.ok(failed[0] instanceof Error);
+      assert.equal(failed[1], failed[0]);
       await assert.rejects(
-        async () => store.get("id", matchingParams),
+        async () => getOne(store, { id: "id", params: matchingParams }),
         /file is not a database|database disk image is malformed|SqliteStore/i,
       );
       await store.close();
@@ -411,14 +446,18 @@ describe("SqliteStore", () => {
 
       await assert.rejects(
         async () =>
-          store.get("id", matchingParams, { signal: controller.signal }),
+          getOne(
+            store,
+            { id: "id", params: matchingParams },
+            { signal: controller.signal },
+          ),
         /aborted|AbortError/i,
       );
       await assert.rejects(
         async () =>
-          store.getMany([{ id: "id", params: matchingParams }] as const, {
+          getMany(store, [{ id: "id", params: matchingParams }] as const, {
             signal: controller.signal,
-          }),
+          }).then(throwIfAnyError),
         /aborted|AbortError/i,
       );
     });
@@ -436,7 +475,7 @@ describe("SqliteStore", () => {
           locker.exec("BEGIN IMMEDIATE");
 
           assert.deepEqual(
-            (await store.get("id", matchingParams)).map(
+            (await getOne(store, { id: "id", params: matchingParams })).map(
               ({ content }) => content,
             ),
             [{ value: "live" }],
@@ -455,12 +494,14 @@ describe("SqliteStore", () => {
       await store.close();
 
       await assert.rejects(
-        async () => store.get("id", matchingParams),
+        async () => getOne(store, { id: "id", params: matchingParams }),
         /SqliteStore is closed/,
       );
       await assert.rejects(
         async () =>
-          store.getMany([{ id: "id", params: matchingParams }] as const),
+          getMany(store, [{ id: "id", params: matchingParams }] as const).then(
+            throwIfAnyError,
+          ),
         /SqliteStore is closed/,
       );
       await assert.rejects(
@@ -498,9 +539,10 @@ describe("SqliteStore", () => {
           ),
         );
 
-        const result = await store.getMany(
+        const result = await getMany(
+          store,
           ids.map((id) => ({ id, params: matchingParams })),
-        );
+        ).then(throwIfAnyError);
 
         assert.deepEqual(
           result
@@ -526,7 +568,7 @@ describe("SqliteStore", () => {
 
       await Promise.all(writes);
 
-      const result = await store.get("id", matchingParams);
+      const result = await getOne(store, { id: "id", params: matchingParams });
 
       assert.equal(result.length, 1);
       assert.match(result[0]?.content.value ?? "", /^value:\d+$/);
@@ -556,13 +598,15 @@ describe("SqliteStore", () => {
       ]);
 
       assert.deepEqual(
-        (await first.get("second", matchingParams))[0]?.content,
+        (await getOne(first, { id: "second", params: matchingParams }))[0]
+          ?.content,
         {
           value: "from-second",
         },
       );
       assert.deepEqual(
-        (await second.get("first", matchingParams))[0]?.content,
+        (await getOne(second, { id: "first", params: matchingParams }))[0]
+          ?.content,
         {
           value: "from-first",
         },
@@ -593,12 +637,14 @@ describe("SqliteStore", () => {
                 maxStoreForSeconds: 60,
               },
             ]),
-            store.get(id, matchingParams).then((entries) => {
-              for (const entry of entries) {
-                assert.equal(entry.id, id);
-                assert.deepEqual(entry.vary, varyOnFormat);
-              }
-            }),
+            getOne(store, { id: id, params: matchingParams }).then(
+              (entries) => {
+                for (const entry of entries) {
+                  assert.equal(entry.id, id);
+                  assert.deepEqual(entry.vary, varyOnFormat);
+                }
+              },
+            ),
           );
           if (i % 3 === 0) {
             operations.push(store.delete(id));
@@ -609,7 +655,10 @@ describe("SqliteStore", () => {
 
         for (let i = 0; i < 20; i += 1) {
           const id = `id:${i}`;
-          for (const entry of await store.get(id, matchingParams)) {
+          for (const entry of await getOne(store, {
+            id: id,
+            params: matchingParams,
+          })) {
             assert.equal(entry.id, id);
             assert.deepEqual(entry.vary, varyOnFormat);
           }
@@ -642,7 +691,8 @@ describe("SqliteStore", () => {
       });
       try {
         assert.deepEqual(
-          (await reopened.get("id", matchingParams))[0]?.content,
+          (await getOne(reopened, { id: "id", params: matchingParams }))[0]
+            ?.content,
           {
             value: "artifact",
           },
@@ -653,6 +703,86 @@ describe("SqliteStore", () => {
     } finally {
       await store.close();
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+it("preserves successful SQLite chunks around a failed middle chunk", async () => {
+  await withTempStore(
+    async ({ store, databasePath }) => {
+      await store.store(
+        [0, 900, 1800].map((index) => ({
+          entry: makeEntry(`id:${index}`, String(index)),
+          maxStoreForSeconds: 60,
+        })),
+      );
+      // Initialize the one reader before replacing its read relation with a faulting view.
+      await store.getMany([{ id: "warm", params: matchingParams }]);
+      const db = new sqlite.DatabaseSync(databasePath);
+      try {
+        db.exec(`ALTER TABLE cache_entries RENAME TO cache_source;
+        CREATE VIEW cache_entries AS SELECT resource_id, variant_key, vary,
+          CASE WHEN resource_id = 'id:900' THEN json('{') ELSE entry END AS entry,
+          expires_at FROM cache_source;`);
+        const requests = Array.from({ length: 1801 }, (_, index) => ({
+          id: `id:${index}`,
+          params: matchingParams,
+        }));
+        const results = await store.getMany(requests);
+        assert.equal(results.length, requests.length);
+        const first = results[0];
+        const last = results[1800];
+        assert.ok(Array.isArray(first));
+        assert.ok(Array.isArray(last));
+        assert.equal(first[0]?.content.value, "0");
+        assert.equal(last[0]?.content.value, "1800");
+        assert.ok(
+          results.slice(900, 1800).every((slot) => slot instanceof Error),
+        );
+        assert.equal(results[900], results[1799]);
+      } finally {
+        db.exec(
+          "DROP VIEW cache_entries; ALTER TABLE cache_source RENAME TO cache_entries;",
+        );
+        db.close();
+      }
+    },
+    { readWorkerCount: 1 },
+  );
+});
+
+it("fails complete SQLite request slots for malformed variants and entry decoding", async () => {
+  await withTempStore(async ({ store, databasePath }) => {
+    await store.store([
+      { entry: makeEntry("vary-bad", "bad"), maxStoreForSeconds: 60 },
+      { entry: makeEntry("entry-bad", "bad"), maxStoreForSeconds: 60 },
+      {
+        entry: makeEntry("entry-bad", "valid-other-variant", emptyVary),
+        maxStoreForSeconds: 60,
+      },
+      { entry: makeEntry("good", "good"), maxStoreForSeconds: 60 },
+    ]);
+    const db = new sqlite.DatabaseSync(databasePath);
+    try {
+      db.prepare("UPDATE cache_entries SET vary = ? WHERE resource_id = ?").run(
+        "{",
+        "vary-bad",
+      );
+      db.prepare(
+        "UPDATE cache_entries SET entry = ? WHERE resource_id = ? AND vary != '{}'",
+      ).run("{", "entry-bad");
+      const result = await store.getMany(
+        ["vary-bad", "entry-bad", "good"].map((id) => ({
+          id,
+          params: matchingParams,
+        })),
+      );
+      assert.ok(result[0] instanceof Error);
+      assert.ok(result[1] instanceof Error);
+      assert.ok(Array.isArray(result[2]));
+      assert.equal(result[2][0]?.content.value, "good");
+    } finally {
+      db.close();
     }
   });
 });

@@ -17,7 +17,6 @@ import {
   idStartsWith,
   producerByIdType,
   resourceType,
-  wrapBulkProducer,
   wrapProducer,
   type ResourceTypes,
   type SpecOf,
@@ -112,9 +111,9 @@ describe("single producer function + by-id-type sugar", () => {
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer({ cache }, bulkProducer);
+      const getBulk = wrapProducer({ cache, produceMany: bulkProducer });
       try {
-        const results = await getBulk([
+        const results = await getBulk.getMany([
           { id: "story:1" },
           { id: "collection:1" },
           { id: "story:2" },
@@ -156,15 +155,15 @@ describe("single producer function + by-id-type sugar", () => {
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer(
-        { cache },
-        bulkProducerByIdType(cache.resourceTypes, {
+      const getBulk = wrapProducer({
+        cache,
+        produceMany: bulkProducerByIdType(cache.resourceTypes, {
           story: storyBulk,
           collection: collectionBulk,
         }),
-      );
+      });
       try {
-        const results = await getBulk([
+        const results = await getBulk.getMany([
           { id: "story:1" },
           { id: "collection:1" },
           { id: "story:2" },
@@ -210,15 +209,15 @@ describe("single producer function + by-id-type sugar", () => {
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer(
-        { cache },
-        bulkProducerByIdType(cache.resourceTypes, {
+      const getBulk = wrapProducer({
+        cache,
+        produceMany: bulkProducerByIdType(cache.resourceTypes, {
           story: storyBulk,
           collection: collectionBulk,
         }),
-      );
+      });
       try {
-        const results = await getBulk([
+        const results = await getBulk.getMany([
           { id: "story:dupe", params: { variant: "a" } },
           { id: "collection:1" },
           { id: "story:dupe", params: { variant: "b" } },
@@ -241,7 +240,7 @@ describe("single producer function + by-id-type sugar", () => {
   describe("3. error isolation inside bulkProducerByIdType (§3.4)", () => {
     it("a REJECTING sub-producer errors only its own type's slots; the other type's results are delivered normally", async () => {
       const { name, cache } = makeHarness("sp-sugar-error-isolation");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const storyFailure = new Error("story origin unreachable");
       const storyBulk = mock.fn(async () => {
         throw storyFailure;
@@ -252,15 +251,15 @@ describe("single producer function + by-id-type sugar", () => {
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer(
-        { cache },
-        bulkProducerByIdType(cache.resourceTypes, {
+      const getBulk = wrapProducer({
+        cache,
+        produceMany: bulkProducerByIdType(cache.resourceTypes, {
           story: storyBulk,
           collection: collectionBulk,
         }),
-      );
+      });
       try {
-        const results = await getBulk([
+        const results = await getBulk.getMany([
           { id: "story:1" },
           { id: "collection:1" },
           { id: "story:2" },
@@ -319,16 +318,16 @@ describe("single producer function + by-id-type sugar", () => {
   describe("4. diagnostics: one produce message per invocation, spanning types (§5.3)", () => {
     it("a bare producer's mixed batch publishes exactly ONE produce message whose requests[] carries each element's own resourceType", async () => {
       const { name, cache } = makeHarness("sp-produce-bare");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const bulkProducer = mock.fn(async (reqs: BulkReqs) =>
         reqs.map((req) => ({
           content: `produced-${req.id}`,
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer({ cache }, bulkProducer);
+      const getBulk = wrapProducer({ cache, produceMany: bulkProducer });
       try {
-        await getBulk([
+        await getBulk.getMany([
           { id: "story:1" },
           { id: "collection:1" },
           { id: "story:2" },
@@ -401,19 +400,24 @@ describe("single producer function + by-id-type sugar", () => {
       // `{ visits: fn }` -> `fn` is the migration §7 applies to the majority of
       // the monorepo's cache constructions; the two forms must be
       // indistinguishable to callers.
-      const getBare = wrapProducer({ cache: bare.cache }, bareProducer);
-      const getRecord = wrapProducer(
-        { cache: record.cache },
-        producerByIdType(record.cache.resourceTypes, {
+      const getBare = wrapProducer({
+        cache: bare.cache,
+        produce: bareProducer,
+      });
+      const getRecord = wrapProducer({
+        cache: record.cache,
+        produce: producerByIdType(record.cache.resourceTypes, {
           visits: recordProducer,
         }),
-      );
-      const bareCapture = captureChannels(bare.name);
-      const recordCapture = captureChannels(record.name);
+      });
+      const bareCapture = captureChannels(bare.name, { measurements: false });
+      const recordCapture = captureChannels(record.name, {
+        measurements: false,
+      });
       try {
         const [bareMiss, recordMiss] = await Promise.all([
-          getBare({ id: "v1" }),
-          getRecord({ id: "v1" }),
+          getBare.get({ id: "v1" }),
+          getRecord.get({ id: "v1" }),
         ]);
         // `date` is stamped per invocation, so it legitimately differs between
         // the two independent producer calls; everything else must match.
@@ -432,8 +436,8 @@ describe("single producer function + by-id-type sugar", () => {
         );
 
         const [bareHit, recordHit] = await Promise.all([
-          getBare({ id: "v1" }),
-          getRecord({ id: "v1" }),
+          getBare.get({ id: "v1" }),
+          getRecord.get({ id: "v1" }),
         ]);
         expect(omit(bareHit, ["date"])).to.deep.equal(
           omit(recordHit, ["date"]),
@@ -466,7 +470,7 @@ describe("single producer function + by-id-type sugar", () => {
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer({ cache }, bulkProducer);
+      const getBulk = wrapProducer({ cache, produceMany: bulkProducer });
       try {
         await cache.store([
           {
@@ -476,7 +480,7 @@ describe("single producer function + by-id-type sugar", () => {
           },
         ]);
 
-        const results = await getBulk([
+        const results = await getBulk.getMany([
           { id: "b" },
           { id: "cached-1" },
           { id: "a" },

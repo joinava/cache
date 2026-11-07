@@ -1,7 +1,7 @@
 /**
  * @fileoverview The hashed-input producer builder: a `.when` chain over a
  * declared variant map that produces an opaque value only
- * {@link wrapHashedInputProducer}/`wrapBulkHashedInputProducer` can consume.
+ * {@link wrapHashedInputProducer}/`wrapHashedInputProducer` can consume.
  *
  * Split out from the wrappers because it deliberately does not need them, or a
  * `Cache`: a hashed-input producer is a value in its own right, buildable and
@@ -142,6 +142,7 @@ export const builtBranches = Symbol("hashedInputProducer.branches");
  */
 export type HashedInputProducer<Meta extends HashedInputProducerMeta> = {
   readonly [builtBranches]: {
+    readonly kind: "single" | "bulk";
     readonly entries: readonly (readonly [string, LooseBranch<never>])[];
     readonly meta?: Meta;
   };
@@ -231,7 +232,7 @@ type LooseBranchArg = {
    * Erased further than the rest, because this chain serves both entry points
    * and their `produce`s genuinely disagree: the single form returns one result,
    * the bulk form an array of them. Which one a branch holds is known to the
-   * wrapper that reads it (`wrapBulkHashedInputProducer` re-reads the entries as
+   * wrapper that reads it (`wrapHashedInputProducer` re-reads the entries as
    * its local `LooseBulkBranch`), never to the chain.
    */
   readonly produce: (input: never) => Promise<unknown>;
@@ -258,6 +259,7 @@ type LooseBuilderChain = {
   ) => LooseBuilderChain;
   build: () => {
     readonly [builtBranches]: {
+      readonly kind: "single" | "bulk";
       readonly entries: readonly (readonly [string, LooseBranch<never>])[];
     };
   };
@@ -271,6 +273,7 @@ type LooseBuilderChain = {
 function makeBuilderChain(
   builderName: string,
   entries: readonly (readonly [string, LooseBranch<never>])[],
+  kind: "single" | "bulk",
 ): LooseBuilderChain {
   return {
     when: (matchesInput, branch) => {
@@ -286,27 +289,31 @@ function makeBuilderChain(
             `"${branch.name}"; each variant may be covered only once.`,
         );
       }
-      return makeBuilderChain(builderName, [
-        ...entries,
+      return makeBuilderChain(
+        builderName,
         [
-          branch.name,
-          {
-            hashInput: branch.hashInput,
-            // SAFETY: re-narrows the single-form `produce` this entries array
-            // declares. A bulk branch really does return an array here, which is
-            // why the bulk wrapper re-reads the entries as `LooseBulkBranch`.
-            produce: branch.produce as LooseBranch<never>["produce"],
-            // SAFETY (variance only): a guard is declared over its own variant's
-            // input at the call site, but `findBranch` has to call every branch's
-            // guard with an as-yet-unclassified input. `name` is deliberately not
-            // carried over: a stored branch is keyed by it, and `LooseBranch`
-            // never declared it.
-            matchesInput: matchesInput as NonNullable<
-              LooseBranch<never>["matchesInput"]
-            >,
-          },
+          ...entries,
+          [
+            branch.name,
+            {
+              hashInput: branch.hashInput,
+              // SAFETY: re-narrows the single-form `produce` this entries array
+              // declares. A bulk branch really does return an array here, which is
+              // why the bulk wrapper re-reads the entries as `LooseBulkBranch`.
+              produce: branch.produce as LooseBranch<never>["produce"],
+              // SAFETY (variance only): a guard is declared over its own variant's
+              // input at the call site, but `findBranch` has to call every branch's
+              // guard with an as-yet-unclassified input. `name` is deliberately not
+              // carried over: a stored branch is keyed by it, and `LooseBranch`
+              // never declared it.
+              matchesInput: matchesInput as NonNullable<
+                LooseBranch<never>["matchesInput"]
+              >,
+            },
+          ],
         ],
-      ]);
+        kind,
+      );
     },
     build: () => {
       if (entries.length === 0) {
@@ -315,7 +322,7 @@ function makeBuilderChain(
             "so the producer could never produce anything.",
         );
       }
-      return { [builtBranches]: { entries } };
+      return { [builtBranches]: { entries, kind } };
     },
   };
 }
@@ -337,7 +344,7 @@ function makeBuilderChain(
  *   })
  *   .build();
  *
- * const compute = wrapHashedInputProducer({ cache, hashedInputProducer: producer });
+ * const compute = wrapHashedInputProducer({ cache, produce: producer });
  * ```
  *
  * `Validators`/`Params` are declared here rather than taken from a cache
@@ -366,6 +373,7 @@ export function hashedInputProducerByInputType<
   return makeBuilderChain(
     "hashedInputProducerByInputType",
     [],
+    "single",
   ) as HashedInputProducerBuilder<
     V,
     Validators,
@@ -434,7 +442,7 @@ export type BulkHashedInputProducerBuilder<
 
 /**
  * Starts a {@link BulkHashedInputProducerBuilder}. Same contract as
- * {@link hashedInputProducerByInputType}, for {@link wrapBulkHashedInputProducer}.
+ * {@link hashedInputProducerByInputType}, for {@link wrapHashedInputProducer}.
  */
 export function bulkHashedInputProducerByInputType<
   V extends AnyHashedInputVariants,
@@ -455,6 +463,7 @@ export function bulkHashedInputProducerByInputType<
   return makeBuilderChain(
     "bulkHashedInputProducerByInputType",
     [],
+    "bulk",
   ) as BulkHashedInputProducerBuilder<
     V,
     Validators,

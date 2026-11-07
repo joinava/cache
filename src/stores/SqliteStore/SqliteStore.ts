@@ -15,24 +15,28 @@ import type { AnyValidators } from "../../types/02_Validators.js";
 import type {
   Entry,
   JsonifiedEntry,
-  NormalizedParams,
   NormalizedVary,
 } from "../../types/06_Normalization.js";
 import type {
+  StoreOperations,
+  BulkStoreReader,
   StoreEntryResult,
   StoreGetManyResult,
 } from "../../types/06_Store.js";
 import type {
   EntryForId,
   Logger,
-  Store,
   StoreEntryInput,
   StoreGetManyRequest,
   Vary,
 } from "../../types/index.js";
 import { restoreInfinityInDirectives } from "../../utils/normalization.js";
 import { birthDate } from "../../utils/normalizedProducerResultResourceHelpers.js";
-import { keepMaxPerGroup } from "../../utils/utils.js";
+import {
+  asError,
+  CacheContractError,
+  keepMaxPerGroup,
+} from "../../utils/utils.js";
 import { resultVariantKey } from "../../utils/varyHelpers.js";
 import type {
   ReadWorkerRequestInput,
@@ -69,7 +73,11 @@ export default class SqliteStore<
   Spec extends SqliteStoreCompatibleSpec = SqliteStoreCompatibleSpec,
   Validators extends AnyValidators = AnyValidators,
   Params extends SqliteStoreSupportedParams = SqliteStoreSupportedParams,
-> implements Store<Spec, Validators, Params> {
+>
+  implements
+    StoreOperations<Spec, Validators, Params>,
+    BulkStoreReader<Spec, Validators, Params>
+{
   readonly #fallbackDeleteAfter: number;
   readonly #log: Logger;
   readonly #writerPool: Piscina<
@@ -81,6 +89,7 @@ export default class SqliteStore<
     WorkerResultForRequest<ReadWorkerRequestInput>
   >;
 
+  readonly #pending = new Set<Promise<unknown>>();
   #status: "open" | "closing" | "closed" = "open";
   #closePromise: Promise<void> | undefined;
   #lazyCleanupPromise: Promise<void> | undefined;
@@ -146,55 +155,48 @@ export default class SqliteStore<
     });
   }
 
-  public async get<Id extends Spec["id"]>(
-    id: Id,
-    params: Readonly<NormalizedParams<Params>>,
-    options?: { signal?: AbortSignal },
-  ): Promise<EntryForId<Spec, Validators, Params, Id>[]> {
-    options?.signal?.throwIfAborted();
-
-    const entries = await this.#read({
-      type: "get",
-      id,
-      params,
-    });
-
-    options?.signal?.throwIfAborted();
-    this.#scheduleLazyCleanup();
-    // The SQL key can lose lone surrogates, while entry JSON preserves them.
-    // Check the persisted ID too, so a colliding well-formed ID cannot hit.
-    return entries
-      .map((entry) => this.#deserializeEntry<Id>(entry))
-      .filter((entry) => entry.id === id);
-  }
-
   public async getMany<
     const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
   >(
     requests: Reqs,
     options?: { signal?: AbortSignal },
-  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params, never>> {
+  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
     options?.signal?.throwIfAborted();
 
-    const entries = await this.#read({
-      type: "getMany",
-      requests: requests.map(({ id, params }) => ({ id, params })),
-    });
-
-    options?.signal?.throwIfAborted();
-    this.#scheduleLazyCleanup();
-    return entries.map((requestEntries, index) =>
-      requestEntries
-        .map((entry) => this.#deserializeEntry<Spec["id"]>(entry))
-        .filter((entry) => entry.id === requests[index]!.id),
-    ) satisfies EntryForId<Spec, Validators, Params, Spec["id"]>[][] as {
-      -readonly [K in keyof Reqs]: EntryForId<
-        Spec,
-        Validators,
-        Params,
-        Reqs[K]["id"]
-      >[];
-    };
+    if (requests.length === 0)
+      return [] as StoreGetManyResult<Spec, Reqs, Validators, Params>;
+    const cancelled = new Int32Array(
+      new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT),
+    );
+    const onAbort = () => Atomics.store(cancelled, 0, 1);
+    options?.signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      const entries = await this.#read({
+        type: "getMany",
+        requests,
+        cancelled,
+      });
+      options?.signal?.throwIfAborted();
+      if (entries.length !== requests.length)
+        throw new CacheContractError("SQLite returned an invalid result count");
+      this.#scheduleLazyCleanup();
+      return entries.map((requestEntries, index) => {
+        if (requestEntries instanceof Error) return requestEntries;
+        try {
+          // Check persisted IDs because SQL text binding can replace lone surrogates.
+          return requestEntries
+            .map((entry) => this.#deserializeEntry<Spec["id"]>(entry))
+            .filter((entry) => entry.id === requests[index]!.id);
+        } catch (failure) {
+          return asError(failure);
+        }
+      }) as StoreGetManyResult<Spec, Reqs, Validators, Params>;
+    } catch (error) {
+      options?.signal?.throwIfAborted();
+      throw error;
+    } finally {
+      options?.signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   public async store(
@@ -226,63 +228,48 @@ export default class SqliteStore<
     await this.#write({ type: "delete", id });
   }
 
-  public async close(timeout?: number): Promise<void> {
+  public close(): Promise<void> {
     this.#closePromise ??= this.#closeGracefully();
-
-    return timeout === undefined
-      ? this.#closePromise
-      : withTimeout(this.#closePromise, timeout, async () => {
-          this.#status = "closed";
-          await Promise.all([
-            this.#writerPool.destroy(),
-            this.#readPool.destroy(),
-          ]);
-        });
+    return this.#closePromise;
   }
 
   async #closeGracefully(): Promise<void> {
-    if (this.#status === "closed") return;
     this.#status = "closing";
-    let readPoolClosed = false;
-    let writerPoolClosed = false;
-    let closeError: unknown;
-
+    // Drain first: Piscina.close has an implicit deadline and may abandon work.
+    await Promise.allSettled(this.#pending);
+    const failures: unknown[] = [];
     try {
-      try {
-        // Piscina does not expose a worker shutdown hook that it awaits. Read
-        // connections are released when Piscina terminates the read workers; the
-        // writer is closed explicitly below because it must checkpoint the WAL.
-        await this.#readPool.close();
-        readPoolClosed = true;
-      } catch (error) {
-        closeError = error;
-      }
-
-      try {
-        await this.#write(
-          { type: "close", checkpoint: true },
-          { allowWhenClosing: true },
-        );
-        await this.#writerPool.close();
-        writerPoolClosed = true;
-      } catch (error) {
-        closeError ??= error;
-      }
-
-      if (closeError !== undefined) {
-        throw closeError;
-      }
-    } finally {
-      this.#status = "closed";
-      await Promise.all([
-        writerPoolClosed ? Promise.resolve() : this.#writerPool.destroy(),
-        readPoolClosed ? Promise.resolve() : this.#readPool.destroy(),
-      ]);
+      await this.#write(
+        { type: "close", checkpoint: true },
+        { allowWhenClosing: true },
+      );
+    } catch (error) {
+      failures.push(error);
     }
+    // No accepted tasks remain. Termination releases every read connection.
+    const pools = await Promise.allSettled([
+      this.#readPool.destroy(),
+      this.#writerPool.destroy(),
+    ]);
+    pools.forEach((result) => {
+      if (result.status === "rejected") failures.push(result.reason);
+    });
+    this.#status = "closed";
+    if (failures.length > 0)
+      throw new AggregateError(failures, "SQLite cleanup failed");
   }
 
   public async [Symbol.asyncDispose](): Promise<void> {
-    return this.close(60_000);
+    return this.close();
+  }
+
+  #track<T>(pending: Promise<T>): Promise<T> {
+    this.#pending.add(pending);
+    void pending.then(
+      () => this.#pending.delete(pending),
+      () => this.#pending.delete(pending),
+    );
+    return pending;
   }
 
   #prepareEntries(
@@ -353,6 +340,9 @@ export default class SqliteStore<
       AnyParams
     >;
 
+    const date = parseDateString(_.date satisfies string as DateString);
+    if (!Number.isFinite(date.getTime()))
+      throw new Error("Invalid cached entry date");
     return {
       id: _.id,
       content: _.content,
@@ -360,7 +350,7 @@ export default class SqliteStore<
       validators: _.validators satisfies AnyValidators as Partial<Validators>,
       directives: restoreInfinityInDirectives(_.directives),
       initialAge: _.initialAge,
-      date: parseDateString(_.date satisfies string as DateString),
+      date,
     } satisfies Entry<
       SqliteStoreCompatibleSpec,
       Validators,
@@ -404,7 +394,7 @@ export default class SqliteStore<
       return Promise.reject(new Error("SqliteStore is closed"));
     }
 
-    return this.#writerPool.run(message) as Promise<
+    return this.#track(this.#writerPool.run(message)) as Promise<
       WorkerResultForRequest<Message>
     >;
   }
@@ -416,38 +406,10 @@ export default class SqliteStore<
       return Promise.reject(new Error("SqliteStore is closed"));
     }
 
-    return this.#readPool.run(message) as Promise<
+    return this.#track(this.#readPool.run(message)) as Promise<
       WorkerResultForRequest<Message>
     >;
   }
 }
 
 const noopLogger: Logger = () => {};
-
-function withTimeout(
-  promise: Promise<void>,
-  timeoutMs: number,
-  onTimeout: () => Promise<void>,
-): Promise<void> {
-  if (!Number.isFinite(timeoutMs)) return promise;
-  if (timeoutMs < 0) {
-    return Promise.reject(
-      new Error("SqliteStore close timeout must be non-negative"),
-    );
-  }
-
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeout = setTimeout(() => {
-      void onTimeout().then(() => {
-        reject(new Error(`SqliteStore close timed out after ${timeoutMs}ms`));
-      }, reject);
-    }, timeoutMs);
-  });
-
-  return Promise.race([promise, timeoutPromise]).finally(() => {
-    if (timeout !== undefined) {
-      clearTimeout(timeout);
-    }
-  });
-}

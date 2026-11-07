@@ -18,17 +18,17 @@ import type { AnyValidators } from "../../types/02_Validators.js";
 import type {
   Entry,
   JsonifiedEntry,
-  NormalizedParams,
   NormalizedVary,
 } from "../../types/06_Normalization.js";
 import type {
   StoreEntryResult,
+  StoreOperations,
+  BulkStoreReader,
   StoreGetManyResult,
 } from "../../types/06_Store.js";
 import type {
   EntryForId,
   Logger,
-  Store,
   StoreEntryInput,
   StoreGetManyRequest,
   Vary,
@@ -40,6 +40,8 @@ import {
   validatorsEqual,
 } from "../../utils/normalizedProducerResultResourceHelpers.js";
 import {
+  asError,
+  CacheContractError,
   defaultLoggersByComponent,
   jsonStringify,
   keepMaxPerGroupCooperatively,
@@ -159,16 +161,18 @@ function varyMatchesParamsSql(
  * Postgres, transferring only matching entry payloads.
  *
  * `getMany` reads up to {@link MAX_REQUESTS_PER_GET_MANY_QUERY} requests in one
- * round trip (see its docs), so
- * a caller with many ids should use it, or a `Cache` with `batchReads`, rather
- * than many concurrent `get` calls: each `get` is its own query and holds its
- * own pool connection.
+ * round trip (see its docs). Cache accumulates scalar reads into this bulk
+ * primitive by default. Larger request sets use sequential SQL chunks.
  */
 export default class PostgresStore<
   Spec extends PostgresStoreCompatibleSpec = PostgresStoreCompatibleSpec,
   Validators extends AnyValidators = AnyValidators,
   Params extends PostgresStoreSupportedParams = PostgresStoreSupportedParams,
-> implements Store<Spec, Validators, Params> {
+>
+  implements
+    StoreOperations<Spec, Validators, Params>,
+    BulkStoreReader<Spec, Validators, Params>
+{
   /** Object containing info about the schema and table name */
   private readonly tableNameData: {
     schemaName: string;
@@ -218,71 +222,21 @@ export default class PostgresStore<
       : this.ensureInitialized();
   }
 
-  async get<Id extends Spec["id"]>(
-    id: Id,
-    params: Readonly<NormalizedParams<Params>>,
-    options?: { signal?: AbortSignal },
-  ): Promise<EntryForId<Spec, Validators, Params, Id>[]> {
-    const signal = options?.signal;
-    signal?.throwIfAborted();
-
-    this.logTrace("querying for entries with id and params", {
-      id,
-      params,
-    });
-    await this.ensureInitializedPromise;
-
-    signal?.throwIfAborted();
-
-    const result = await this.db
-      .selectFrom(this.tableName)
-      .where("resource_id", "=", id)
-      .where(
-        varyMatchesParamsSql(
-          sql.ref("vary"),
-          sql`${jsonStringify(params)}::jsonb`,
-        ),
-      )
-      .selectAll()
-      .execute();
-
-    signal?.throwIfAborted();
-
-    const entries = result
-      .filter((row) => row.resource_id === id)
-      .map((it) =>
-        this.deserializeEntry(
-          it.entry satisfies TableEntry<
-            Spec,
-            Validators,
-            Params,
-            Spec["id"]
-          > as unknown as TableEntry<Spec, Validators, Params, Id>,
-        ),
-      );
-
-    // SQL text binding can replace lone surrogates. Accept only exact IDs,
-    // including the ID in the persisted entry.
-    const matchingEntries = entries.filter((entry) => entry.id === id);
-    this.logTrace("returning entries from postgres query", matchingEntries);
-    return matchingEntries;
-  }
-
   /**
    * Joins indexed requests against stored rows and filters variants in SQL
-   * using the same predicate as get(). Only matching payloads reach Node.
+   * with the shared variant predicate. Only matching payloads reach Node.
    * Chunks run sequentially, at most 1,000 requests / 3,000 parameters each;
    * they do not share a transaction or snapshot. Duplicates retain separate
    * result slots and may transfer the same matching payload more than once.
-   * Like get(), params not representable as JSONB reject the query. A failure
-   * rejects the entire getMany call, including results of earlier chunks.
+   * Encoding and decoding failures affect their request slots. Failed SQL
+   * chunks affect their own slots; subsequent chunks still run without retries.
    */
   async getMany<
     const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
   >(
     requests: Reqs,
     options?: { signal?: AbortSignal },
-  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params, never>> {
+  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
     const signal = options?.signal;
     signal?.throwIfAborted();
 
@@ -291,7 +245,7 @@ export default class PostgresStore<
     });
 
     if (requests.length === 0) {
-      return [] as StoreGetManyResult<Spec, Reqs, Validators, Params, never>;
+      return [] as StoreGetManyResult<Spec, Reqs, Validators, Params>;
     }
 
     await this.ensureInitializedPromise;
@@ -303,51 +257,75 @@ export default class PostgresStore<
       resource_id: string;
       entry: TableEntry<Spec, Validators, Params>;
     };
-    const rowBatches: RequestRow[][] = [];
+    const results: (Entry<Spec, Validators, Params>[] | Error)[] = requests.map(
+      () => [],
+    );
     for (const [batchIndex, requestsChunk] of chunk(
       requests,
       MAX_REQUESTS_PER_GET_MANY_QUERY,
     ).entries()) {
       signal?.throwIfAborted();
       const offset = batchIndex * MAX_REQUESTS_PER_GET_MANY_QUERY;
-      const values = sql.join(
-        requestsChunk.map(
-          ({ id, params }, index) =>
-            sql`(${offset + index}::integer, ${id}::text, ${jsonStringify(params)}::jsonb)`,
-        ),
-      );
-      const batch =
-        await sql<RequestRow>`select r.request_index, t.resource_id, t.entry
-        from ${sql.id(this.tableNameData.schemaName, this.tableNameData.tableName)} as t
-        inner join (values ${values}) as r(request_index, resource_id, params)
-          on t.resource_id = r.resource_id
-        where ${varyMatchesParamsSql(sql.ref("t.vary"), sql.ref("r.params"))}
-      `.execute(this.db);
+      const encoded = requestsChunk.flatMap(({ id, params }, index) => {
+        const requestIndex = offset + index;
+        try {
+          return [
+            {
+              requestIndex,
+              value: sql`(${requestIndex}::integer, ${id}::text, ${jsonStringify(params)}::jsonb)`,
+            },
+          ];
+        } catch (error) {
+          results[requestIndex] = asError(error);
+          return [];
+        }
+      });
+      if (encoded.length === 0) continue;
+      const values = sql.join(encoded.map(({ value }) => value));
+      let rows: RequestRow[];
+      try {
+        const batch =
+          await sql<RequestRow>`select r.request_index, t.resource_id, t.entry
+          from ${sql.id(this.tableNameData.schemaName, this.tableNameData.tableName)} as t
+          inner join (values ${values}) as r(request_index, resource_id, params)
+            on t.resource_id = r.resource_id
+          where ${varyMatchesParamsSql(sql.ref("t.vary"), sql.ref("r.params"))}
+        `.execute(this.db);
+        rows = batch.rows;
+      } catch (failure) {
+        signal?.throwIfAborted();
+        const error = asError(failure);
+        encoded.forEach(({ requestIndex }) => {
+          results[requestIndex] = error;
+        });
+        continue;
+      }
       signal?.throwIfAborted();
-      rowBatches.push(batch.rows);
+      // SQL text binding can replace lone surrogates. Require exact IDs in
+      // both the SQL key and persisted entry before grouping the matches.
+      const expectedIndices = new Set(
+        encoded.map(({ requestIndex }) => requestIndex),
+      );
+      for (const row of rows) {
+        if (!expectedIndices.has(row.request_index))
+          throw new CacheContractError(
+            "Postgres returned an unexpected request index",
+          );
+        const request = requests[row.request_index]!;
+        if (row.resource_id !== request.id) continue;
+        const current = results[row.request_index]!;
+        if (current instanceof Error) continue;
+        try {
+          const entry = this.deserializeEntry(row.entry);
+          if (entry.id === request.id) current.push(entry);
+        } catch (failure) {
+          // One invalid variant invalidates the complete request result.
+          results[row.request_index] = asError(failure);
+        }
+      }
     }
-    const rows = rowBatches.flat();
-
-    // SQL text binding can replace lone surrogates. Require exact IDs in
-    // both the SQL key and persisted entry before grouping the matches.
-    const entriesByRequest = Map.groupBy(
-      rows.flatMap((row) => {
-        const id = requests[row.request_index]!.id;
-        if (row.resource_id !== id) return [];
-        const entry = this.deserializeEntry(row.entry);
-        return entry.id === id
-          ? [{ requestIndex: row.request_index, entry }]
-          : [];
-      }),
-      ({ requestIndex }) => requestIndex,
-    );
-    // Map the original requests, so duplicates retain their own slots and
-    // misses (including discarded ID collisions) always produce [], never undefined.
-    const results = requests.map((_, index) =>
-      (entriesByRequest.get(index) ?? []).map(({ entry }) => entry),
-    );
-
-    return results as StoreGetManyResult<Spec, Reqs, Validators, Params, never>;
+    // Preserve duplicate slots and misses in the original request order.
+    return results as StoreGetManyResult<Spec, Reqs, Validators, Params>;
   }
 
   async store(
@@ -408,23 +386,42 @@ export default class PostgresStore<
     const readOldAndUpsert = (batch: typeof rows) =>
       this.db
         .with("old", (db) =>
-          db.selectFrom(this.tableName)
-            .where((eb) => eb.or(batch.map((row) => eb.and([
-              eb("resource_id", "=", row.resource_id),
-              eb("vary", "=", sql<Readonly<NormalizedVary<Params>>>`${row.vary}::jsonb`),
-            ]))))
+          db
+            .selectFrom(this.tableName)
+            .where((eb) =>
+              eb.or(
+                batch.map((row) =>
+                  eb.and([
+                    eb("resource_id", "=", row.resource_id),
+                    eb(
+                      "vary",
+                      "=",
+                      sql<Readonly<NormalizedVary<Params>>>`${row.vary}::jsonb`,
+                    ),
+                  ]),
+                ),
+              ),
+            )
             .select((eb) => [
               "resource_id",
               "vary",
-              sql<Partial<Validators>>`${eb.ref("entry")} -> 'validators'`.as("validators"),
+              sql<Partial<Validators>>`${eb.ref("entry")} -> 'validators'`.as(
+                "validators",
+              ),
             ]),
         )
         .with("upsert", (db) =>
-          db.insertInto(this.tableName).values(batch)
-            .onConflict((oc) => oc.columns(["resource_id", "vary"])
-              .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") }))),
+          db
+            .insertInto(this.tableName)
+            .values(batch)
+            .onConflict((oc) =>
+              oc
+                .columns(["resource_id", "vary"])
+                .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") })),
+            ),
         )
-        .selectFrom("old").selectAll("old");
+        .selectFrom("old")
+        .selectAll("old");
     const batchSize = 1_000;
     // Keep the one-statement fast path for ordinary small cache writes.
     const oldRows = (await (
@@ -436,7 +433,9 @@ export default class PostgresStore<
             // Each batch reads only its own slots before replacing them.
             for (let start = 0; start < rows.length; start += batchSize) {
               const result = await trx.executeQuery<OldRow>(
-                readOldAndUpsert(rows.slice(start, start + batchSize)).compile(),
+                readOldAndUpsert(
+                  rows.slice(start, start + batchSize),
+                ).compile(),
               );
               previous.push(...result.rows);
             }
@@ -531,6 +530,10 @@ export default class PostgresStore<
       });
       throw error;
     }
+  }
+
+  async close(): Promise<void> {
+    await this[Symbol.asyncDispose]();
   }
 
   async [Symbol.asyncDispose]() {
@@ -638,6 +641,11 @@ export default class PostgresStore<
       AnyParams
     >;
 
+    const date = parseDateString(
+      _.date satisfies string as unknown as DateString,
+    );
+    if (!Number.isFinite(date.getTime()))
+      throw new Error("Invalid cached entry date");
     return {
       id: _.id,
       content: _.content,
@@ -645,7 +653,7 @@ export default class PostgresStore<
       validators: _.validators satisfies AnyValidators as Partial<Validators>,
       directives: restoreInfinityInDirectives(_.directives),
       initialAge: _.initialAge,
-      date: parseDateString(_.date satisfies string as unknown as DateString),
+      date,
     } satisfies Entry<
       PostgresStoreCompatibleSpec,
       Validators,

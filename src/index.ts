@@ -11,6 +11,7 @@ export {
   singleTypeCacheOptions,
   UnclassifiableIdError,
   type CacheOptions,
+  type ReadOptions,
   type SingleTypeCacheOptionsBuilder,
   type SingleTypeRegistry,
 } from "./Cache.js";
@@ -40,7 +41,12 @@ export {
 export * from "./types/index.js";
 export { default as collapsedTaskCreator } from "./utils/collapsedTaskCreator.js";
 export { restoreInfinityInDirectives } from "./utils/normalization.js";
-export { naiveGetMany } from "./utils/utils.js";
+export {
+  naiveGetMany,
+  getOne,
+  getMany,
+  throwIfAnyError,
+} from "./utils/utils.js";
 export type { JsonOf, JSONWithUndefined } from "type-party";
 export { jsonParse, jsonStringify } from "type-party/runtime/json.js";
 export {
@@ -62,13 +68,9 @@ export {
   type BulkProducersFor,
   type BulkResourceTypeProducer,
 } from "./utils/bulkProducerByIdType.js";
-export {
-  wrapBulkProducer,
-  type CoveringBulkProducer,
-} from "./utils/wrapBulkProducer.js";
+
 export {
   MintedIdResourceTypeMismatchError,
-  wrapBulkHashedInputProducer,
   wrapHashedInputProducer,
   type HashedInputProducerResult,
 } from "./utils/wrapHashedInputProducer.js";
@@ -76,6 +78,9 @@ export {
   coveredTypes,
   default as wrapProducer,
   type CoveringProducer,
+  type CoveringBulkProducer,
+  type WrappedProducerClient,
+  type WrappedReadOptions,
   type ProducersFor,
   type ResourceTypeProducer,
   type WrapProducerOptions,
@@ -90,6 +95,9 @@ export {
   CACHE_PRODUCE_CHANNEL_NAME,
   cacheProduceChannel,
   type CacheProduceMessage,
+  CACHE_READ_BATCH_CHANNEL_NAME,
+  cacheReadBatchChannel,
+  type CacheReadBatchMessage,
   CACHE_READ_CHANNEL_NAME,
   cacheReadChannel,
   type CacheReadFound,

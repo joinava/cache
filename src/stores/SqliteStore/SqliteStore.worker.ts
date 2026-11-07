@@ -1,4 +1,5 @@
 import sqlite from "node:sqlite";
+import { asError } from "../../utils/utils.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   isWorkerThread as isPiscinaWorkerThread,
@@ -50,13 +51,12 @@ export type StoreEntryInput = {
 };
 
 export type WorkerOperations = {
-  get: {
-    request: GetRequest;
-    result: WorkerEntryJson[];
-  };
   getMany: {
-    request: { requests: readonly GetRequest[] };
-    result: WorkerEntryJson[][];
+    request: {
+      requests: readonly GetRequest[];
+      cancelled: Int32Array<SharedArrayBuffer>;
+    };
+    result: (WorkerEntryJson[] | Error)[];
   };
   store: {
     request: { entries: readonly StoreEntryInput[] };
@@ -80,9 +80,11 @@ type WorkerOperationType = keyof WorkerOperations;
 
 export type WorkerRequestInput<
   Type extends WorkerOperationType = WorkerOperationType,
-> = { [Key in Type]: { type: Key } & WorkerOperations[Key]["request"] }[Type];
+> = {
+  [Key in Type]: { type: Key } & WorkerOperations[Key]["request"];
+}[Type];
 
-export type ReadWorkerRequestInput = WorkerRequestInput<"get" | "getMany">;
+export type ReadWorkerRequestInput = WorkerRequestInput<"getMany">;
 export type ReadWorkerCloseInput = WorkerRequestInput<"close">;
 export type WriteWorkerRequestInput = WorkerRequestInput<
   "store" | "delete" | "deleteExpired" | "close"
@@ -99,8 +101,10 @@ type CacheRow = {
 };
 
 type SqliteStoreWorkerContext = {
-  selectById(id: string): CacheRow[];
-  selectByIds(ids: readonly string[]): CacheRow[];
+  selectByIds(
+    ids: readonly string[],
+    cancelled: Int32Array<SharedArrayBuffer>,
+  ): Map<string, CacheRow[] | Error>;
   selectForSlot(
     resourceId: string,
     variantKey: VariantKey,
@@ -141,13 +145,9 @@ export default async function runTask(
 
   const context = await initPromise;
   switch (message.type) {
-    case "get":
-      return context.transaction({ scope: "read" }, (ctx) =>
-        getMatchingEntryJson(ctx, message),
-      );
     case "getMany":
       return context.transaction({ scope: "read" }, (ctx) =>
-        getManyMatchingEntryJson(ctx, message.requests),
+        getManyMatchingEntryJson(ctx, message.requests, message.cancelled),
       );
     case "store":
       return context.transaction({ scope: "write" }, (ctx) =>
@@ -274,8 +274,6 @@ function initialize(data: WorkerInitData): SqliteStoreWorkerContext {
 
   let closed = false;
   return {
-    selectById: (id) =>
-      prepared.selectById.all(id, expiryCutoff()) as CacheRow[],
     // Filtering out expired rows matters for correctness, not just hygiene:
     // change detection must only consider records that a `get` would still
     // return, so an expired-but-not-yet-vacuumed row must read as "no live
@@ -284,26 +282,28 @@ function initialize(data: WorkerInitData): SqliteStoreWorkerContext {
       prepared.selectForSlot.get(resourceId, variantKey, expiryCutoff()) as
         | { entry: WorkerEntryJson }
         | undefined,
-    selectByIds: (ids) => {
+    selectByIds: (ids, cancelled) => {
       const uniqueIds = [...new Set(ids)];
-      if (uniqueIds.length === 0) return [];
-
-      const rows: CacheRow[] = [];
+      const results = new Map<string, CacheRow[] | Error>();
       for (const chunk of chunks(uniqueIds, SQLITE_MAX_BOUND_IDS_PER_QUERY)) {
-        rows.push(
-          ...(db
-            .prepare(
-              `
-          SELECT resource_id, vary, entry
-          FROM cache_entries
-          WHERE resource_id IN (${chunk.map(() => "?").join(", ")})
-            AND (expires_at IS NULL OR expires_at > ?)
-        `,
-            )
-            .all(...chunk, expiryCutoff()) as CacheRow[]),
-        );
+        if (Atomics.load(cancelled, 0) !== 0)
+          throw new DOMException("Store read cancelled", "AbortError");
+        try {
+          const rows = db
+            .prepare(`
+            SELECT resource_id, vary, entry FROM cache_entries
+            WHERE resource_id IN (${chunk.map(() => "?").join(", ")})
+              AND (expires_at IS NULL OR expires_at > ?)
+          `)
+            .all(...chunk, expiryCutoff()) as CacheRow[];
+          const grouped = Map.groupBy(rows, (row) => row.resource_id);
+          chunk.forEach((id) => results.set(id, grouped.get(id) ?? []));
+        } catch (failure) {
+          const error = asError(failure);
+          chunk.forEach((id) => results.set(id, error));
+        }
       }
-      return rows;
+      return results;
     },
     upsert: (entry) => {
       prepared.upsert.run(
@@ -370,40 +370,31 @@ function initialize(data: WorkerInitData): SqliteStoreWorkerContext {
   };
 }
 
-function getMatchingEntryJson(
-  context: SqliteStoreWorkerContext,
-  { id, params }: GetRequest,
-): WorkerEntryJson[] {
-  const rows = context.selectById(id);
-  return rows
-    .filter(
-      (it) =>
-        it.resource_id === id &&
-        variantMatchesRequest(jsonParse(it.vary), params),
-    )
-    .map((row) => row.entry);
-}
-
 function getManyMatchingEntryJson(
   context: SqliteStoreWorkerContext,
   requests: readonly GetRequest[],
-): WorkerEntryJson[][] {
+  cancelled: Int32Array<SharedArrayBuffer>,
+): (WorkerEntryJson[] | Error)[] {
   if (requests.length === 0) return [];
-
-  const variants = context
-    .selectByIds(requests.map(({ id }) => id))
-    .map((row) => ({
-      id: row.resource_id,
-      vary: jsonParse(row.vary),
-      entry: row.entry,
-    }));
-
-  const variantsById = Map.groupBy(variants, ({ id }) => id);
-  return requests.map(({ id, params }) =>
-    (variantsById.get(id) ?? [])
-      .filter(({ vary }) => variantMatchesRequest(vary, params))
-      .map(({ entry }) => entry),
+  const rowsById = context.selectByIds(
+    requests.map(({ id }) => id),
+    cancelled,
   );
+  return requests.map(({ id, params }) => {
+    const rows = rowsById.get(id) ?? [];
+    if (rows instanceof Error) return rows;
+    try {
+      return rows
+        .filter(
+          (row) =>
+            row.resource_id === id &&
+            variantMatchesRequest(jsonParse(row.vary), params),
+        )
+        .map((row) => row.entry);
+    } catch (failure) {
+      return asError(failure);
+    }
+  });
 }
 
 /**

@@ -1,13 +1,14 @@
+import { throwIfAnyError } from "./utils/utils.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Cache, { singleTypeCacheOptions } from "./Cache.js";
-import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
+import { bulkMemoryStore } from "../test/fixtures.js";
 import { cacheReadChannel, type CacheReadMessage } from "./diagnostics.js";
 
 const request = (id: string) => ({ id, params: {}, directives: {} });
 
 test("automatic batches isolate per-request store failures", async (t) => {
-  const store = new MemoryStore();
+  const store = bulkMemoryStore();
   const cache = new Cache(
     singleTypeCacheOptions<string>()({ name: "partial-store", store }),
   );
@@ -57,8 +58,8 @@ test("automatic batches isolate per-request store failures", async (t) => {
   );
 });
 
-test("explicit Cache.getMany retains whole-call rejection for a store error slot", async (t) => {
-  const store = new MemoryStore();
+test("throwIfAnyError lets callers reject a partial cache result", async (t) => {
+  const store = bulkMemoryStore();
   const cache = new Cache(
     singleTypeCacheOptions<string>()({ name: "explicit-partial-store", store }),
   );
@@ -66,7 +67,7 @@ test("explicit Cache.getMany retains whole-call rejection for a store error slot
   const failure = new Error("one resource unavailable");
   t.mock.method(store, "getMany", async () => [[], failure]);
   await assert.rejects(
-    cache.getMany([request("hit"), request("failed")]),
+    cache.getMany([request("hit"), request("failed")]).then(throwIfAnyError),
     (error) => error === failure,
   );
 });

@@ -86,7 +86,11 @@ describe("wrapProducer", () => {
         }) satisfies RequestPairedProducerResult<any, any, any>,
     );
 
-    sut = wrapProducer({ cache, collapseOverlappingRequestsTime: 0 }, fetcher);
+    sut = wrapProducer({
+      cache,
+      collapseOverlappingRequestsTime: 0,
+      produce: fetcher,
+    }).get;
   });
 
   afterEach(async () => {
@@ -130,14 +134,15 @@ describe("wrapProducer", () => {
           directives: { freshUntilAge: 30 },
         }) satisfies RequestPairedProducerResult<any, any, any>,
     );
-    const freshSut = wrapProducer(
-      { cache, collapseOverlappingRequestsTime: 0 },
-      freshFetcher,
-    );
+    const freshSut = wrapProducer({
+      cache,
+      collapseOverlappingRequestsTime: 0,
+      produce: freshFetcher,
+    });
 
-    await freshSut({ id: "myUrl" });
+    await freshSut.get({ id: "myUrl" });
     await delay(30);
-    await freshSut({ id: "myUrl" });
+    await freshSut.get({ id: "myUrl" });
 
     expect(freshFetcher.mock.callCount()).to.eq(1);
   });
@@ -166,13 +171,14 @@ describe("wrapProducer", () => {
             : { freshUntilAge: 3600 },
       } satisfies RequestPairedProducerResult<any, any, any>;
     });
-    const swrSut = wrapProducer(
-      { cache, collapseOverlappingRequestsTime: 0 },
-      swrFetcher,
-    );
+    const swrSut = wrapProducer({
+      cache,
+      collapseOverlappingRequestsTime: 0,
+      produce: swrFetcher,
+    });
 
     // Load content into the cache.
-    const res1 = await swrSut({ id: "myUrl", params: {} });
+    const res1 = await swrSut.get({ id: "myUrl", params: {} });
 
     // Get past the 1s freshness window (structurally guaranteed — the timer
     // can only fire later than its deadline) into the 30s-wide SWR band.
@@ -181,7 +187,7 @@ describe("wrapProducer", () => {
     // Request cached data, which should come back to us immediately w/ the
     // old result (faster than the fetcher loads), while a second load is
     // triggered.
-    const res2 = await swrSut({ id: "myUrl" });
+    const res2 = await swrSut.get({ id: "myUrl" });
     expect(res1.content).to.deep.eq(res2.content);
 
     // Wait for the refresh's fire-and-forget store to become visible using
@@ -202,7 +208,7 @@ describe("wrapProducer", () => {
     };
     await waitForRefreshedEntry(0);
 
-    const res3 = await swrSut({ id: "myUrl" });
+    const res3 = await swrSut.get({ id: "myUrl" });
     expect(res2.content).to.not.deep.eq(res3.content);
     expect(swrFetcher.mock.callCount()).to.eq(2);
   });
@@ -219,9 +225,9 @@ describe("wrapProducer", () => {
   it("should return the error if the fetcher rejects", async () => {
     const testError = new Error("test");
     const rejectingFetcher = mock.fn(async () => Promise.reject(testError));
-    const sut2 = wrapProducer({ cache }, rejectingFetcher);
+    const sut2 = wrapProducer({ cache, produce: rejectingFetcher });
 
-    return sut2({ id: "someUrl" }).then(
+    return sut2.get({ id: "someUrl" }).then(
       () => {
         throw new Error("should have rejected");
       },
@@ -267,16 +273,16 @@ describe("wrapProducer", () => {
       }
     });
 
-    const sut2 = wrapProducer({ cache }, customTestFetcher);
+    const sut2 = wrapProducer({ cache, produce: customTestFetcher });
 
-    const firstRes = await sut2({ id: "someUrl" });
+    const firstRes = await sut2.get({ id: "someUrl" });
     expect(firstRes).to.deep.include(testResult);
 
     await delay(1100); // past 1s freshness, well inside the 5s if-error bound
 
     // first res is expired, and the fetcher errored, but we should
     // be able to reuse the first res anyway because of staleIfError.
-    const secondRes = await sut2({ id: "someUrl" });
+    const secondRes = await sut2.get({ id: "someUrl" });
     expect(secondRes).to.deep.include(testResult);
     expect(customTestFetcher.mock.callCount()).to.eq(2);
 
@@ -285,14 +291,14 @@ describe("wrapProducer", () => {
     // now, the staleIfError window should be up, so we have to go back
     // to the fetcher, but it errors again, so we should get that error.
     try {
-      await sut2({ id: "someUrl" });
+      await sut2.get({ id: "someUrl" });
     } catch (e) {
       expect(e).to.deep.eq(testError);
       expect(customTestFetcher.mock.callCount()).to.eq(3);
     }
 
     // finally, the server comes back online for the next request
-    const fourthRes = await sut2({ id: "someUrl" });
+    const fourthRes = await sut2.get({ id: "someUrl" });
     expect(fourthRes).to.deep.include({ content: testResult.content });
   });
 
@@ -305,9 +311,9 @@ describe("wrapProducer", () => {
           directives: { freshUntilAge: 0 },
         }) satisfies RequestPairedProducerResult<any, any, any>,
     );
-    const sut2 = wrapProducer({ cache }, resolveWithErrorFetcher);
+    const sut2 = wrapProducer({ cache, produce: resolveWithErrorFetcher });
 
-    return sut2({ id: "someUrl2" }).then((it) => {
+    return sut2.get({ id: "someUrl2" }).then((it) => {
       expect(it).to.include({ content: test404 });
     });
   });
@@ -343,15 +349,16 @@ describe("wrapProducer", () => {
     });
 
     it("should throw if configured and cache's get method rejects", async () => {
-      const wrappedProducer = wrapProducer(
-        { cache: mockCache, onCacheReadFailure: "throw" },
-        async ({ id }) => ({
+      const wrappedProducer = wrapProducer({
+        cache: mockCache,
+        onCacheReadFailure: "throw",
+        produce: async ({ id }) => ({
           content: id,
           directives: { freshUntilAge: 1 },
         }),
-      );
+      });
 
-      await wrappedProducer({ id: "test" }).then(
+      await wrappedProducer.get({ id: "test" }).then(
         () => {
           throw new Error("should've rejected");
         },
@@ -367,12 +374,13 @@ describe("wrapProducer", () => {
         directives: { freshUntilAge: 1 },
       }));
 
-      const wrappedProducer = wrapProducer(
-        { cache: mockCache, onCacheReadFailure: "call-producer" },
-        mockProducer,
-      );
+      const wrappedProducer = wrapProducer({
+        cache: mockCache,
+        onCacheReadFailure: "call-producer",
+        produce: mockProducer,
+      });
 
-      const res = await wrappedProducer({ id: "test" });
+      const res = await wrappedProducer.get({ id: "test" });
       expect(res.content).to.eq("test");
     });
 
@@ -382,9 +390,12 @@ describe("wrapProducer", () => {
         directives: { freshUntilAge: 1 },
       }));
 
-      const wrappedProducer = wrapProducer({ cache: mockCache }, mockProducer);
+      const wrappedProducer = wrapProducer({
+        cache: mockCache,
+        produce: mockProducer,
+      });
 
-      const res = await wrappedProducer({ id: "test" });
+      const res = await wrappedProducer.get({ id: "test" });
       expect(res.content).to.eq("test");
     });
   });
@@ -423,12 +434,13 @@ describe("wrapProducer", () => {
         directives: { freshUntilAge: 1 },
       }));
 
-      const sut2 = wrapProducer(
-        { cache: mockCache, collapseOverlappingRequestsTime: 0 },
-        producerFn,
-      );
+      const sut2 = wrapProducer({
+        cache: mockCache,
+        collapseOverlappingRequestsTime: 0,
+        produce: producerFn,
+      });
 
-      const resultPromise = sut2(
+      const resultPromise = sut2.get(
         { id: "abort-during-read" },
         { signal: controller.signal },
       );
@@ -471,12 +483,13 @@ describe("wrapProducer", () => {
           }),
       );
 
-      const slowSut = wrapProducer(
-        { cache, collapseOverlappingRequestsTime: 0 },
-        slowFetcher,
-      );
+      const slowSut = wrapProducer({
+        cache,
+        collapseOverlappingRequestsTime: 0,
+        produce: slowFetcher,
+      });
 
-      const resultPromise = slowSut(
+      const resultPromise = slowSut.get(
         { id: "mid-producer-abort" },
         { signal: controller.signal },
       );
@@ -496,7 +509,7 @@ describe("wrapProducer", () => {
       await delay(150);
 
       // Verify the result was still stored: a subsequent request should hit.
-      const result = await slowSut({ id: "mid-producer-abort" });
+      const result = await slowSut.get({ id: "mid-producer-abort" });
       expect(result.content).to.eq("slow-but-stored");
       expect(slowFetcher.mock.callCount()).to.eq(1);
     });
@@ -518,17 +531,18 @@ describe("wrapProducer", () => {
           }),
       );
 
-      const collapsingSut = wrapProducer(
-        { cache, collapseOverlappingRequestsTime: 10 },
-        slowFetcher,
-      );
+      const collapsingSut = wrapProducer({
+        cache,
+        collapseOverlappingRequestsTime: 10,
+        produce: slowFetcher,
+      });
 
       const req = { id: "collapse-abort-store" };
 
-      const abortablePromise = collapsingSut(req, {
+      const abortablePromise = collapsingSut.get(req, {
         signal: controller.signal,
       });
-      const normalPromise = collapsingSut(req);
+      const normalPromise = collapsingSut.get(req);
 
       await delay(5);
       controller.abort(new Error("caller1-aborted"));
@@ -550,7 +564,7 @@ describe("wrapProducer", () => {
 
       // And the result should be stored — a third call should hit the cache.
       await delay(10);
-      const cachedResult = await collapsingSut(req);
+      const cachedResult = await collapsingSut.get(req);
       expect(cachedResult.content).to.eq("shared-result");
       expect(slowFetcher.mock.callCount()).to.eq(1);
     });
@@ -578,12 +592,12 @@ describe("wrapProducer", () => {
       const errorProducer = mock.fn(async () => {
         throw new Error("producer-error");
       });
-      const sut2 = wrapProducer({ cache }, errorProducer);
+      const sut2 = wrapProducer({ cache, produce: errorProducer });
 
       // With an already-aborted signal, the call should reject immediately
       // (before even checking the cache or calling the producer)
       try {
-        await sut2({ id: "if-error-abort" }, { signal: controller.signal });
+        await sut2.get({ id: "if-error-abort" }, { signal: controller.signal });
         throw new Error("should have rejected");
       } catch (e) {
         expect((e as Error).message).to.eq("abort-before-call");
@@ -607,15 +621,16 @@ describe("wrapProducer", () => {
         directives: { freshUntilAge: 1 },
       }));
 
-      const sut2 = wrapProducer(
-        { cache: mockCache, onCacheReadFailure: "call-producer" },
-        producerFn,
-      );
+      const sut2 = wrapProducer({
+        cache: mockCache,
+        onCacheReadFailure: "call-producer",
+        produce: producerFn,
+      });
 
       controller.abort(new Error("aborted-during-cache-read"));
 
       try {
-        await sut2({ id: "test" }, { signal: controller.signal });
+        await sut2.get({ id: "test" }, { signal: controller.signal });
         throw new Error("should have rejected");
       } catch (e) {
         // Should propagate the abort error, NOT fall back to the producer
@@ -709,10 +724,11 @@ describe("wrapProducer", () => {
       // Collapse window 0: no call rides another's invocation unless they
       // start in the same millisecond, so the tests below exercise the
       // overlay, not request collapsing (which has its own test here).
-      gatedSut = wrapProducer(
-        { cache: gatedCache, collapseOverlappingRequestsTime: 0 },
-        producer,
-      );
+      gatedSut = wrapProducer({
+        cache: gatedCache,
+        collapseOverlappingRequestsTime: 0,
+        produce: producer,
+      }).get;
     });
 
     afterEach(async () => {
@@ -746,10 +762,10 @@ describe("wrapProducer", () => {
             },
           ],
         }));
-        const wrapped = wrapProducer({ cache: gatedCache }, produce);
-        await wrapped({ id: "x" });
+        const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
+        await wrapped.get({ id: "x" });
         assert.equal(
-          (await wrapped({ id: "supplemental" })).content,
+          (await wrapped.get({ id: "supplemental" })).content,
           "older-fresh",
         );
         assert.equal(produce.mock.callCount(), 1);
@@ -757,7 +773,7 @@ describe("wrapProducer", () => {
     }
 
     it("an immediate sequential repeat is a hit while the store is in flight: the producer runs once", async () => {
-      const storeGet = mock.method(store, "getMany");
+      const storeGet = mock.method(store, "get");
       const storeSpy = mock.method(gatedCache, "store");
 
       const first = await gatedSut({ id: "x" });
@@ -832,13 +848,14 @@ describe("wrapProducer", () => {
             : { content: "not-shared", directives: { freshUntilAge: 100 } };
         },
       );
-      const collapsingSut: WrappedFn = wrapProducer(
-        { cache: gatedCache, collapseOverlappingRequestsTime: 10 },
-        slowProducer,
-      );
+      const collapsingSut = wrapProducer({
+        cache: gatedCache,
+        collapseOverlappingRequestsTime: 10,
+        produce: slowProducer,
+      });
 
-      const a = collapsingSut({ id: "x" });
-      const b = collapsingSut({ id: "x" });
+      const a = collapsingSut.get({ id: "x" });
+      const b = collapsingSut.get({ id: "x" });
       await producerCalled;
 
       resolveProducer({
@@ -853,7 +870,7 @@ describe("wrapProducer", () => {
       // The invocation is over (so nothing to collapse onto) and its write is
       // parked: a third, sequential call is answered from the overlay.
       expect(store.gates).to.have.lengthOf(1);
-      const resC = await collapsingSut({ id: "x" });
+      const resC = await collapsingSut.get({ id: "x" });
       expect(resC.content).to.eq("shared");
       expect(slowProducer.mock.callCount()).to.eq(1);
     });
@@ -866,27 +883,28 @@ describe("wrapProducer", () => {
           directives: { freshUntilAge: 100 },
         }),
       );
-      const varyingSut: WrappedFn = wrapProducer(
-        { cache: gatedCache, collapseOverlappingRequestsTime: 0 },
-        varyingProducer,
-      );
+      const varyingSut = wrapProducer({
+        cache: gatedCache,
+        collapseOverlappingRequestsTime: 0,
+        produce: varyingProducer,
+      });
 
-      const fr = await varyingSut({ id: "x", params: { lang: "fr" } });
+      const fr = await varyingSut.get({ id: "x", params: { lang: "fr" } });
       expect(fr.content).to.eq("lang=fr");
       expect(varyingProducer.mock.callCount()).to.eq(1);
 
       // Same id, different variant: the pending `fr` entry must not answer.
-      const en = await varyingSut({ id: "x", params: { lang: "en" } });
+      const en = await varyingSut.get({ id: "x", params: { lang: "en" } });
       expect(en.content).to.eq("lang=en");
       expect(varyingProducer.mock.callCount()).to.eq(2);
 
       // Both writes are still parked; each variant is a hit for its own params.
       expect(store.gates).to.have.lengthOf(2);
       expect(
-        (await varyingSut({ id: "x", params: { lang: "fr" } })).content,
+        (await varyingSut.get({ id: "x", params: { lang: "fr" } })).content,
       ).to.eq("lang=fr");
       expect(
-        (await varyingSut({ id: "x", params: { lang: "en" } })).content,
+        (await varyingSut.get({ id: "x", params: { lang: "en" } })).content,
       ).to.eq("lang=en");
       expect(varyingProducer.mock.callCount()).to.eq(2);
     });
@@ -904,13 +922,14 @@ describe("wrapProducer", () => {
         content: "do-not-store",
         directives: { freshUntilAge: 100, storeFor: 0 },
       }));
-      const unstorableSut: WrappedFn = wrapProducer(
-        { cache: gatedCache, collapseOverlappingRequestsTime: 0 },
-        unstorableProducer,
-      );
+      const unstorableSut = wrapProducer({
+        cache: gatedCache,
+        collapseOverlappingRequestsTime: 0,
+        produce: unstorableProducer,
+      });
 
-      await unstorableSut({ id: "x" });
-      await unstorableSut({ id: "x" });
+      await unstorableSut.get({ id: "x" });
+      await unstorableSut.get({ id: "x" });
       expect(unstorableProducer.mock.callCount()).to.eq(2);
     });
 
@@ -980,11 +999,11 @@ describe("wrapProducer", () => {
         date: new Date(now - 1000 + produce.mock.callCount()),
         directives: { freshUntilAge: 100 },
       }));
-      const wrapped = wrapProducer({ cache: gatedCache }, produce);
-      await wrapped({ id: "x", directives: { maxAge: 0 } });
-      await wrapped({ id: "x" });
+      const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
+      await wrapped.get({ id: "x", directives: { maxAge: 0 } });
+      await wrapped.get({ id: "x" });
       // The second request uses the overlay; force a separate production.
-      await wrapped({
+      await wrapped.get({
         id: "x",
         directives: { maxAge: 0 },
         params: { distinct: "second" },
@@ -994,7 +1013,7 @@ describe("wrapProducer", () => {
       assert.ok(older);
       older.release();
       const captured = Promise.withResolvers<{ stored: Promise<void> }>();
-      const hit = await wrapped(
+      const hit = await wrapped.get(
         { id: "x" },
         { onStore: (stored) => captured.resolve({ stored }) },
       );
@@ -1015,10 +1034,10 @@ describe("wrapProducer", () => {
         date: new Date(originalNow - 1000 + produce.mock.callCount()),
         directives: { freshUntilAge: 100 },
       }));
-      const wrapped = wrapProducer({ cache: gatedCache }, produce);
-      await wrapped({ id: "x", directives: { maxAge: 0 } });
+      const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
+      await wrapped.get({ id: "x", directives: { maxAge: 0 } });
       const latest = Promise.withResolvers<{ stored: Promise<void> }>();
-      await wrapped(
+      await wrapped.get(
         { id: "x", params: { distinct: "new" }, directives: { maxAge: 0 } },
         {
           onStore: (stored) => latest.resolve({ stored }),
@@ -1029,12 +1048,12 @@ describe("wrapProducer", () => {
       await (
         await latest.promise
       ).stored;
-      const hit = await wrapped({ id: "x" });
+      const hit = await wrapped.get({ id: "x" });
       assert.equal(hit.content, "value-2");
       assert.equal(produce.mock.callCount(), 2);
     });
 
-    it("normal reads normalize params only once when the overlay has no matching id", async () => {
+    it("misses normalize Store reads and sharing keys without an unnecessary overlay lookup", async () => {
       const normalize = mock.fn<
         NonNullable<
           ConstructorParameters<typeof Cache>[0]["normalizeParamValue"]
@@ -1045,25 +1064,29 @@ describe("wrapProducer", () => {
         ...testCacheOptions,
         normalizeParamValue: normalize,
       });
-      const wrapped = wrapProducer({ cache }, producer);
-      await wrapped({ id: "first", params: { language: "en" } });
+      const wrapped = wrapProducer({ cache, produce: producer });
+      await wrapped.get({ id: "first", params: { language: "en" } });
       const before = normalize.mock.callCount();
-      await wrapped({ id: "second", params: { language: "fr" } });
-      // The producer has no vary parameters, so only Cache.get normalizes
-      // this request. An eager overlay lookup would normalize it again.
-      assert.equal(normalize.mock.callCount() - before, 1);
+      await wrapped.get({ id: "second", params: { language: "fr" } });
+      // Cache reads and sharing keys each normalize the original parameters.
+      // An unnecessary overlay lookup would add a third normalization.
+      assert.equal(normalize.mock.callCount() - before, 2);
+      store.releaseAll();
       await cache.close();
     });
 
     it("pending entries do not bypass the cache's closed-read policy", async () => {
-      const wrapped = wrapProducer(
-        { cache: gatedCache, onCacheReadFailure: "throw" },
-        producer,
-      );
-      await wrapped({ id: "x" });
-      await gatedCache.close();
-      await assert.rejects(wrapped({ id: "x" }), /closed/);
+      const wrapped = wrapProducer({
+        cache: gatedCache,
+        onCacheReadFailure: "throw",
+        produce: producer,
+      });
+      await wrapped.get({ id: "x" });
+      const closing = gatedCache.close();
+      await assert.rejects(wrapped.get({ id: "x" }), /closed/);
       assert.equal(producer.mock.callCount(), 1);
+      store.releaseAll();
+      await closing;
     });
 
     it("pending stale-while-revalidate returns stale data and observes only its existing write", async () => {
@@ -1107,10 +1130,10 @@ describe("wrapProducer", () => {
           return stored;
         },
       );
-      const wrapped = wrapProducer({ cache: gatedCache }, produce);
-      await wrapped({ id: "x" });
+      const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
+      await wrapped.get({ id: "x" });
       const captured = Promise.withResolvers<{ stored: Promise<void> }>();
-      const stale = await wrapped(
+      const stale = await wrapped.get(
         { id: "x" },
         { onStore: (stored) => captured.resolve({ stored }) },
       );
@@ -1145,10 +1168,10 @@ describe("wrapProducer", () => {
           },
         };
       });
-      const wrapped = wrapProducer({ cache: gatedCache }, produce);
-      await wrapped({ id: "x" });
+      const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
+      await wrapped.get({ id: "x" });
       const captured = Promise.withResolvers<{ stored: Promise<void> }>();
-      const stale = await wrapped(
+      const stale = await wrapped.get(
         { id: "x" },
         { onStore: (stored) => captured.resolve({ stored }) },
       );
@@ -1176,10 +1199,10 @@ describe("wrapProducer", () => {
           },
         };
       });
-      const wrapped = wrapProducer({ cache: gatedCache }, produce);
-      await wrapped({ id: "x" });
+      const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
+      await wrapped.get({ id: "x" });
       const captured = Promise.withResolvers<{ stored: Promise<void> }>();
-      const fallback = await wrapped(
+      const fallback = await wrapped.get(
         { id: "x" },
         { onStore: (stored) => captured.resolve({ stored }) },
       );
@@ -1191,7 +1214,7 @@ describe("wrapProducer", () => {
       );
       store.failAll(failure);
       await rejected;
-      await assert.rejects(wrapped({ id: "x" }), /origin failed/);
+      await assert.rejects(wrapped.get({ id: "x" }), /origin failed/);
     });
 
     it("pending stale-if-error returns a successful refresh and observes its new write", async () => {
@@ -1211,10 +1234,10 @@ describe("wrapProducer", () => {
             }
           : { content: "fresh", directives: { freshUntilAge: 100 } },
       );
-      const wrapped = wrapProducer({ cache: gatedCache }, produce);
-      await wrapped({ id: "x" });
+      const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
+      await wrapped.get({ id: "x" });
       const captured = Promise.withResolvers<{ stored: Promise<void> }>();
-      const fresh = await wrapped(
+      const fresh = await wrapped.get(
         { id: "x" },
         { onStore: (stored) => captured.resolve({ stored }) },
       );
@@ -1252,9 +1275,9 @@ describe("wrapProducer", () => {
           },
         },
       }));
-      const wrapped = wrapProducer({ cache: gatedCache }, produce);
-      await wrapped({ id: "x", directives: { maxAge: 0 } });
-      const hit = await wrapped({ id: "x" });
+      const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
+      await wrapped.get({ id: "x", directives: { maxAge: 0 } });
+      const hit = await wrapped.get({ id: "x" });
       assert.equal(hit.content, "persisted-fresh");
       assert.equal(produce.mock.callCount(), 1);
     });
@@ -1269,14 +1292,17 @@ describe("wrapProducer", () => {
           directives: { freshUntilAge: 100 },
         }),
       );
-      const wrapped = wrapProducer({ cache: gatedCache }, produce);
-      await wrapped({ id: "x", directives: { maxAge: 0 } });
+      const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
+      await wrapped.get({ id: "x", directives: { maxAge: 0 } });
       const captured = Promise.withResolvers<{ stored: Promise<void> }>();
-      await wrapped(
+      await wrapped.get(
         { id: "x", params: { language: "en" }, directives: { maxAge: 0 } },
         { onStore: (stored) => captured.resolve({ stored }) },
       );
-      const pending = await wrapped({ id: "x", params: { language: "en" } });
+      const pending = await wrapped.get({
+        id: "x",
+        params: { language: "en" },
+      });
       assert.equal(pending.content, "specific");
       store.releaseAll();
       await (
@@ -1309,10 +1335,10 @@ describe("wrapProducer", () => {
         date: new Date(newer.valueOf() - 10_000),
         directives: { freshUntilAge: 100 },
       }));
-      const wrapped = wrapProducer({ cache: gatedCache }, produce);
-      await wrapped({ id: "x", directives: { maxAge: 0 } });
+      const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
+      await wrapped.get({ id: "x", directives: { maxAge: 0 } });
       const captured = Promise.withResolvers<{ stored: Promise<void> }>();
-      const hit = await wrapped(
+      const hit = await wrapped.get(
         { id: "x", params: { language: "en" } },
         { onStore: (stored) => captured.resolve({ stored }) },
       );
@@ -1333,11 +1359,11 @@ describe("wrapProducer", () => {
       );
       const readStarted = Promise.withResolvers<void>();
       const releaseRead = Promise.withResolvers<void>();
-      const getMany = store.getMany.bind(store);
+      const getMany = store.get.bind(store);
       mock.method(
         store,
-        "getMany",
-        async (...args: Parameters<typeof store.getMany>) => {
+        "get",
+        async (...args: Parameters<typeof store.get>) => {
           const snapshot = await getMany(...args);
           readStarted.resolve();
           await releaseRead.promise;
@@ -1388,13 +1414,14 @@ describe("wrapProducer", () => {
               }
             : { content: "produced-again", directives: { freshUntilAge: 100 } },
         );
-        const wrapped = wrapProducer(
-          { cache, onCacheReadFailure: policy },
-          produce,
-        );
-        await wrapped({ id: "x", params: { language: "fr" } });
+        const wrapped = wrapProducer({
+          cache,
+          onCacheReadFailure: policy,
+          produce: produce,
+        });
+        await wrapped.get({ id: "x", params: { language: "fr" } });
         state.fail = true;
-        const call = wrapped(
+        const call = wrapped.get(
           { id: "x", params: { language: "en" } },
           { signal: controller.signal },
         );
@@ -1408,6 +1435,7 @@ describe("wrapProducer", () => {
           assert.equal((await call).content, "produced-again");
           assert.equal(produce.mock.callCount(), 2);
         }
+        store.releaseAll();
         await cache.close();
       });
     }
@@ -1427,14 +1455,14 @@ describe("wrapProducer", () => {
               directives: { freshUntilAge: 100 },
             },
       );
-      const wrapped = wrapProducer({ cache: gatedCache }, produce);
+      const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
       const newer = Promise.withResolvers<{ stored: Promise<void> }>();
       const older = Promise.withResolvers<{ stored: Promise<void> }>();
-      await wrapped(
+      await wrapped.get(
         { id: "x", directives: { maxAge: 0 } },
         { onStore: (stored) => newer.resolve({ stored }) },
       );
-      await wrapped(
+      await wrapped.get(
         { id: "x", params: { distinct: "second" }, directives: { maxAge: 0 } },
         { onStore: (stored) => older.resolve({ stored }) },
       );
@@ -1444,7 +1472,7 @@ describe("wrapProducer", () => {
         await older.promise
       ).stored;
       const selected = Promise.withResolvers<{ stored: Promise<void> }>();
-      const hit = await wrapped(
+      const hit = await wrapped.get(
         { id: "x" },
         { onStore: (stored) => selected.resolve({ stored }) },
       );
@@ -1475,7 +1503,10 @@ describe("wrapProducer", () => {
           },
         ],
       }));
-      return { produce, wrapped: wrapProducer({ cache: gatedCache }, produce) };
+      return {
+        produce,
+        wrapped: wrapProducer({ cache: gatedCache, produce: produce }),
+      };
     };
 
     for (const outcome of ["success", "failure"] as const) {
@@ -1483,7 +1514,7 @@ describe("wrapProducer", () => {
         const normalize = mock.method(gatedCache, "normalizeParamValue");
         const { wrapped } = withVaryingSupplemental();
         const captured = Promise.withResolvers<{ stored: Promise<void> }>();
-        await wrapped(
+        await wrapped.get(
           { id: "primary" },
           { onStore: (stored) => captured.resolve({ stored }) },
         );
@@ -1507,16 +1538,16 @@ describe("wrapProducer", () => {
     it("normalizes a pending resource once and reuses it across later reads", async () => {
       const normalize = mock.method(gatedCache, "normalizeParamValue");
       const { wrapped, produce } = withVaryingSupplemental();
-      await wrapped({ id: "primary" });
+      await wrapped.get({ id: "primary" });
       assert.equal(normalize.mock.callCount(), 1);
-      const first = await wrapped({
+      const first = await wrapped.get({
         id: "supplemental",
         params: { language: "fr" },
       });
       assert.equal(first.content, "fr");
       // Two request normalizations plus the first lazy entry normalization.
       assert.equal(normalize.mock.callCount(), 4);
-      const second = await wrapped({
+      const second = await wrapped.get({
         id: "supplemental",
         params: { language: "fr" },
       });
@@ -1536,11 +1567,11 @@ describe("wrapProducer", () => {
           maxStale: { withoutRevalidation: 0, whileRevalidate: 0, ifError: 0 },
         },
       }));
-      const wrapped = wrapProducer({ cache: gatedCache }, produce);
-      const first = await wrapped({ id: "x" });
+      const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
+      const first = await wrapped.get({ id: "x" });
       assert.equal(first.date.valueOf(), now);
       context.mock.timers.setTime(now + 20_000);
-      const second = await wrapped({ id: "x" });
+      const second = await wrapped.get({ id: "x" });
       assert.equal(produce.mock.callCount(), 2);
       assert.equal(second.date.valueOf(), now + 20_000);
     });
@@ -1550,17 +1581,18 @@ describe("wrapProducer", () => {
         content: "other",
         directives: { freshUntilAge: 100 },
       }));
-      const otherSut: WrappedFn = wrapProducer(
-        { cache: gatedCache, collapseOverlappingRequestsTime: 0 },
-        otherProducer,
-      );
+      const otherSut = wrapProducer({
+        cache: gatedCache,
+        collapseOverlappingRequestsTime: 0,
+        produce: otherProducer,
+      });
 
       await gatedSut({ id: "x" });
       expect(producer.mock.callCount()).to.eq(1);
 
       // The first wrapper's write is still parked, and the second wrapper
       // has no view of it: it misses and produces.
-      await otherSut({ id: "x" });
+      await otherSut.get({ id: "x" });
       expect(otherProducer.mock.callCount()).to.eq(1);
     });
   });

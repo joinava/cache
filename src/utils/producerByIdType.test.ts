@@ -56,12 +56,15 @@ describe("producerByIdType", () => {
       expect(() => producerByIdType(registry, {})).to.throw();
       // ...and the form that used to throw here is the primitive now: a bare
       // function covers the whole registry, and its wrapper is callable.
-      const bare = wrapProducer({ cache }, async () => ({
-        content: "x",
-        directives: freshFor100,
-      }));
-      expect(await bare({ id: "site:1" })).to.include({ content: "x" });
-      expect(await bare({ id: "biz:1" })).to.include({ content: "x" });
+      const bare = wrapProducer({
+        cache,
+        produce: async () => ({
+          content: "x",
+          directives: freshFor100,
+        }),
+      });
+      expect(await bare.get({ id: "site:1" })).to.include({ content: "x" });
+      expect(await bare.get({ id: "biz:1" })).to.include({ content: "x" });
     } finally {
       await cache.close();
     }
@@ -100,10 +103,14 @@ describe("producerByIdType", () => {
         resourceTypes: registry,
       });
       try {
-        const get = wrapProducer({ cache }, producer);
-        expect((await get({ id: "site:2" })).content).to.equal("site-site:2");
+        const get = wrapProducer({ cache, produce: producer });
+        expect((await get.get({ id: "site:2" })).content).to.equal(
+          "site-site:2",
+        );
         expect(siteProducer.mock.callCount()).to.equal(2);
-        expect((await get({ id: "site:2" })).content).to.equal("site-site:2");
+        expect((await get.get({ id: "site:2" })).content).to.equal(
+          "site-site:2",
+        );
         expect(siteProducer.mock.callCount()).to.equal(2);
       } finally {
         await cache.close();
@@ -167,18 +174,18 @@ describe("producerByIdType", () => {
         resourceTypes: registry,
       });
       try {
-        const get = wrapProducer(
-          { cache },
-          producerByIdType(divergent, {
+        const get = wrapProducer({
+          cache,
+          produce: producerByIdType(divergent, {
             site_day: async (req) => ({
               content: `site-${req.id}`,
               directives: freshFor100,
             }),
           }),
-        );
+        });
         // The cache classifies `site:1` to a covered type and dispatches; the
         // producer's own registry then can't route it.
-        const thrown = await expectRejection(() => get({ id: "site:1" }));
+        const thrown = await expectRejection(() => get.get({ id: "site:1" }));
         assert.ok(thrown instanceof UnclassifiableIdError);
         // The point of the re-throw: the cache's name is back on the error.
         expect(thrown.cacheName).to.equal(name);

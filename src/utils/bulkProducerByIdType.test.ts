@@ -14,7 +14,7 @@ import {
   type ResourceTypes,
 } from "../index.js";
 import { bulkProducerByIdType } from "./bulkProducerByIdType.js";
-import { wrapBulkProducer } from "./wrapBulkProducer.js";
+import wrapProducer from "./wrapProducer.js";
 
 /**
  * `bulkProducerByIdType`'s own contract, driven CACHE-FREE. That is the only
@@ -55,10 +55,12 @@ describe("bulkProducerByIdType", () => {
     });
     try {
       expect(() => bulkProducerByIdType(registry, {})).to.throw();
-      const bare = wrapBulkProducer({ cache }, async (reqs) =>
-        reqs.map(() => ({ content: "x", directives: freshFor100 })),
-      );
-      const results = await bare([{ id: "site:1" }, { id: "biz:1" }]);
+      const bare = wrapProducer({
+        cache,
+        produceMany: async (reqs) =>
+          reqs.map(() => ({ content: "x", directives: freshFor100 })),
+      });
+      const results = await bare.getMany([{ id: "site:1" }, { id: "biz:1" }]);
       expect(
         results.map((it) => (it instanceof Error ? it : it.content)),
       ).to.deep.equal(["x", "x"]);
@@ -226,12 +228,11 @@ describe("bulkProducerByIdType", () => {
     // A HEALTHY sibling is wired up alongside to pin the blast radius: it still
     // runs, and one slice's contract violation still fails the whole invocation,
     // so its results are not delivered either.
-    const bizBulk = mock.fn(
-      async (reqs: readonly { readonly id: string }[]) =>
-        reqs.map((req) => ({
-          content: `biz-${req.id}`,
-          directives: freshFor100,
-        })),
+    const bizBulk = mock.fn(async (reqs: readonly { readonly id: string }[]) =>
+      reqs.map((req) => ({
+        content: `biz-${req.id}`,
+        directives: freshFor100,
+      })),
     );
     const producer = bulkProducerByIdType(registry, {
       site_day: async (reqs) =>
@@ -274,4 +275,57 @@ describe("bulkProducerByIdType", () => {
       /the "site_day" producer returned a result count \(2\) that does not match the number of requests in its slice \(1\)/,
     );
   });
+});
+
+it("rejects a null branch result as a package contract violation", async () => {
+  const { CacheContractError } = await import("./utils.js");
+  const registry = {
+    item: resourceType<string>()({
+      matches: (id): id is string => typeof id === "string",
+    }),
+  };
+  const producer = bulkProducerByIdType(registry, {
+    item: async () => null as never,
+  });
+  await assert.rejects(
+    producer([{ id: "a", params: {}, directives: {} }]),
+    CacheContractError,
+  );
+});
+
+it("drains dispatched branches before reporting a sibling contract failure", async () => {
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const events: string[] = [];
+  const producer = bulkProducerByIdType(registry, {
+    site_day: async () => [],
+    business_slice: async (requests) => {
+      started.resolve();
+      await release.promise;
+      events.push("branch settled");
+      return requests.map(() => ({ content: "done", directives: freshFor100 }));
+    },
+  });
+  const cache = new Cache({
+    name: "branch-drain",
+    store: new MemoryStore(),
+    resourceTypes: registry,
+  });
+  const client = wrapProducer({ cache, produceMany: producer });
+  const read = client.getMany([{ id: "site:1" }, { id: "biz:1" }], {
+    autoBatch: { producer: false },
+  });
+  const rejected = assert.rejects(read, /result count/).then(() => {
+    events.push("rejected");
+  });
+  await started.promise;
+  const closing = client.close().then(() => {
+    events.push("closed");
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, []);
+  release.resolve();
+  await Promise.all([rejected, closing]);
+  assert.deepEqual(events, ["branch settled", "rejected", "closed"]);
+  await cache.close();
 });

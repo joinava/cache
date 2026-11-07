@@ -6,11 +6,12 @@ import type { Vary } from "./types/04_ProducerResult.js";
 import type { StoreEntryRelationship } from "./types/06_Store.js";
 
 /**
- * @fileoverview The package's diagnostics channels. There are four:
+ * @fileoverview The package's diagnostics channels. There are five:
  *
  * - `@zingage/cache:read` -- what did a cache lookup find? Published by
  *   `Cache.get`/`Cache.getMany` (including direct callers that never touch a
  *   wrapper).
+ * - `@zingage/cache:read-batch` -- one message per physical Store read.
  * - `@zingage/cache:fetch` -- how was a logical wrapped-producer request
  *   answered? Published by the producer wrappers, once per call of the
  *   wrapped function (per request element, for bulk), at settlement.
@@ -20,9 +21,9 @@ import type { StoreEntryRelationship } from "./types/06_Store.js";
  * - `@zingage/cache:store-entry` -- one message per entry passed to
  *   `Cache.store()`.
  *
- * Every message carries the same two attribution fields ({@link Attribution};
- * `produce` carries them per element of `requests[]` instead): the cache
- * instance's `name` and the resource-type name from the cache's registry.
+ * Logical messages carry the cache name and resource-type name. `produce`
+ * carries resource types per element of `requests[]`. `read-batch` carries
+ * only the cache name because a physical read can cover several types.
  *
  * ## `vary`: the variant key shared by `read`, `fetch`, and `store-entry`
  *
@@ -55,8 +56,8 @@ import type { StoreEntryRelationship } from "./types/06_Store.js";
  * event already shipped, and an `aborted` fetch settles *before* its
  * invocation does (the collapsed producer call keeps running and stores in
  * the background). The durations also mean different things:
- * `produce.durationMs` is invocation time, while any fetch-level duration
- * would be caller wait (riders wait less than the invocation took).
+ * `produce.durationMs` is invocation time, while `fetch.durationMs`
+ * measures caller wait (riders wait less than the invocation took).
  */
 
 /**
@@ -159,7 +160,11 @@ export type CacheReadFound = CacheReadFoundWithEntry | "none";
  * cache helpers' return types, so helper changes require an explicit decision
  * about diagnostic message changes.
  */
-export type CacheReadMessage = Attribution & { resourceId: string } & (
+export type CacheReadMessage = Attribution & {
+  resourceId: string;
+  durationMs?: number;
+} & (
+    | { found: "aborted"; vary?: undefined }
     | {
         found: CacheReadFoundWithEntry;
         /** The selected entry's normalized vary identifies its stored variant. */
@@ -262,7 +267,11 @@ export type CacheFetchDisposition =
       vary: Vary<AnyParams>;
     }
   | {
-      disposition: "served-from-producer" | "producer-error" | "aborted";
+      disposition:
+        | "served-from-producer"
+        | "producer-error"
+        | "cache-read-error"
+        | "aborted";
       /**
        * True iff the consumer's directives forced producer contact
        * regardless of cache contents (`isRequestingCacheBypass`:
@@ -294,6 +303,8 @@ export type CacheFetchDisposition =
  * The message type published to the fetch diagnostics channel.
  */
 export type CacheFetchMessage = Attribution & {
+  /** Logical public-call duration, including all slots in a known set. */
+  durationMs?: number;
   resourceId: string;
   /**
    * True if this request's own SETTLEMENT rode an already-in-flight producer
@@ -342,16 +353,18 @@ export const CACHE_PRODUCE_CHANNEL_NAME = "@zingage/cache:produce";
  */
 export type CacheProduceMessage = {
   cache: string;
+  operation?: "produce" | "produceMany";
+  automatic?: boolean;
+  requestCount?: number;
+  failedRequestCount?: number;
+  operationFailed?: boolean;
+  queueWaitTotalMs?: number;
   /**
-   * Why the producer was contacted -- the invocation's INITIATING cause.
-   * Bypass never mixes with the other two (the collapse key includes the
-   * request's directives, so a `maxAge: 0` caller and a plain-miss caller
-   * never share an invocation), but miss and revalidation callers use
-   * identical directives and CAN share one: a same-key miss arriving while a
-   * revalidation is in flight rides it (and vice versa) without re-labeling
-   * the trigger.
+   * Why the producer was contacted. Compatible requests keep their initiating
+   * cause when callers join them. A bulk invocation reports `mixed` when its
+   * distinct requests have different initiating causes.
    */
-  trigger: "miss" | "revalidation" | "bypass";
+  trigger: "miss" | "revalidation" | "bypass" | "mixed";
   /**
    * The requests this invocation covered, in the order the producer received
    * them. Length 1 except for bulk producers, whose batches MAY span resource
@@ -450,3 +463,24 @@ export const cacheStoreEntryChannel = typedChannel<CacheStoreEntryMessage>()(
 export function publishCacheStoreEntry(message: CacheStoreEntryMessage): void {
   cacheStoreEntryChannel.publish(message);
 }
+
+/**
+ * One physical Store read, including direct calls and automatic batches.
+ * Queue wait is summed across dispatched requests. Cancelled queued slots are excluded.
+ * Failed operations and affected request slots have separate counts.
+ */
+export type CacheReadBatchMessage = {
+  cache: string;
+  operation: "get" | "getMany";
+  automatic: boolean;
+  outcome: "success" | "partial" | "failure";
+  requestCount: number;
+  failedRequestCount: number;
+  entryCount: number;
+  durationMs: number;
+  queueWaitTotalMs: number;
+};
+export const CACHE_READ_BATCH_CHANNEL_NAME = "@zingage/cache:read-batch";
+export const cacheReadBatchChannel = typedChannel<CacheReadBatchMessage>()(
+  CACHE_READ_BATCH_CHANNEL_NAME,
+);

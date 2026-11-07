@@ -1,3 +1,4 @@
+import { throwIfAnyError } from "./utils/utils.js";
 import { expect } from "chai";
 import assert from "node:assert/strict";
 import { describe, it, mock } from "node:test";
@@ -29,7 +30,7 @@ import {
   MemoryStore,
   producerByIdType,
   resourceType,
-  wrapBulkProducer,
+  wrapProducer,
   wrapHashedInputProducer,
   type CacheFetchMessage,
   type CacheProduceMessage,
@@ -37,7 +38,6 @@ import {
   type CacheStoreEntryMessage,
   type ResourceTypes,
 } from "./index.js";
-import wrapProducer from "./utils/wrapProducer.js";
 
 /**
  * Conformance tests for the four §6.5 diagnostics channels: exact channel
@@ -80,7 +80,7 @@ const makeHarness = (label: string) => {
   const store = new MemoryStore();
   const cache = new Cache({
     // These tests inject or count individual store.get calls.
-    batchReads: false,
+
     store: store,
     name,
     resourceTypes: registry,
@@ -132,11 +132,13 @@ describe("diagnostics channels (§6.5)", () => {
           content: `content-${req.id}`,
           directives: freshFor100,
         }));
-        const getSite = wrapProducer(
-          { cache },
-          producerByIdType(cache.resourceTypes, { site_day: producer }),
-        );
-        await getSite({ id: "site:typed" });
+        const getSite = wrapProducer({
+          cache,
+          produce: producerByIdType(cache.resourceTypes, {
+            site_day: producer,
+          }),
+        });
+        await getSite.get({ id: "site:typed" });
         await waitUntil(
           () => storeEntries.length >= 1 && produces.length >= 1,
           "typed channels received the miss cascade",
@@ -159,7 +161,7 @@ describe("diagnostics channels (§6.5)", () => {
   describe("read channel (§6.5.1)", () => {
     it("direct Cache.get on a miss publishes exactly one fully-attributed message with found: 'none'", async () => {
       const { name, cache } = makeHarness("read-miss");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         await cache.get({ id: "site:missing", params: {}, directives: {} });
         expect(capture.read).to.deep.equal([
@@ -184,7 +186,7 @@ describe("diagnostics channels (§6.5)", () => {
       await cache.store([
         { id: "site:a", content: "fresh", directives: freshFor100 },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         const res = await cache.get({
           id: "site:a",
@@ -217,7 +219,7 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         const res = await cache.get({
           id: "site:a",
@@ -250,7 +252,7 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         const res = await cache.get({
           id: "site:a",
@@ -284,7 +286,7 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         const res = await cache.get({
           id: "site:a",
@@ -316,13 +318,15 @@ describe("diagnostics channels (§6.5)", () => {
       await cache.store([
         { id: "site:a", content: "fresh", directives: freshFor100 },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
-        await cache.getMany([
-          { id: "site:a", params: {}, directives: {} },
-          { id: "biz:b", params: {}, directives: {} },
-          { id: "site:a", params: {}, directives: {} },
-        ]);
+        await cache
+          .getMany([
+            { id: "site:a", params: {}, directives: {} },
+            { id: "biz:b", params: {}, directives: {} },
+            { id: "site:a", params: {}, directives: {} },
+          ])
+          .then(throwIfAnyError);
         expect(capture.read).to.have.lengthOf(3);
         expect(sortByResourceId(capture.read)).to.deep.equal([
           {
@@ -359,7 +363,7 @@ describe("diagnostics channels (§6.5)", () => {
       const store = new MemoryStore();
       const cache = new Cache({
         // These tests inject or count individual store.get calls.
-        batchReads: false,
+
         store: store,
         name,
         resourceTypes: registry,
@@ -367,7 +371,7 @@ describe("diagnostics channels (§6.5)", () => {
         onStoreAfterClose: "no-op",
       });
       await cache.close();
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         const res = await cache.get({
           id: "site:a",
@@ -408,7 +412,7 @@ describe("diagnostics channels (§6.5)", () => {
       store.get = async () => {
         throw readError;
       };
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         const thrown = await expectRejection(() =>
           cache.get({ id: "site:a", params: {}, directives: {} }),
@@ -432,18 +436,20 @@ describe("diagnostics channels (§6.5)", () => {
     it("a failed getMany read publishes one 'read-failed' PER request, so per-id read counts match the successful path", async () => {
       const { name, store, cache } = makeHarness("read-failure-many");
       const readError = new Error("store exploded");
-      store.getMany = async () => {
+      store.get = async () => {
         throw readError;
       };
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         const thrown = await expectRejection(() =>
-          cache.getMany([
-            { id: "site:a", params: {}, directives: {} },
-            { id: "biz:b", params: {}, directives: {} },
-            // A duplicate gets its own message, exactly as on the success path.
-            { id: "site:a", params: {}, directives: {} },
-          ]),
+          cache
+            .getMany([
+              { id: "site:a", params: {}, directives: {} },
+              { id: "biz:b", params: {}, directives: {} },
+              // A duplicate gets its own message, exactly as on the success path.
+              { id: "site:a", params: {}, directives: {} },
+            ])
+            .then(throwIfAnyError),
         );
         expect(thrown).to.equal(readError);
         expect(capture.read).to.have.lengthOf(3);
@@ -477,7 +483,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("an ABORTED read is not a failed read: it publishes nothing, matching the pre-aborted fast path", async () => {
+    it("an aborted dispatched read publishes an aborted outcome instead of a read failure", async () => {
       const { name, store, cache } = makeHarness("read-abort-not-failure");
       const controller = new AbortController();
       // Reject the way a signal-aware store does once the signal fires.
@@ -485,7 +491,7 @@ describe("diagnostics channels (§6.5)", () => {
         controller.abort();
         throw new Error("aborted by signal");
       };
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         await expectRejection(() =>
           cache.get(
@@ -493,7 +499,14 @@ describe("diagnostics channels (§6.5)", () => {
             { signal: controller.signal },
           ),
         );
-        expect(capture.read).to.deep.equal([]);
+        expect(capture.read).to.deep.equal([
+          {
+            cache: name,
+            resourceType: "site_day",
+            resourceId: "site:a",
+            found: "aborted",
+          },
+        ]);
       } finally {
         capture.stop();
         await cache.close();
@@ -507,17 +520,17 @@ describe("diagnostics channels (§6.5)", () => {
       await cache.store([
         { id: "site:a", content: "cached", directives: freshFor100 },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => ({
         content: "never",
         directives: freshFor100,
       }));
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
-        const res = await getSite({ id: "site:a" });
+        const res = await getSite.get({ id: "site:a" });
         expect(res.content).to.equal("cached");
         expect(producer.mock.callCount()).to.equal(0);
 
@@ -548,19 +561,19 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("served-from-producer is published at SETTLEMENT, after the producer resolves -- not at classification time", async () => {
       const { name, cache } = makeHarness("fetch-settlement");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const { promise: gate, resolve: releaseProducer } =
         Promise.withResolvers<void>();
       const producer = mock.fn(async (req: { readonly id: string }) => {
         await gate;
         return { content: `content-${req.id}`, directives: freshFor100 };
       });
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
-        const pending = getSite({ id: "site:a" });
+        const pending = getSite.get({ id: "site:a" });
         await waitUntil(
           () => producer.mock.callCount() === 1,
           "producer invoked",
@@ -599,7 +612,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("producer-error: the error propagates; the fetch message arrives only after the producer rejects", async () => {
       const { name, cache } = makeHarness("fetch-producer-error");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producerError = new Error("origin down");
       const { promise: gate, resolve: releaseProducer } =
         Promise.withResolvers<void>();
@@ -607,12 +620,12 @@ describe("diagnostics channels (§6.5)", () => {
         await gate;
         throw producerError;
       });
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
-        const pending = getSite({ id: "site:a" });
+        const pending = getSite.get({ id: "site:a" });
         await waitUntil(
           () => producer.mock.callCount() === 1,
           "producer invoked",
@@ -658,17 +671,17 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => {
         await delay(30);
         return { content: "fresh-v2", directives: freshFor100 };
       });
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
-        const res = await getSite({ id: "site:a" });
+        const res = await getSite.get({ id: "site:a" });
         expect(res.content).to.equal("stale-v1");
         expect(capture.fetch).to.have.lengthOf(1);
         expectCachePathFetch(capture.fetch[0], {
@@ -722,7 +735,7 @@ describe("diagnostics channels (§6.5)", () => {
           validators: {},
           relationshipToExistingStoredData: undefined,
         });
-        const after = await getSite({ id: "site:a" });
+        const after = await getSite.get({ id: "site:a" });
         expect(after.content).to.equal("fresh-v2");
         expect(producer.mock.callCount()).to.equal(1);
       } finally {
@@ -741,17 +754,17 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => {
         await delay(10);
         throw new Error("origin down");
       });
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
-        const res = await getSite({ id: "site:a" });
+        const res = await getSite.get({ id: "site:a" });
         expect(res.content).to.equal("stale-v1");
 
         await waitUntil(
@@ -792,17 +805,17 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => {
         await delay(10);
         throw new Error("origin down");
       });
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
-        const res = await getSite({ id: "site:a" });
+        const res = await getSite.get({ id: "site:a" });
         expect(res.content).to.equal("stale-v1");
 
         expect(capture.read).to.deep.equal([
@@ -838,18 +851,18 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("aborted: the fetch settles as 'aborted' BEFORE the invocation's produce message; the result is still stored", async () => {
       const { name, cache } = makeHarness("fetch-abort-mid-producer");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => {
         await delay(80);
         return { content: "slow-but-stored", directives: freshFor100 };
       });
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       const controller = new AbortController();
       try {
-        const pending = getSite(
+        const pending = getSite.get(
           { id: "site:a" },
           { signal: controller.signal },
         );
@@ -895,7 +908,7 @@ describe("diagnostics channels (§6.5)", () => {
           () => capture.storeEntry.length === 1,
           "abandoned result stored",
         );
-        const after = await getSite({ id: "site:a" });
+        const after = await getSite.get({ id: "site:a" });
         expect(after.content).to.equal("slow-but-stored");
         expect(producer.mock.callCount()).to.equal(1);
       } finally {
@@ -909,18 +922,18 @@ describe("diagnostics channels (§6.5)", () => {
       const { promise: storeRead, resolve: releaseStoreRead } =
         Promise.withResolvers<never[]>();
       store.get = (async () => storeRead) as typeof store.get;
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => ({
         content: "never",
         directives: freshFor100,
       }));
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       const controller = new AbortController();
       try {
-        const pending = getSite(
+        const pending = getSite.get(
           { id: "site:a" },
           { signal: controller.signal },
         );
@@ -953,21 +966,23 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("a pre-aborted signal settles as 'aborted' with no read message (the read never happened, so there is nothing to report -- distinct from a read that happened and failed)", async () => {
       const { name, cache } = makeHarness("fetch-pre-aborted");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => ({
         content: "never",
         directives: freshFor100,
       }));
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       const controller = new AbortController();
       controller.abort(new Error("pre-aborted"));
       try {
         await assert.rejects(
-          () => getSite({ id: "site:a" }, { signal: controller.signal }),
-          { message: "pre-aborted" },
+          () => getSite.get({ id: "site:a" }, { signal: controller.signal }),
+          {
+            message: "pre-aborted",
+          },
         );
 
         await waitUntil(
@@ -994,7 +1009,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("riders: a concurrent identical request performs its own read, then rides the in-flight invocation -- no new produce, fetch collapsed: true, collapsedCallerCount 2 (§7)", async () => {
       const { name, cache } = makeHarness("fetch-rider");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       // Gated rather than delayed, so the initiator's invocation is held
       // open for as long as the rider's read takes (a fixed pending window
       // flakes under suite load: the invocation settles and stores first,
@@ -1007,18 +1022,18 @@ describe("diagnostics channels (§6.5)", () => {
         await gate;
         return { content: "shared", directives: freshFor100 };
       });
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
-        const first = getSite({ id: "site:a" });
+        const first = getSite.get({ id: "site:a" });
         await waitUntil(
           () => producer.mock.callCount() === 1,
           "the initiator's invocation starting",
           10_000,
         );
-        const second = getSite({ id: "site:a" });
+        const second = getSite.get({ id: "site:a" });
         // The rider publishes its own read BEFORE consulting the collapse
         // registry, so once its read is visible the attach has already
         // happened -- on an invocation the gate guarantees is still
@@ -1099,7 +1114,7 @@ describe("diagnostics channels (§6.5)", () => {
           directives: swrWindowDirectives,
         },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       let releaseProducer = () => {};
       const gate = new Promise<void>((resolve) => {
         releaseProducer = resolve;
@@ -1108,16 +1123,16 @@ describe("diagnostics channels (§6.5)", () => {
         await gate;
         return { content: "new", directives: freshFor100 };
       });
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
         // Both calls are served stale immediately; the first starts a
         // background revalidation (held open by the gate), the second's
         // revalidation rides it.
-        const res1 = await getSite({ id: "site:swr" });
-        const res2 = await getSite({ id: "site:swr" });
+        const res1 = await getSite.get({ id: "site:swr" });
+        const res2 = await getSite.get({ id: "site:swr" });
         expect(res1.content).to.equal("old");
         expect(res2.content).to.equal("old");
 
@@ -1164,17 +1179,17 @@ describe("diagnostics channels (§6.5)", () => {
       store.get = async () => {
         throw readError;
       };
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => ({
         content: "from-producer",
         directives: freshFor100,
       }));
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
-        const res = await getSite({ id: "site:a" });
+        const res = await getSite.get({ id: "site:a" });
         expect(res.content).to.equal("from-producer");
         // This is the case the read-failed variant exists for: the wrapper
         // absorbs the error and substitutes an empty lookup, so the fetch below
@@ -1204,28 +1219,29 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("onCacheReadFailure: 'throw' rethrows with a 'read-failed' read message but NO fetch message (the request never reached a disposition)", async () => {
+    it("onCacheReadFailure: 'throw' reports the failed logical fetch", async () => {
       const { name, store, cache } = makeHarness("fetch-read-failure-throw");
       const readError = new Error("store exploded");
       store.get = async () => {
         throw readError;
       };
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => ({
         content: "never",
         directives: freshFor100,
       }));
-      const getSite = wrapProducer(
-        { cache, onCacheReadFailure: "throw" },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        onCacheReadFailure: "throw",
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
-        const thrown = await expectRejection(() => getSite({ id: "site:a" }));
+        const thrown = await expectRejection(() =>
+          getSite.get({ id: "site:a" }),
+        );
         expect(thrown).to.equal(readError);
         expect(producer.mock.callCount()).to.equal(0);
-        // The read is reported (it happened, and it failed); the FETCH is not,
-        // because the request never reached a disposition -- that asymmetry is
-        // the §6.5.2 exception, and it survives the read-channel change.
+        // The Store failure and failed logical fetch have separate observations.
         expect(capture.read).to.deep.equal([
           {
             cache: name,
@@ -1235,7 +1251,9 @@ describe("diagnostics channels (§6.5)", () => {
             error: readError,
           },
         ]);
-        expect(capture.fetch).to.deep.equal([]);
+        expect(
+          capture.fetch.map(({ disposition }) => disposition),
+        ).to.deep.equal(["cache-read-error"]);
         expect(capture.produce).to.deep.equal([]);
       } finally {
         capture.stop();
@@ -1243,13 +1261,13 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("wrapBulkProducer + onCacheReadFailure: 'throw': a mixed bypass+read batch emits NO fetch messages -- even after the bypass invocation settles and stores", async () => {
+    it("wrapBulkProducer + onCacheReadFailure: 'throw': a mixed bypass and failed read returns independent slot outcomes", async () => {
       const { name, store, cache } = makeHarness("fetch-bulk-throw-bypass");
       const readError = new Error("store exploded");
-      store.getMany = async () => {
+      store.get = async () => {
         throw readError;
       };
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(
         async (reqs: readonly { readonly id: string }[]) =>
           reqs.map((req) => ({
@@ -1257,25 +1275,22 @@ describe("diagnostics channels (§6.5)", () => {
             directives: freshFor100,
           })),
       );
-      const getBulk = wrapBulkProducer(
-        { cache, onCacheReadFailure: "throw" },
-        bulkProducerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getBulk = wrapProducer({
+        cache,
+        onCacheReadFailure: "throw",
+        produceMany: bulkProducerByIdType(cache.resourceTypes, {
+          site_day: producer,
+        }),
+      });
       try {
-        // The bypass element's invocation launches before (and independently
-        // of) the read; the read failure then rejects the whole call.
-        const thrown = await expectRejection(() =>
-          getBulk([
-            { id: "site:bypass", directives: { maxAge: 0 } },
-            { id: "site:read" },
-          ]),
-        );
-        expect(thrown).to.equal(readError);
+        const results = await getBulk.getMany([
+          { id: "site:bypass", directives: { maxAge: 0 } },
+          { id: "site:read" },
+        ]);
+        assert.ok(!(results[0] instanceof Error));
+        expect(results[0].content).to.equal("ok-site:bypass");
+        expect(results[1]).to.equal(readError);
 
-        // The in-flight bypass invocation still settles, stores its result
-        // (store-on-success), and publishes its produce message -- but the
-        // call rejected before delivering its answer, so no fetch message
-        // may ever claim `served-from-producer` for it.
         await waitUntil(
           () => capture.produce.length === 1 && capture.storeEntry.length === 1,
           "bypass invocation settling after the call rejected",
@@ -1293,7 +1308,9 @@ describe("diagnostics channels (§6.5)", () => {
             error: readError,
           },
         ]);
-        expect(capture.fetch).to.deep.equal([]);
+        expect(
+          capture.fetch.map(({ disposition }) => disposition),
+        ).to.deep.equal(["served-from-producer", "cache-read-error"]);
         expectProduceMessage(capture.produce[0], {
           cache: name,
           trigger: "bypass",
@@ -1311,21 +1328,21 @@ describe("diagnostics channels (§6.5)", () => {
       const name = uniqueCacheName("fetch-sole-type");
       const cache = new Cache({
         // These tests inject or count individual store.get calls.
-        batchReads: false,
+
         store: new MemoryStore(),
         name,
         resourceTypes: soleVisitsRegistry,
       });
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async (req: { readonly id: string }) => ({
         content: `content-${req.id}`,
         directives: freshFor100,
       }));
       // A sole-type registry: the producer covers the whole registry, so it
       // goes in bare -- no helper, no declared covered set.
-      const getVisits = wrapProducer({ cache }, producer);
+      const getVisits = wrapProducer({ cache, produce: producer });
       try {
-        await getVisits({ id: "no-structure-at-all" });
+        await getVisits.get({ id: "no-structure-at-all" });
         await waitUntil(
           () => capture.storeEntry.length === 1 && capture.produce.length === 1,
           "sole-type miss cascade",
@@ -1374,7 +1391,7 @@ describe("diagnostics channels (§6.5)", () => {
           directives: freshFor100,
         },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         const fr = await cache.get({
           id: "site:a",
@@ -1424,20 +1441,23 @@ describe("diagnostics channels (§6.5)", () => {
           directives: freshFor100,
         },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => ({
         content: "never",
         directives: freshFor100,
       }));
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
         // `tracking` is a param the stored entry does not vary on, so the
         // entry still matches -- and reporting the request's params here
         // would produce a key no store-entry message will ever carry.
-        const res = await getSite({ id: "site:a", params: frRequestParams });
+        const res = await getSite.get({
+          id: "site:a",
+          params: frRequestParams,
+        });
         expect(res.content).to.equal("bonjour");
         expect(producer.mock.callCount()).to.equal(0);
 
@@ -1480,14 +1500,16 @@ describe("diagnostics channels (§6.5)", () => {
           directives: freshFor100,
         },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
-        await cache.getMany([
-          { id: "site:a", params: { locale: "en" }, directives: {} },
-          { id: "site:a", params: { locale: "fr" }, directives: {} },
-          // No matching variant: `found: "none"`, and so no variant to identify.
-          { id: "site:a", params: { locale: "de" }, directives: {} },
-        ]);
+        await cache
+          .getMany([
+            { id: "site:a", params: { locale: "en" }, directives: {} },
+            { id: "site:a", params: { locale: "fr" }, directives: {} },
+            // No matching variant: `found: "none"`, and so no variant to identify.
+            { id: "site:a", params: { locale: "de" }, directives: {} },
+          ])
+          .then(throwIfAnyError);
         expect(capture.read).to.deep.equal([
           {
             cache: name,
@@ -1535,17 +1557,20 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => {
         await delay(10);
         throw new Error("origin down");
       });
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
-        const swr = await getSite({ id: "site:swr", params: frRequestParams });
+        const swr = await getSite.get({
+          id: "site:swr",
+          params: frRequestParams,
+        });
         expect(swr.content).to.equal("stale-fr");
         expectCachePathFetch(capture.fetch[0], {
           cache: name,
@@ -1556,7 +1581,7 @@ describe("diagnostics channels (§6.5)", () => {
           vary: frVary,
         });
 
-        const ifError = await getSite({
+        const ifError = await getSite.get({
           id: "site:if-error",
           params: { locale: "en" },
         });
@@ -1577,7 +1602,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("a varying producer's serves join to its stores on (resourceId, vary) -- the correlation the field exists for", async () => {
       const { name, cache } = makeHarness("vary-store-correlation");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(
         async (req: { readonly params: Readonly<Record<string, unknown>> }) => {
           const locale = req.params["locale"] === "fr" ? "fr" : "en";
@@ -1588,20 +1613,20 @@ describe("diagnostics channels (§6.5)", () => {
           };
         },
       );
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
         // One miss per locale, then two more serves out of the `fr` variant.
-        await getSite({ id: "site:a", params: { locale: "fr" } });
-        await getSite({ id: "site:a", params: { locale: "en" } });
+        await getSite.get({ id: "site:a", params: { locale: "fr" } });
+        await getSite.get({ id: "site:a", params: { locale: "en" } });
         await waitUntil(
           () => capture.storeEntry.length === 2,
           "both variants stored",
         );
-        await getSite({ id: "site:a", params: frRequestParams });
-        await getSite({ id: "site:a", params: { locale: "fr" } });
+        await getSite.get({ id: "site:a", params: frRequestParams });
+        await getSite.get({ id: "site:a", params: { locale: "fr" } });
         expect(producer.mock.callCount()).to.equal(2);
 
         // The stores landed in two distinct variants under ONE id.
@@ -1657,27 +1682,29 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("dispositions with no served variant OMIT the key rather than reporting `{}` (a real variant)", async () => {
       const { name, cache } = makeHarness("vary-absent-not-empty");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producerError = new Error("origin down");
       const producer = mock.fn(async () => {
         throw producerError;
       });
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       const controller = new AbortController();
       controller.abort(new Error("pre-aborted"));
       try {
         // producer-error: the read found nothing and the producer failed.
         const thrown = await expectRejection(() =>
-          getSite({ id: "site:a", params: { locale: "fr" } }),
+          getSite.get({ id: "site:a", params: { locale: "fr" } }),
         );
         expect(thrown).to.equal(producerError);
         // aborted: the request never reached a value at all.
         await assert.rejects(
-          () => getSite({ id: "site:a" }, { signal: controller.signal }),
-          { message: "pre-aborted" },
+          () => getSite.get({ id: "site:a" }, { signal: controller.signal }),
+          {
+            message: "pre-aborted",
+          },
         );
 
         expect(capture.fetch).to.have.lengthOf(2);
@@ -1701,7 +1728,7 @@ describe("diagnostics channels (§6.5)", () => {
       store.get = async () => {
         throw readError;
       };
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         await expectRejection(() =>
           cache.get({
@@ -1730,17 +1757,17 @@ describe("diagnostics channels (§6.5)", () => {
   describe("produce channel (§6.5.3)", () => {
     it("durationMs measures invocation time", async () => {
       const { name, cache } = makeHarness("produce-duration");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => {
         await delay(60);
         return { content: "slow", directives: freshFor100 };
       });
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
-        await getSite({ id: "site:a" });
+        await getSite.get({ id: "site:a" });
         expect(capture.produce).to.have.lengthOf(1);
         const message = capture.produce[0];
         expect(message?.durationMs).to.be.a("number");
@@ -1754,7 +1781,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("wrapBulkProducer via bulkProducerByIdType: ONE invocation (and one produce message) per window whose requests[] spans types, while each sub-producer's batch stays type-pure", async () => {
       const { name, cache } = makeHarness("produce-bulk");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const siteBulk = mock.fn(
         async (reqs: readonly { readonly id: string }[]) =>
           reqs.map((req) => ({
@@ -1769,15 +1796,15 @@ describe("diagnostics channels (§6.5)", () => {
             directives: freshFor100,
           })),
       );
-      const getBulk = wrapBulkProducer(
-        { cache },
-        bulkProducerByIdType(cache.resourceTypes, {
+      const getBulk = wrapProducer({
+        cache,
+        produceMany: bulkProducerByIdType(cache.resourceTypes, {
           site_day: siteBulk,
           business_slice: bizBulk,
         }),
-      );
+      });
       try {
-        const results = await getBulk([
+        const results = await getBulk.getMany([
           { id: "site:a" },
           { id: "biz:b" },
           { id: "site:c" },
@@ -1855,7 +1882,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("wrapBulkProducer: per-request Error elements are returned in place; their fetch settles as producer-error", async () => {
       const { name, cache } = makeHarness("produce-bulk-errors");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const perRequestError = new Error("this one failed");
       const siteBulk = mock.fn(
         async (reqs: readonly { readonly id: string }[]) =>
@@ -1865,12 +1892,17 @@ describe("diagnostics channels (§6.5)", () => {
               : { content: `ok-${req.id}`, directives: freshFor100 },
           ),
       );
-      const getBulk = wrapBulkProducer(
-        { cache },
-        bulkProducerByIdType(cache.resourceTypes, { site_day: siteBulk }),
-      );
+      const getBulk = wrapProducer({
+        cache,
+        produceMany: bulkProducerByIdType(cache.resourceTypes, {
+          site_day: siteBulk,
+        }),
+      });
       try {
-        const results = await getBulk([{ id: "site:ok" }, { id: "site:bad" }]);
+        const results = await getBulk.getMany([
+          { id: "site:ok" },
+          { id: "site:bad" },
+        ]);
         const first = results[0];
         if (first instanceof Error) throw first;
         expect(first.content).to.equal("ok-site:ok");
@@ -1914,9 +1946,9 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("wrapBulkProducer: a short result array fails the whole invocation: every element settles producer-error exactly once, nothing stores, produce reports error", async () => {
+    it("wrapBulkProducer: a short result array fails the whole invocation: contract errors reject without slot outcomes or writes", async () => {
       const { name, cache } = makeHarness("produce-bulk-short");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       // A buggy producer that returns one result for three requests. An
       // under-return poisons the positional (result, request) pairing -- a
       // dropped MIDDLE element would pair later results with the wrong
@@ -1936,32 +1968,25 @@ describe("diagnostics channels (§6.5)", () => {
             directives: freshFor100,
           })),
       );
-      const getBulk = wrapBulkProducer({ cache }, siteBulk);
+      const getBulk = wrapProducer({ cache, produceMany: siteBulk });
       try {
         await assert.rejects(
-          () => getBulk([{ id: "site:a" }, { id: "biz:b" }, { id: "site:c" }]),
+          () =>
+            getBulk.getMany([
+              { id: "site:a" },
+              { id: "biz:b" },
+              { id: "site:c" },
+            ]),
           {
             // `name` pins it to a plain Error, which is also the "not a
             // coverage failure" check: NoProducerForResourceTypeError would
             // carry its own name.
-            name: "Error",
+            name: "CacheContractError",
             message: /returned 1 results for 3 requests/,
           },
         );
 
-        // One fetch per request element, every one producer-error -- including
-        // the resource type whose single request was inside the returned prefix.
-        expect(capture.fetch).to.have.lengthOf(3);
-        sortByResourceId(capture.fetch).forEach((message, i) => {
-          expectProducerPathFetch(message, {
-            cache: name,
-            resourceType: ["business_slice", "site_day", "site_day"][i] ?? "",
-            resourceId: ["biz:b", "site:a", "site:c"][i] ?? "",
-            disposition: "producer-error",
-            directivesImpliedBypass: false,
-            collapsed: false,
-          });
-        });
+        expect(capture.fetch).to.deep.equal([]);
 
         // The invocation settled by rejecting (the contract violation), so
         // produce reports error -- and the untrustworthy prefix is not
@@ -1975,24 +2000,21 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("wrapBulkProducer: a wholesale producer rejection settles every element's fetch as producer-error and rethrows", async () => {
+    it("wrapBulkProducer: a wholesale producer rejection settles every element's fetch as producer-error and returns positional Errors", async () => {
       const { name, cache } = makeHarness("produce-bulk-wholesale");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const wholesaleError = new Error("entire batch failed");
       const siteBulk = mock.fn(async () => {
         throw wholesaleError;
       });
-      // A BARE producer, deliberately: rethrowing a wholesale rejection is the
-      // wrapper's own contract (it can't know the thrown value is an
-      // `ErrorType`). A rejection from one of `bulkProducerByIdType`'s
-      // sub-producers is a different case -- the helper catches it and isolates
-      // it into that type's result slots as Error elements.
-      const getBulk = wrapBulkProducer({ cache }, siteBulk);
+      // Whole operational failures preserve the same Error in every result slot.
+      const getBulk = wrapProducer({ cache, produceMany: siteBulk });
       try {
-        const thrown = await expectRejection(() =>
-          getBulk([{ id: "site:a" }, { id: "site:b" }]),
-        );
-        expect(thrown).to.equal(wholesaleError);
+        const results = await getBulk.getMany([
+          { id: "site:a" },
+          { id: "site:b" },
+        ]);
+        expect(results).to.deep.equal([wholesaleError, wholesaleError]);
 
         expect(capture.fetch).to.have.lengthOf(2);
         const fetches = sortByResourceId(capture.fetch);
@@ -2024,7 +2046,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("hashed-input wrappers publish the same channel stream, attributed with minted ids: miss emits read/produce/store-entry/fetch; hit emits read/fetch only", async () => {
       const { name, cache } = makeHarness("produce-computing-channels");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       // One resource type, so no hashed-input producer is needed: the two functions
       // are the whole contract.
       const compute = wrapHashedInputProducer({
@@ -2037,7 +2059,7 @@ describe("diagnostics channels (§6.5)", () => {
         }),
       });
       try {
-        await compute({ key: "k1" });
+        await compute.get({ key: "k1" });
         await waitUntil(
           () => capture.storeEntry.length === 1,
           "computed result stored",
@@ -2073,7 +2095,7 @@ describe("diagnostics channels (§6.5)", () => {
         });
 
         // A repeat compute() is a hit: one more read + fetch, nothing else.
-        await compute({ key: "k1" });
+        await compute.get({ key: "k1" });
         expect(capture.read).to.have.lengthOf(2);
         expect(capture.read[1]?.found).to.equal("usable");
         expect(capture.fetch).to.have.lengthOf(2);
@@ -2097,7 +2119,7 @@ describe("diagnostics channels (§6.5)", () => {
   describe("store-entry channel (§6.5.4)", () => {
     it("publishes one fully-attributed message per stored entry, carrying vary, validators, and the store-reported relationship", async () => {
       const { name, cache } = makeHarness("store-entry-basic");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const vary = { someParam: "someValue" };
       try {
         await cache.store([
@@ -2164,7 +2186,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("relationshipToExistingStoredData is undefined when not comparable (empty validators)", async () => {
       const { name, cache } = makeHarness("store-entry-uncomparable");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         await cache.store([
           {
@@ -2205,7 +2227,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("in-call same-variant duplicates still emit one message each; the losing duplicate's relationship is undefined", async () => {
       const { name, cache } = makeHarness("store-entry-duplicates");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       try {
         await cache.store([
           {
@@ -2236,7 +2258,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("supplemental entries are attributed to THEIR OWN resource type, not the producing flow's", async () => {
       const { name, cache } = makeHarness("store-entry-supplemental");
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
       const producer = mock.fn(async () => ({
         content: "site-content",
         validators: { contentHash: "h-site" },
@@ -2256,12 +2278,12 @@ describe("diagnostics channels (§6.5)", () => {
           },
         ],
       }));
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: producer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
       try {
-        await getSite({ id: "site:a" });
+        await getSite.get({ id: "site:a" });
         await waitUntil(
           () => capture.storeEntry.length === 3,
           "primary + supplemental store-entry messages",
@@ -2305,12 +2327,12 @@ describe("diagnostics channels (§6.5)", () => {
       const store = new MemoryStore();
       const cache = new Cache({
         // These tests inject or count individual store.get calls.
-        batchReads: false,
+
         store: store,
         name,
         resourceTypes: registry,
       });
-      const capture = captureChannels(name);
+      const capture = captureChannels(name, { measurements: false });
 
       const siteId = "site:X" as const;
       const bizIds = ["biz:B1", "biz:B2"] as const;
@@ -2351,23 +2373,23 @@ describe("diagnostics channels (§6.5)", () => {
         content: `derived-${req.id}`,
         directives: freshFor100,
       }));
-      const getVisits = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, {
+      const getVisits = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, {
           site_day: siteProducer,
           business_slice: bizProducer,
         }),
-      );
+      });
 
       try {
         // ---- t=0: first read of site:X (miss), with a concurrent rider ----
-        const initiator = getVisits({ id: siteId });
+        const initiator = getVisits.get({ id: siteId });
         await waitUntil(
           () => siteProducer.mock.callCount() === 1,
           "the initiator's invocation starting",
           10_000,
         );
-        const rider = getVisits({ id: siteId });
+        const rider = getVisits.get({ id: siteId });
         // The rider publishes its own read BEFORE consulting the collapse
         // registry, so once its read is visible it has attached to the
         // still-gated invocation.
@@ -2477,7 +2499,7 @@ describe("diagnostics channels (§6.5)", () => {
 
         // ---- t=1: business B1's slice, served from cache ----
         const t1Start = capture.all.length;
-        const sliceRes = await getVisits({ id: "biz:B1" });
+        const sliceRes = await getVisits.get({ id: "biz:B1" });
         expect(sliceRes.content).to.equal("slice-biz:B1");
         expect(bizProducer.mock.callCount()).to.equal(0);
         const t1Messages = capture.all.slice(t1Start);
@@ -2513,7 +2535,7 @@ describe("diagnostics channels (§6.5)", () => {
         // No consumer directives: the producer's generous whileRevalidate
         // window (100s) selects the SWR path regardless of exactly how stale
         // the entry has become by now.
-        const swrRes = await getVisits({ id: siteId });
+        const swrRes = await getVisits.get({ id: siteId });
         expect(swrRes.content).to.equal("site-visits-v1");
         const t2Read = capture.all[t2Start];
         expect(t2Read).to.deep.equal({
@@ -2585,7 +2607,7 @@ describe("diagnostics channels (§6.5)", () => {
         phase.producerHealthy = false;
         await delay(150); // the revalidated entry (freshUntilAge 0.1) is stale again
         const t3Start = capture.all.length;
-        const ifErrorRes = await getVisits({
+        const ifErrorRes = await getVisits.get({
           id: siteId,
           // Consumer directives put this request outside the SWR window but
           // inside the if-error window.
@@ -2629,7 +2651,7 @@ describe("diagnostics channels (§6.5)", () => {
         // ---- outage, caller OUTSIDE the if-error window: the error surfaces ----
         const t4Start = capture.all.length;
         const thrown = await expectRejection(() =>
-          getVisits({
+          getVisits.get({
             id: siteId,
             directives: {
               maxStale: {

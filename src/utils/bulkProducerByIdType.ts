@@ -10,9 +10,9 @@
  *
  * Routing itself is imported from `producerByIdType` rather than reimplemented,
  * which is what keeps the two helpers' answers to "is this id covered" from
- * drifting apart. The edge back to `wrapBulkProducer` is **type-only** (its
+ * drifting apart. The edge back to `wrapProducer` is **type-only** (its
  * `CoveringBulkProducer` return shape and its id-erased `LooseBulkProducer`), as
- * is `wrapBulkProducer`'s edge to the sub-producer type here, so the runtime
+ * is `wrapProducer`'s edge to the sub-producer type here, so the runtime
  * import graph stays acyclic in both directions.
  *
  * @module
@@ -30,11 +30,12 @@ import type {
   ReadonlyConsumerRequest,
   RequestPairedProducerResult,
 } from "../types/index.js";
+import { CacheContractError } from "./utils.js";
 import { resolveCoveredSubProducer } from "./producerByIdType.js";
 import type {
   CoveringBulkProducer,
   LooseBulkProducer,
-} from "./wrapBulkProducer.js";
+} from "./wrapProducer.js";
 import {
   coveredTypes,
   emptyProducersRecordMessage,
@@ -49,14 +50,15 @@ import {
  * sub-producer's batch never mixes types. (The wrapper itself takes a single
  * {@link CoveringBulkProducer}, which by default sees the WHOLE mixed batch --
  * that is the point of the single-function form.) Results are request-paired;
- * Error elements mark per-request failures.
+ * Error elements mark per-request failures. Every request must remain valid
+ * when added, removed, reordered, split, or deduplicated in another batch.
  *
  * The result type is a flat array of (RequestPairedProducerResult |
  * ErrorType): each element is a discriminated union over the type's spec, so
  * each (id, content) pair must internally agree, but the type system does
  * not require the i'th result element to align with the i'th request's id at
  * the call site (which would require gnarly mapped-tuple typing). When
- * `wrapBulkProducer` returns its results to the caller, they ARE narrowed
+ * `wrapProducer` returns its results to the caller, they ARE narrowed
  * per-request via the wrapper's own generic.
  */
 export type BulkResourceTypeProducer<
@@ -101,7 +103,7 @@ export type BulkProducersFor<
 };
 
 /**
- * The bulk counterpart of `producerByIdType`: sugar over `wrapBulkProducer`'s
+ * The bulk counterpart of `producerByIdType`: sugar over `wrapProducer`'s
  * single-producer primitive that turns a record with one bulk producer per
  * covered resource type into ONE function, and declares its covered set in
  * {@link coveredTypes} so the wrapper can both infer `Covered` from it and
@@ -168,7 +170,7 @@ export function bulkProducerByIdType<
 
   if (coveredResourceTypes.length === 0) {
     throw new Error(
-      emptyProducersRecordMessage("bulkProducerByIdType", "wrapBulkProducer"),
+      emptyProducersRecordMessage("bulkProducerByIdType", "wrapProducer"),
     );
   }
 
@@ -203,7 +205,7 @@ export function bulkProducerByIdType<
     // oxlint-disable-next-line unicorn/no-new-array -- intentional preallocation; filled by index below
     const results: (LooseResult | Error)[] = new Array(reqs.length);
 
-    await Promise.all(
+    const settled = await Promise.allSettled(
       [...Map.groupBy(classified, (it) => it.resourceType).entries()].map(
         async ([resourceType, entries]) => {
           // Every member of a group resolved to the same resource type, hence
@@ -224,6 +226,7 @@ export function bulkProducerByIdType<
           try {
             subResults = await subProducer(entries.map((it) => it.req));
           } catch (error: unknown) {
+            if (error instanceof CacheContractError) throw error;
             // Per-request error isolation survives the merge: this type's
             // slots settle as Error elements instead of failing the whole
             // invocation. A non-Error failure is wrapped rather than stored
@@ -249,10 +252,13 @@ export function bulkProducerByIdType<
           // is sound (see the wrapper's check) but a count comparison needs no
           // such premise. The failure path above is length-correct by
           // construction, so this only fires for a sub-producer that returned.
-          if (subResults.length !== entries.length) {
-            throw new Error(
+          if (
+            !Array.isArray(subResults) ||
+            subResults.length !== entries.length
+          ) {
+            throw new CacheContractError(
               `bulkProducerByIdType: the "${resourceType}" producer returned a ` +
-                `result count (${String(subResults.length)}) that does not match ` +
+                `result count (${String(Array.isArray(subResults) ? subResults.length : 0)}) that does not match ` +
                 `the number of requests in its slice (${String(entries.length)}); ` +
                 `each sub-producer must return exactly one result or Error per ` +
                 `request it was given`,
@@ -267,6 +273,10 @@ export function bulkProducerByIdType<
         },
       ),
     );
+
+    // Keep ownership until every dispatched branch settles, even if one fails.
+    const failure = settled.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
 
     return results;
   };

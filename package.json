@@ -1,6 +1,6 @@
 {
   "name": "@zingage/cache",
-  "version": "3.3.0",
+  "version": "4.0.0",
   "type": "module",
   "packageManager": "pnpm@10.26.1",
   "exports": {
@@ -32,7 +32,8 @@
     "dev": "pnpm run tsc:watch",
     "lint": "oxlint",
     "load-env": "dotenvx run --ignore=MISSING_ENV_FILE",
-    "prepublishOnly": "pnpm run build && cp dist.npmignore dist/src/.npmignore && pnpm run lint"
+    "prepublishOnly": "pnpm run build && cp dist.npmignore dist/src/.npmignore && pnpm run lint",
+    "test:types": "tsc -p test/types/tsconfig.json"
   },
   "dependencies": {
     "dataloader": "^2.2.3",

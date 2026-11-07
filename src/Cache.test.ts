@@ -1,3 +1,4 @@
+import { throwIfAnyError } from "./utils/utils.js";
 import { expect } from "chai";
 import fc from "fast-check";
 import { after, before, describe, it, mock } from "node:test";
@@ -54,7 +55,7 @@ describe("Cache", { concurrency: true }, () => {
    * test/v2AcceptanceHelpers.ts on why a registry-generic factory would.)
    */
   const cacheOver = (store: typeof memoryStore | typeof postgresStore) =>
-    new Cache({ store, ...cacheOptions, batchReads: false });
+    new Cache({ store, ...cacheOptions });
 
   // The value returned when there's no cached response at all for the resource
   // (or id + params pair in the event of a cached response with a varyKeys),
@@ -597,12 +598,11 @@ describe("Cache", { concurrency: true }, () => {
         const store = new MemoryStore<CacheSpec<string, JSON>>();
         const origGet = store.get.bind(store);
         store.get = (async (
-          id: string,
-          params: any,
+          request: Parameters<typeof origGet>[0],
           options?: { signal?: AbortSignal },
         ) => {
           signalCapture.push(options?.signal);
-          return origGet(id, params);
+          return origGet(request, options);
         }) as typeof store.get;
 
         const cache = cacheOver(store);
@@ -649,35 +649,38 @@ describe("Cache", { concurrency: true }, () => {
         controller.abort(new Error("pre-aborted-many"));
 
         try {
-          await cache.getMany([{ id: "a", params: {}, directives: {} }], {
-            signal: controller.signal,
-          });
+          await cache
+            .getMany([{ id: "a", params: {}, directives: {} }], {
+              signal: controller.signal,
+            })
+            .then(throwIfAnyError);
           throw new Error("should have rejected");
         } catch (e) {
           expect((e as Error).message).to.eq("pre-aborted-many");
         }
       });
 
-      it("should forward the signal to the store's getMany method", async () => {
+      it("should forward the signal to single reads in a known set", async () => {
         const signalCapture: (AbortSignal | undefined)[] = [];
         const store = new MemoryStore<CacheSpec<string, JSON>>();
-        const origGetMany = store.getMany.bind(store);
-        store.getMany = (async (
+        const origGetMany = store.get.bind(store);
+        store.get = (async (
           requests: any,
           options?: { signal?: AbortSignal },
         ) => {
           signalCapture.push(options?.signal);
           return origGetMany(requests);
-        }) as typeof store.getMany;
+        }) as typeof store.get;
 
         const cache = cacheOver(store);
         const controller = new AbortController();
 
         try {
-          await cache.getMany(
-            [{ id: "fwd-test-a", params: {}, directives: {} }],
-            { signal: controller.signal },
-          );
+          await cache
+            .getMany([{ id: "fwd-test-a", params: {}, directives: {} }], {
+              signal: controller.signal,
+            })
+            .then(throwIfAnyError);
 
           expect(signalCapture).to.have.lengthOf(1);
           expect(signalCapture[0]).to.eq(controller.signal);
@@ -699,10 +702,12 @@ describe("Cache", { concurrency: true }, () => {
         );
 
         const controller = new AbortController();
-        const results = await cache.getMany(
-          ids.map((id) => ({ id, params: {}, directives: {} })),
-          { signal: controller.signal },
-        );
+        const results = await cache
+          .getMany(
+            ids.map((id) => ({ id, params: {}, directives: {} })),
+            { signal: controller.signal },
+          )
+          .then(throwIfAnyError);
         expect(results).to.have.lengthOf(2);
         results.forEach((r, i) => {
           expect(r.usable).to.deep.include({ content: [`many-${i}`] });

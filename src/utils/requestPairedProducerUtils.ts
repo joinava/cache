@@ -95,6 +95,7 @@ export function primaryNormalizedResultResourceFromRequestPairedProducerResult<
   normalizeVaryBound: (vary: Vary<Params>) => NormalizedVary<Params>,
   result: RequestPairedProducerResult<Spec, Validators, Params, Id>,
   reqId: Id,
+  fallbackProducedAt?: Date,
 ) {
   const { supplementalResources: _, ...primaryResource } = result;
 
@@ -102,12 +103,16 @@ export function primaryNormalizedResultResourceFromRequestPairedProducerResult<
     SpecForId<Spec, Id>,
     Validators,
     Params
-  >(normalizeVaryBound, {
-    ...primaryResource,
-    id: reqId,
-  } as unknown as ProducerResultResource<
-    SpecForId<Spec, Id>,
-    Validators,
-    Params
-  >);
+  >(
+    normalizeVaryBound,
+    {
+      ...primaryResource,
+      id: reqId,
+    } as unknown as ProducerResultResource<
+      SpecForId<Spec, Id>,
+      Validators,
+      Params
+    >,
+    fallbackProducedAt,
+  );
 }
