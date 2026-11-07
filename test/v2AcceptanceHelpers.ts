@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import type { DistributedOmit } from "type-fest";
 import assert from "node:assert/strict";
 import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { setTimeout as delay } from "timers/promises";
@@ -70,14 +71,16 @@ export const V2_CHANNEL_NAMES = {
   storeEntry: "@zingage/cache:store-entry",
 } as const;
 
+type CapturedReadMessage = DistributedOmit<CacheReadMessage, "durationMs">;
+
 export type CapturedMessage =
-  | { channel: "read"; message: CacheReadMessage }
+  | { channel: "read"; message: CapturedReadMessage }
   | { channel: "fetch"; message: CacheFetchMessage }
   | { channel: "produce"; message: CacheProduceMessage }
   | { channel: "store-entry"; message: CacheStoreEntryMessage };
 
 export type ChannelCapture = {
-  read: CacheReadMessage[];
+  read: CapturedReadMessage[];
   fetch: CacheFetchMessage[];
   produce: CacheProduceMessage[];
   storeEntry: CacheStoreEntryMessage[];
@@ -95,7 +98,7 @@ export type ChannelCapture = {
  * counts.
  */
 export function captureChannels(cacheName: string): ChannelCapture {
-  const read: CacheReadMessage[] = [];
+  const read: CapturedReadMessage[] = [];
   const fetch: CacheFetchMessage[] = [];
   const produce: CacheProduceMessage[] = [];
   const storeEntry: CacheStoreEntryMessage[] = [];

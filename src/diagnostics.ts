@@ -165,7 +165,7 @@ export type CacheReadFound = CacheReadFoundWithEntry | "none";
 export type CacheReadMessage = Attribution & {
   resourceId: string;
   /** Elapsed lookup time through classification, in milliseconds. Bulk slots share a start time. */
-  durationMs?: number;
+  durationMs: number;
 } & (
     | {
         found: CacheReadFoundWithEntry;

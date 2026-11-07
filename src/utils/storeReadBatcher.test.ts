@@ -438,3 +438,65 @@ test("direct Store cancellation is not counted as operational failure", async (t
   assert.equal(messages[0]?.failedRequestCount, 0);
   assert.equal(messages[0]?.requestCount, 1);
 });
+
+test("direct bulk cancellation preserves the abort reason without failed slots or logical events", async (t) => {
+  const store = new MemoryStore();
+  const started = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<void>();
+  const messages: CacheReadBatchMessage[] = [];
+  const reads: CacheReadMessage[] = [];
+  t.mock.method(
+    store,
+    "getMany",
+    async (...args: Parameters<typeof store.getMany>) => {
+      assert.equal(args[0].length, 2);
+      started.resolve();
+      await finish.promise;
+      args[1]?.signal?.throwIfAborted();
+      return args[0].map(() => []);
+    },
+  );
+  const cache = new Cache(
+    singleTypeCacheOptions<string>()({ name: "direct-bulk-abort", store }),
+  );
+  const onBatch = (message: CacheReadBatchMessage) => {
+    messages.push(message);
+  };
+  const onRead = (message: CacheReadMessage) => {
+    reads.push(message);
+  };
+  cacheReadBatchChannel.subscribe(onBatch);
+  cacheReadChannel.subscribe(onRead);
+  t.after(async () => {
+    finish.resolve();
+    cacheReadBatchChannel.unsubscribe(onBatch);
+    cacheReadChannel.unsubscribe(onRead);
+    await cache.close();
+  });
+  const clock = { now: 10 };
+  t.mock.method(performance, "now", () => clock.now);
+  const controller = new AbortController();
+  const reason = new Error("bulk caller cancelled");
+  const pending = cache.getMany([request("a"), request("b")], {
+    signal: controller.signal,
+  });
+  const rejected = assert.rejects(pending, (error) => error === reason);
+  await started.promise;
+  controller.abort(reason);
+  clock.now = 40;
+  finish.resolve();
+  await rejected;
+  assert.deepEqual(messages, [
+    {
+      cache: "direct-bulk-abort",
+      operation: "getMany",
+      outcome: "cancelled",
+      requestCount: 2,
+      entryCount: 0,
+      failedRequestCount: 0,
+      durationMs: 30,
+      queueWaitTotalMs: 0,
+    },
+  ]);
+  assert.deepEqual(reads, []);
+});

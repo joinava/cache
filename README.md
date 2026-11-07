@@ -295,8 +295,7 @@ MemoryStore close only stops periodic expiration cleanup; pending operations con
 
 ### Read timing and batching
 
-Read messages include optional `durationMs` for compatibility with existing
-message producers. Cache lookups emit elapsed time from method entry through
+Read messages include required `durationMs`. Cache lookups emit elapsed time from method entry through
 classification. Bulk slots share one start time; each slot reports its own
 classification completion. Pre-aborted calls still emit no read event.
 
