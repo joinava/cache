@@ -73,16 +73,16 @@ const both: Store<SpecOf<typeof registry>, {}, {}> = {
 };
 // @ts-expect-error A Store must declare one read primitive.
 const neither: Store<SpecOf<typeof registry>, {}, {}> = methods;
-// @ts-expect-error Explicit true is not a supported participation override.
 void cache.get(
   { id: "count:a", params: {}, directives: {} },
+  // @ts-expect-error Explicit true is not a supported participation override.
   { autoBatch: true },
 );
-// @ts-expect-error Construction cannot disable capability-driven defaults.
 new Cache({
   name: "invalid",
   store: memory,
   resourceTypes: registry,
+  // @ts-expect-error Construction cannot disable capability-driven defaults.
   readBatching: false,
 });
 void [both, neither];
@@ -105,12 +105,13 @@ const wrappedFirst: IsEqual<(typeof wrapped)[0]["content"], { name: string }> =
 const wrappedSecond: IsEqual<(typeof wrapped)[1]["content"], number> = true;
 // @ts-expect-error A wrapper requires one producer capability.
 wrapProducer({ cache });
-// @ts-expect-error A wrapper cannot declare both producer capabilities.
-wrapProducer({
+const bothProducerCapabilities = {
   cache,
-  produce: async () => ({ content: 1 }),
+  produce: async () => ({ content: 1, directives: { freshUntilAge: 60 } }),
   produceMany: async () => [],
-});
+};
+// @ts-expect-error A wrapper cannot declare both producer capabilities.
+wrapProducer(bothProducerCapabilities);
 // @ts-expect-error Explicit true cannot enable producer accumulation.
 void client.get({ id: "count:a" }, { autoBatch: { producer: true } });
 void [wrappedFirst, wrappedSecond];
