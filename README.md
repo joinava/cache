@@ -262,7 +262,7 @@ Cache hits without pending writes and empty bulk calls receive a fulfilled promi
 
 ### Diagnostics
 
-The package publishes typed `read`, `read-batch`, `fetch`, `produce`, and `store-entry` channels from `node:diagnostics_channel`.
+The package publishes typed `read`, `read-store`, `fetch`, `produce`, and `store-entry` channels from `node:diagnostics_channel`.
 V4 removes `Cache.emitter` and its `store` event. Use `cacheStoreEntryChannel` for store diagnostics.
 Producer messages require `failedRequestCount`. A resolved bulk invocation can report `outcome: "success"` with failed result slots.
 Logical reads and fetches report request outcomes and public-call duration. Physical Store and producer events report actual dispatch duration, request counts, failures, and queue wait.
@@ -270,6 +270,8 @@ An operation failure is distinct from its affected logical slots. Bulk producer 
 Subscribers must use bounded cache names, resource types, operation kinds, and outcomes for metric tags. Resource IDs belong in traces or logs, not metric tags.
 
 ### Migrating from v3
+
+- Rename `@zingage/cache:read-batch` subscriptions to `@zingage/cache:read-store`. Use `CACHE_READ_STORE_CHANNEL_NAME`, `cacheReadStoreChannel`, and `CacheReadStoreMessage`; v4 provides no old-name aliases.
 
 - Replace `batchReads` with `readBatching`. Remove constructor participation flags.
 - Move the second `wrapProducer` argument into `produce`; move `wrapBulkProducer` producers into `produceMany` on `wrapProducer`.

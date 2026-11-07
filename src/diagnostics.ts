@@ -11,7 +11,7 @@ import type { StoreEntryRelationship } from "./types/06_Store.js";
  * - `@zingage/cache:read` -- what did a cache lookup find? Published by
  *   `Cache.get`/`Cache.getMany` (including direct callers that never touch a
  *   wrapper).
- * - `@zingage/cache:read-batch` -- one message per physical Store read.
+ * - `@zingage/cache:read-store` -- one message per physical Store read.
  * - `@zingage/cache:fetch` -- how was a logical wrapped-producer request
  *   answered? Published by the producer wrappers, once per call of the
  *   wrapped function (per request element, for bulk), at settlement.
@@ -22,7 +22,7 @@ import type { StoreEntryRelationship } from "./types/06_Store.js";
  *   `Cache.store()`.
  *
  * Logical messages carry the cache name and resource-type name. `produce`
- * carries resource types per element of `requests[]`. `read-batch` carries
+ * carries resource types per element of `requests[]`. `read-store` carries
  * only the cache name because a physical read can cover several types.
  *
  * ## `vary`: the variant key shared by `read`, `fetch`, and `store-entry`
@@ -472,7 +472,7 @@ export function publishCacheStoreEntry(message: CacheStoreEntryMessage): void {
  * Direct Store rejection after caller cancellation reports cancelled with no failed slots.
  * Cancellation after automatic dispatch preserves the eventual Store outcome.
  */
-export type CacheReadBatchMessage = {
+export type CacheReadStoreMessage = {
   cache: string;
   operation: "get" | "getMany";
   automatic: boolean;
@@ -483,7 +483,7 @@ export type CacheReadBatchMessage = {
   durationMs: number;
   queueWaitTotalMs: number;
 };
-export const CACHE_READ_BATCH_CHANNEL_NAME = "@zingage/cache:read-batch";
-export const cacheReadBatchChannel = typedChannel<CacheReadBatchMessage>()(
-  CACHE_READ_BATCH_CHANNEL_NAME,
+export const CACHE_READ_STORE_CHANNEL_NAME = "@zingage/cache:read-store";
+export const cacheReadStoreChannel = typedChannel<CacheReadStoreMessage>()(
+  CACHE_READ_STORE_CHANNEL_NAME,
 );

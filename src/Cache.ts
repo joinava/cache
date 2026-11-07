@@ -1,6 +1,6 @@
 import type { InvariantOf, ReadonlyDeep } from "type-fest";
 import {
-  cacheReadBatchChannel,
+  cacheReadStoreChannel,
   cacheStoreEntryChannel,
   publishCacheRead,
   publishCacheStoreEntry,
@@ -717,7 +717,7 @@ export default class Cache<
     options?: { signal?: AbortSignal },
     queueWaitTotalMs?: number,
   ) {
-    const observed = cacheReadBatchChannel.hasSubscribers;
+    const observed = cacheReadStoreChannel.hasSubscribers;
     return this.#track(() =>
       readStoreObserved(
         this.#dataStore,
@@ -725,7 +725,7 @@ export default class Cache<
         options,
         observed
           ? (event) => {
-              cacheReadBatchChannel.publish({
+              cacheReadStoreChannel.publish({
                 cache: this.name,
                 operation: event.operation,
                 automatic: queueWaitTotalMs !== undefined,

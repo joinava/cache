@@ -638,7 +638,7 @@ describe("v4 read participation", () => {
 
 describe("read dispatch diagnostics", () => {
   it("separates queue wait, physical dispatch duration, and logical wait", async (t) => {
-    const { cacheReadBatchChannel, cacheReadChannel } =
+    const { cacheReadStoreChannel, cacheReadChannel } =
       await import("./diagnostics.js");
     const clock = { now: 50 };
     t.mock.method(performance, "now", () => clock.now);
@@ -657,10 +657,10 @@ describe("read dispatch diagnostics", () => {
       resourceTypes: ACCEPT_ANY_REGISTRY,
       readBatching: { batchScheduleFn: (run) => scheduled.push(run) },
     });
-    const physical: import("./diagnostics.js").CacheReadBatchMessage[] = [];
+    const physical: import("./diagnostics.js").CacheReadStoreMessage[] = [];
     const logical: import("./diagnostics.js").CacheReadMessage[] = [];
     const onPhysical = (
-      message: import("./diagnostics.js").CacheReadBatchMessage,
+      message: import("./diagnostics.js").CacheReadStoreMessage,
     ) => {
       if (message.cache === cache.name) physical.push(message);
     };
@@ -669,10 +669,10 @@ describe("read dispatch diagnostics", () => {
     ) => {
       if (message.cache === cache.name) logical.push(message);
     };
-    cacheReadBatchChannel.subscribe(onPhysical);
+    cacheReadStoreChannel.subscribe(onPhysical);
     cacheReadChannel.subscribe(onLogical);
     t.after(async () => {
-      cacheReadBatchChannel.unsubscribe(onPhysical);
+      cacheReadStoreChannel.unsubscribe(onPhysical);
       cacheReadChannel.unsubscribe(onLogical);
       await cache.close();
     });
@@ -696,22 +696,22 @@ describe("read dispatch diagnostics", () => {
   });
 
   it("counts one whole-operation failure separately from its affected slots", async (t) => {
-    const { cacheReadBatchChannel } = await import("./diagnostics.js");
+    const { cacheReadStoreChannel } = await import("./diagnostics.js");
     const { store } = spiedStore({
       beforeGetMany: async () => {
         throw new Error("offline");
       },
     });
     const cache = batchedCacheOver(store);
-    const messages: import("./diagnostics.js").CacheReadBatchMessage[] = [];
+    const messages: import("./diagnostics.js").CacheReadStoreMessage[] = [];
     const onRead = (
-      message: import("./diagnostics.js").CacheReadBatchMessage,
+      message: import("./diagnostics.js").CacheReadStoreMessage,
     ) => {
       if (message.cache === cache.name) messages.push(message);
     };
-    cacheReadBatchChannel.subscribe(onRead);
+    cacheReadStoreChannel.subscribe(onRead);
     t.after(async () => {
-      cacheReadBatchChannel.unsubscribe(onRead);
+      cacheReadStoreChannel.unsubscribe(onRead);
       await cache.close();
     });
     const results = await cache.getMany([lookup("a"), lookup("b")], {
@@ -1162,7 +1162,7 @@ describe("Cache mutation drain", suiteOptions, () => {
 describe("Store read diagnostics compatibility", suiteOptions, () => {
   for (const bulk of [false, true]) {
     it(`reports cancellation for a rejected direct ${bulk ? "bulk" : "single"} read`, async (t) => {
-      const { cacheReadBatchChannel } = await import("./diagnostics.js");
+      const { cacheReadStoreChannel } = await import("./diagnostics.js");
       const store = bulk ? bulkMemoryStore<Spec>() : new MemoryStore<Spec>();
       const gate = Promise.withResolvers<void>();
       const started = Promise.withResolvers<void>();
@@ -1178,15 +1178,15 @@ describe("Store read diagnostics compatibility", suiteOptions, () => {
         name: `direct-cancel-${bulk}`,
         resourceTypes: ACCEPT_ANY_REGISTRY,
       });
-      const messages: import("./diagnostics.js").CacheReadBatchMessage[] = [];
+      const messages: import("./diagnostics.js").CacheReadStoreMessage[] = [];
       const observe = (
-        message: import("./diagnostics.js").CacheReadBatchMessage,
+        message: import("./diagnostics.js").CacheReadStoreMessage,
       ) => {
         if (message.cache === cache.name) messages.push(message);
       };
-      cacheReadBatchChannel.subscribe(observe);
+      cacheReadStoreChannel.subscribe(observe);
       t.after(async () => {
-        cacheReadBatchChannel.unsubscribe(observe);
+        cacheReadStoreChannel.unsubscribe(observe);
         await cache.close();
       });
       const controller = new AbortController();
@@ -1213,7 +1213,7 @@ describe("Store read diagnostics compatibility", suiteOptions, () => {
 
   for (const autoBatch of [undefined, false] as const) {
     it(`reports partial slots as failure for ${autoBatch === false ? "direct" : "automatic"} reads`, async (t) => {
-      const { cacheReadBatchChannel } = await import("./diagnostics.js");
+      const { cacheReadStoreChannel } = await import("./diagnostics.js");
       const store = bulkMemoryStore<Spec>();
       const cache = batchedCacheOver(store);
       await cache.store([
@@ -1230,15 +1230,15 @@ describe("Store read diagnostics compatibility", suiteOptions, () => {
           );
         },
       );
-      const messages: import("./diagnostics.js").CacheReadBatchMessage[] = [];
+      const messages: import("./diagnostics.js").CacheReadStoreMessage[] = [];
       const observe = (
-        message: import("./diagnostics.js").CacheReadBatchMessage,
+        message: import("./diagnostics.js").CacheReadStoreMessage,
       ) => {
         if (message.cache === cache.name) messages.push(message);
       };
-      cacheReadBatchChannel.subscribe(observe);
+      cacheReadStoreChannel.subscribe(observe);
       t.after(async () => {
-        cacheReadBatchChannel.unsubscribe(observe);
+        cacheReadStoreChannel.unsubscribe(observe);
         await cache.close();
       });
       const result = await cache.getMany(
@@ -1257,7 +1257,7 @@ describe("Store read diagnostics compatibility", suiteOptions, () => {
 
 for (const settlement of ["queued", "success", "failure"] as const) {
   it(`preserves automatic Store accounting after ${settlement} cancellation`, async (t) => {
-    const { cacheReadBatchChannel } = await import("./diagnostics.js");
+    const { cacheReadStoreChannel } = await import("./diagnostics.js");
     const scheduled = Promise.withResolvers<() => void>();
     const started = Promise.withResolvers<void>();
     const gate = Promise.withResolvers<void>();
@@ -1275,15 +1275,15 @@ for (const settlement of ["queued", "success", "failure"] as const) {
       resourceTypes: ACCEPT_ANY_REGISTRY,
       readBatching: { batchScheduleFn: scheduled.resolve },
     });
-    const messages: import("./diagnostics.js").CacheReadBatchMessage[] = [];
+    const messages: import("./diagnostics.js").CacheReadStoreMessage[] = [];
     const observe = (
-      message: import("./diagnostics.js").CacheReadBatchMessage,
+      message: import("./diagnostics.js").CacheReadStoreMessage,
     ) => {
       if (message.cache === cache.name) messages.push(message);
     };
-    cacheReadBatchChannel.subscribe(observe);
+    cacheReadStoreChannel.subscribe(observe);
     t.after(async () => {
-      cacheReadBatchChannel.unsubscribe(observe);
+      cacheReadStoreChannel.unsubscribe(observe);
       await cache.close();
     });
     const controller = new AbortController();
@@ -1312,3 +1312,38 @@ for (const settlement of ["queued", "success", "failure"] as const) {
     }
   });
 }
+
+it("publishes physical reads only on the v4 read-store channel", async () => {
+  const { channel } = await import("node:diagnostics_channel");
+  const current = channel("@zingage/cache:read-store");
+  const previous = channel("@zingage/cache:read-batch");
+  let currentEvents = 0;
+  let previousEvents = 0;
+  const onCurrent = () => {
+    currentEvents += 1;
+  };
+  const onPrevious = () => {
+    previousEvents += 1;
+  };
+  current.subscribe(onCurrent);
+  previous.subscribe(onPrevious);
+  try {
+    for (const store of [new MemoryStore<Spec>(), bulkMemoryStore<Spec>()]) {
+      const cache = new Cache({
+        store,
+        name: "read-store-wire",
+        resourceTypes: ACCEPT_ANY_REGISTRY,
+      });
+      try {
+        await cache.get(lookup("a"), { autoBatch: false });
+      } finally {
+        await cache.close();
+      }
+    }
+    assert.equal(currentEvents, 2);
+    assert.equal(previousEvents, 0);
+  } finally {
+    current.unsubscribe(onCurrent);
+    previous.unsubscribe(onPrevious);
+  }
+});
