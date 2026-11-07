@@ -80,8 +80,19 @@ export type StoreEntryResult = {
 export type Store<
   Spec extends CacheSpec,
   Validators extends AnyValidators,
-  in out Params extends AnyParams,
+  Params extends AnyParams,
+> = StoreOperations<Spec, Validators, Params> &
+  (
+    | SingleStoreReader<Spec, Validators, Params>
+    | BulkStoreReader<Spec, Validators, Params>
+  );
+
+export type SingleStoreReader<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
 > = {
+  getMany?: never;
   /**
    * This method returns stored cache entries -- regardless of whether they're
    * fresh -- that are associated with the provided `id` and for which the
@@ -122,11 +133,17 @@ export type Store<
    *   params normalized.
    */
   get<Id extends Spec["id"]>(
-    id: Id,
-    params: Readonly<NormalizedParams<Params>>,
+    request: StoreGetManyRequest<Spec, Params> & { readonly id: Id },
     options?: { signal?: AbortSignal },
   ): Promise<EntryForId<Spec, Validators, Params, Id>[]>;
+};
 
+export type BulkStoreReader<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = {
+  get?: never;
   /**
    * This method returns stored cache entries for multiple resources in a single
    * operation. It takes an array of requests, each containing an `id` and
@@ -136,8 +153,6 @@ export type Store<
    * operation cannot provide individual outcomes. Preserve request order and
    * return one slot per request, including duplicates.
    * Consumers choose whether to keep successful slots or reject their own call.
-   * MemoryStore, PostgresStore, and SqliteStore currently reject the whole
-   * operation on read failure; they do not return per-request errors.
    *
    * This method follows the same matching logic as the `get` method: entries
    * are returned if their `vary` value is a subset of the provided params.
@@ -155,7 +170,13 @@ export type Store<
     requests: Reqs,
     options?: { signal?: AbortSignal },
   ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>>;
+};
 
+export type StoreOperations<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = {
   /**
    * This method stores a list of cache entries. This method's return promise
    * should reject if storage fails, but specific errors are not currently
@@ -189,19 +210,15 @@ export type Store<
    * if the store has a db client/connection passed in, it's up to the caller to
    * manage that.
    *
-   * Shutdown does not imply a uniform drain guarantee. MemoryStore only stops
-   * periodic cleanup. PostgresStore leaves the supplied pool open. SqliteStore
-   * drains accepted worker tasks unless shutdown fails or times out. Await
-   * operation promises when their completion or errors matter.
+   * Cleanup releases owned resources to completion, without a deadline.
+   * Await operation promises when their results or errors matter.
    */
   [Symbol.asyncDispose](): Promise<void>;
 
   /**
-   * Same as Symbol.asyncDispose, but with a timeout. If you implement both this
-   * and Symbol.asyncDispose, Symbol.asyncDispose should simply call close with
-   * a default timeout.
+   * Release owned resources to completion, without a deadline.
    */
-  close?(timeout?: number): Promise<void>;
+  close(): Promise<void>;
 };
 
 /**

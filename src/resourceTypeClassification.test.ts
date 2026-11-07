@@ -1,3 +1,4 @@
+import { throwIfAnyError } from "./utils/utils.js";
 import { expect } from "chai";
 import fc from "fast-check";
 import assert from "node:assert/strict";
@@ -271,7 +272,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
         TWO_TYPE_REGISTRY,
         async ({ name, store, cache, capture }) => {
           const getSpy = mock.method(store, "get");
-          const getManySpy = mock.method(store, "getMany");
+          const getManySpy = getSpy;
           const thrown = await expectRejection(() =>
             cache.get({
               // Loosely-typed id: the compiler bans typed unclassifiable ids,
@@ -311,16 +312,18 @@ describe("resource-type classification (§6.1, §6.2)", () => {
         TWO_TYPE_REGISTRY,
         async ({ name, store, cache, capture }) => {
           const getSpy = mock.method(store, "get");
-          const getManySpy = mock.method(store, "getMany");
+          const getManySpy = getSpy;
           const thrown = await expectRejection(() =>
-            cache.getMany([
-              { id: "site:good", params: {}, directives: {} },
-              {
-                id: "nope" as string as `site:${string}`,
-                params: {},
-                directives: {},
-              },
-            ]),
+            cache
+              .getMany([
+                { id: "site:good", params: {}, directives: {} },
+                {
+                  id: "nope" as string as `site:${string}`,
+                  params: {},
+                  directives: {},
+                },
+              ])
+              .then(throwIfAnyError),
           );
           assertUnclassifiable(thrown, { cacheName: name, id: "nope" });
           expect(getManySpy.mock.callCount()).to.equal(0);
@@ -363,12 +366,14 @@ describe("resource-type classification (§6.1, §6.2)", () => {
             content: `content-${req.id}`,
             directives: freshFor100,
           }));
-          const getSite = wrapProducer(
-            { cache },
-            producerByIdType(cache.resourceTypes, { site_day: producer }),
-          );
+          const getSite = wrapProducer({
+            cache,
+            produce: producerByIdType(cache.resourceTypes, {
+              site_day: producer,
+            }),
+          });
           const thrown = await expectRejection(() =>
-            getSite({ id: "unknown:1" as string as `site:${string}` }),
+            getSite.get({ id: "unknown:1" as string as `site:${string}` }),
           );
           assertUnclassifiable(thrown, { cacheName: name, id: "unknown:1" });
           expect(producer.mock.callCount()).to.equal(0);
@@ -497,14 +502,16 @@ describe("resource-type classification (§6.1, §6.2)", () => {
               },
             ],
           }));
-          const getSite = wrapProducer(
-            { cache },
-            producerByIdType(cache.resourceTypes, { site_day: producer }),
-          );
+          const getSite = wrapProducer({
+            cache,
+            produce: producerByIdType(cache.resourceTypes, {
+              site_day: producer,
+            }),
+          });
           // The producer result still reaches the caller; whether the wrapped
           // call itself surfaces the (asynchronous) store failure is not
           // specified by the doc, so accept either settlement.
-          await getSite({ id: "site:2026-07-28" }).catch(() => undefined);
+          await getSite.get({ id: "site:2026-07-28" }).catch(() => undefined);
           expect(producer.mock.callCount()).to.equal(1);
 
           // Give the (possibly fire-and-forget) store attempt time to run,
@@ -624,10 +631,12 @@ describe("resource-type classification (§6.1, §6.2)", () => {
               directives: freshFor100,
             },
           ]);
-          const [protoRes, toStringRes] = await cache.getMany([
-            { id: "__proto__", params: {}, directives: {} },
-            { id: "toString", params: {}, directives: {} },
-          ]);
+          const [protoRes, toStringRes] = await cache
+            .getMany([
+              { id: "__proto__", params: {}, directives: {} },
+              { id: "toString", params: {}, directives: {} },
+            ])
+            .then(throwIfAnyError);
           expect(protoRes.usable?.content).to.equal("proto-content");
           expect(toStringRes.usable?.content).to.equal("tostring-content");
         },
@@ -678,12 +687,15 @@ describe("singleTypeCacheOptions", () => {
       singleTypeCacheOptions<string>()({ store: new MemoryStore(), name }),
     );
     try {
-      const fetch = wrapProducer({ cache }, async (req) => ({
-        content: `v-${req.id}`,
-        directives: freshFor10,
-      }));
+      const fetch = wrapProducer({
+        cache,
+        produce: async (req) => ({
+          content: `v-${req.id}`,
+          directives: freshFor10,
+        }),
+      });
 
-      expect((await fetch({ id: "anything at all" })).content).to.equal(
+      expect((await fetch.get({ id: "anything at all" })).content).to.equal(
         "v-anything at all",
       );
 
@@ -710,11 +722,14 @@ describe("singleTypeCacheOptions", () => {
       }),
     );
     try {
-      const fetch = wrapProducer({ cache }, async (req) => ({
-        content: `v-${req.id}`,
-        directives: freshFor10,
-      }));
-      await fetch({ id: "whatever" });
+      const fetch = wrapProducer({
+        cache,
+        produce: async (req) => ({
+          content: `v-${req.id}`,
+          directives: freshFor10,
+        }),
+      });
+      await fetch.get({ id: "whatever" });
 
       expect(cache.name).to.equal(name);
       expect(cache.classify("whatever")).to.equal("visits");
@@ -760,7 +775,9 @@ describe("singleTypeCacheOptions", () => {
     // "act-empty" (rather than the default "throw") survived the spread.
     expect(
       await cache.get({ id: "anything", params: {}, directives: {} }),
-    ).to.deep.equal({ validatable: [] });
+    ).to.deep.equal({
+      validatable: [],
+    });
   });
 });
 
@@ -776,18 +793,34 @@ describe("a one-entry registry with a real guard rejects nonconforming ids", () 
 
   it("throws UnclassifiableIdError before the store is touched, while the sugar's accept-everything form does not", async () => {
     const store = new MemoryStore();
-    const getSpy = mock.method(store, "getMany");
+    const getSpy = mock.method(store, "get");
     const name = uniqueCacheName("sole-guarded");
     const capture = captureChannels(name);
     const cache = new Cache({ store, name, resourceTypes: guardedRegistry });
     try {
-      const fetch = wrapProducer({ cache }, async (req) => ({
-        content: `v-${req.id}`,
-        directives: freshFor100,
-      }));
+      const fetch = wrapProducer({
+        cache,
+        produce: async (req) => ({
+          content: `v-${req.id}`,
+          directives: freshFor100,
+        }),
+      });
 
       // The conforming id works end to end...
-      expect((await fetch({ id: "ticket:1" })).content).to.equal("v-ticket:1");
+      let stored = Promise.resolve();
+      expect(
+        (
+          await fetch.get(
+            { id: "ticket:1" },
+            {
+              onStore: (promise) => {
+                stored = promise;
+              },
+            },
+          )
+        ).content,
+      ).to.equal("v-ticket:1");
+      await stored;
       const readsAfterGoodId = getSpy.mock.callCount();
       expect(readsAfterGoodId).to.be.greaterThan(0);
       const messagesAfterGoodId = capture.all.length;
@@ -796,7 +829,7 @@ describe("a one-entry registry with a real guard rejects nonconforming ids", () 
       // this far at all; the compiler rejects it at the call site.
       assertUnclassifiable(
         await expectRejection(
-          fetch({ id: "not-a-ticket" as `ticket:${string}` }),
+          fetch.get({ id: "not-a-ticket" as `ticket:${string}` }),
         ),
         { cacheName: name, id: "not-a-ticket" },
       );

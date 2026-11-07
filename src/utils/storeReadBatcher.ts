@@ -4,7 +4,7 @@ import type { CacheSpec } from "../types/00_CacheSpec.js";
 import type { AnyParams } from "../types/01_Params.js";
 import type { AnyValidators } from "../types/02_Validators.js";
 import type { EntryForId } from "../types/06_Normalization.js";
-import type { Store, StoreGetManyRequest } from "../types/06_Store.js";
+import type { StoreGetManyRequest } from "../types/06_Store.js";
 import { raceWithSignal } from "./utils.js";
 
 /** DataLoader options exposed by Cache; result caching is always disabled. */
@@ -23,27 +23,30 @@ export class StoreReadBatcher<
     {
       request: StoreGetManyRequest<Spec, Params>;
       signal: AbortSignal | undefined;
+      enqueuedAt: number;
     },
     EntryForId<Spec, Validators, Params, Spec["id"]>[]
   >;
   readonly #scheduled = new Set<() => void>();
 
   constructor(
-    store: Store<Spec, Validators, Params>,
+    dispatch: (
+      requests: readonly StoreGetManyRequest<Spec, Params>[],
+      queueWaitTotalMs: number,
+    ) => Promise<
+      (EntryForId<Spec, Validators, Params, Spec["id"]>[] | Error)[]
+    >,
     options: ReadBatchOptions,
   ) {
     this.#loader = new DataLoader(
       async (reads) => {
         const live = reads.filter(({ signal }) => !signal?.aborted);
         if (live.length === 0) return reads.map(() => []);
-        // Let a rejection propagate: DataLoader rejects every load in this
-        // batch, and Cache.get reports each non-aborted read failure.
-        const results = await store.getMany(live.map(({ request }) => request));
-        if (results.length !== live.length) {
-          throw new Error(
-            `store.getMany() returned ${results.length} results for ${live.length} requests; it must return one result per request`,
-          );
-        }
+        const startedAt = performance.now();
+        const results = await dispatch(
+          live.map(({ request }) => request),
+          live.reduce((sum, read) => sum + startedAt - read.enqueuedAt, 0),
+        );
         // Results cover only live reads; DataLoader needs one slot for every
         // original load, including reads aborted before dispatch.
         const entriesByRead = new Map(
@@ -53,7 +56,7 @@ export class StoreReadBatcher<
       },
       {
         cache: false,
-        maxBatchSize: options.maxBatchSize ?? 50,
+        maxBatchSize: options.maxBatchSize ?? 20,
         batchScheduleFn: (callback) => {
           // Bind the first reader's context even when close() forces dispatch
           // from a different context. The guard makes a later scheduled callback
@@ -75,7 +78,10 @@ export class StoreReadBatcher<
     signal: AbortSignal | undefined,
   ) {
     signal?.throwIfAborted();
-    return raceWithSignal(this.#loader.load({ request, signal }), signal);
+    return raceWithSignal(
+      this.#loader.load({ request, signal, enqueuedAt: performance.now() }),
+      signal,
+    );
   }
 
   /** Start accepted reads before closing the store, without awaiting them. */

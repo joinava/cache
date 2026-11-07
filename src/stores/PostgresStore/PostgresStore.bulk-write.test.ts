@@ -1,3 +1,4 @@
+import { getOne } from "../../utils/utils.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe, it, mock } from "node:test";
@@ -49,7 +50,10 @@ async function fixture() {
     schemaName: schema,
     tableName: "entries",
   });
-  await store.get("initialize", {} as NormalizedParams<Params>);
+  await getOne(store, {
+    id: "initialize",
+    params: {} as NormalizedParams<Params>,
+  });
   return {
     store,
     pool,
@@ -157,10 +161,10 @@ describe(
             `select count(*)::int as count from ${f.qualified}`,
           );
           assert.equal(rows.rows[0]!.count, 23_000);
-          const winner = await f.store.get(
-            "id:01000",
-            {} as NormalizedParams<Params>,
-          );
+          const winner = await getOne(f.store, {
+            id: "id:01000",
+            params: {} as NormalizedParams<Params>,
+          });
           assert.equal(winner[0]!.content.value, 2);
           const repeated = await f.store.store(entries.toReversed());
           assert.equal(
@@ -185,18 +189,31 @@ describe(
           ...value,
           entry: {
             ...value.entry,
-            vary: normalizeVary<Params>((name) => name, (_name, item) => { assert.ok(typeof item === "number"); return item; }, { variant: index }),
+            vary: normalizeVary<Params>(
+              (name) => name,
+              (_name, item) => {
+                assert.ok(typeof item === "number");
+                return item;
+              },
+              { variant: index },
+            ),
           },
         };
       });
       try {
         await f.store.store(entries);
-        const results = await f.store.store(entries.map((value) => ({
-          ...value,
-          entry: { ...value.entry, validators: { etag: "2" } },
-        })));
+        const results = await f.store.store(
+          entries.map((value) => ({
+            ...value,
+            entry: { ...value.entry, validators: { etag: "2" } },
+          })),
+        );
         assert.equal(results.length, entries.length);
-        assert.ok(results.every((result) => result.relationshipToExistingStoredData === "changed"));
+        assert.ok(
+          results.every(
+            (result) => result.relationshipToExistingStoredData === "changed",
+          ),
+        );
       } finally {
         await f.cleanup();
       }
@@ -282,10 +299,10 @@ describe(
         assert.deepEqual(results[0], {
           relationshipToExistingStoredData: "changed",
         });
-        const stored = await f.store.get(
-          lateId,
-          {} as NormalizedParams<Params>,
-        );
+        const stored = await getOne(f.store, {
+          id: lateId,
+          params: {} as NormalizedParams<Params>,
+        });
         assert.equal(stored[0]!.content.value, 1);
       } finally {
         observed.restore();
@@ -320,7 +337,8 @@ describe(
         const state = { firstWrites: 0 };
         const observed = observeQueries((statement) => {
           if (
-            (/^with "old"/i.test(statement.sql) || /^insert into /i.test(statement.sql)) &&
+            (/^with "old"/i.test(statement.sql) ||
+              /^insert into /i.test(statement.sql)) &&
             statement.sql.includes(f.qualified) &&
             state.firstWrites < 2
           ) {
@@ -339,13 +357,19 @@ describe(
             (statement) =>
               /^with "old"/i.test(statement.sql) &&
               statement.parameters.length > 0 &&
-              JSON.parse(String(statement.parameters[statement.parameters.length * 2 / 5 + 2])).content.value === 2,
+              JSON.parse(
+                String(
+                  statement.parameters[
+                    (statement.parameters.length * 2) / 5 + 2
+                  ],
+                ),
+              ).content.value === 2,
           );
           assert.deepEqual(
             newWrites.flatMap((statement) =>
-              statement.parameters.slice(statement.parameters.length * 2 / 5).filter(
-                (_parameter, index) => index % 3 === 0,
-              ),
+              statement.parameters
+                .slice((statement.parameters.length * 2) / 5)
+                .filter((_parameter, index) => index % 3 === 0),
             ),
             sortedKeys,
           );

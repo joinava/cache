@@ -1,3 +1,5 @@
+import MemoryStore from "../src/stores/MemoryStore/MemoryStore.js";
+import { naiveGetMany } from "../src/utils/utils.js";
 import pg from "pg";
 import { mock } from "node:test";
 
@@ -209,6 +211,8 @@ export function postgresStoreFixture() {
       postgres,
       postgresStore,
       queryMock,
+      schemaName,
+      tableName,
       async cleanup() {
         // eslint-disable-next-line no-console
         console.log("Cleaning up postgres store");
@@ -222,4 +226,27 @@ export function postgresStoreFixture() {
     console.error(error);
     throw error;
   }
+}
+
+/** A bulk-only test Store backed by real MemoryStore reads and writes. */
+export function bulkMemoryStore<
+  Spec extends import("../src/types/index.js").CacheSpec =
+    import("../src/types/index.js").CacheSpec,
+>() {
+  const memory = new MemoryStore<Spec>();
+  return {
+    async getMany<
+      const Reqs extends
+        readonly import("../src/types/index.js").StoreGetManyRequest<
+          Spec,
+          AnyParams
+        >[],
+    >(requests: Reqs, options?: { signal?: AbortSignal }) {
+      return await naiveGetMany(memory, requests, 10, options);
+    },
+    store: memory.store.bind(memory),
+    delete: memory.delete.bind(memory),
+    close: memory.close.bind(memory),
+    [Symbol.asyncDispose]: memory[Symbol.asyncDispose].bind(memory),
+  };
 }

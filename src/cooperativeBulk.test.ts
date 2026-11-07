@@ -1,13 +1,10 @@
+import { getOne } from "./utils/utils.js";
 import { normalizeParams } from "./utils/normalization.js";
 import assert from "node:assert/strict";
 import { it, mock } from "node:test";
 import Cache from "./Cache.js";
-import {
-  MemoryStore,
-  resourceType,
-  type SpecOf,
-} from "./index.js";
-import { wrapBulkProducer } from "./utils/wrapBulkProducer.js";
+import { MemoryStore, resourceType, type SpecOf } from "./index.js";
+import wrapProducer from "./utils/wrapProducer.js";
 
 const batchSize = 10_000;
 function makeCache() {
@@ -36,14 +33,19 @@ it("preserves the full producer cohort and result order for a 10k cold batch", a
       directives: { freshUntilAge: 60 },
     })),
   );
-  const wrapped = wrapBulkProducer(
-    { cache, collapseOverlappingRequestsTime: 0 },
-    producer,
-  );
+  const wrapped = wrapProducer({
+    cache,
+    collapseOverlappingRequestsTime: 0,
+    produceMany: producer,
+  });
   try {
-    const result = await wrapped(requests);
-    assert.equal(producer.mock.callCount(), 1);
-    assert.equal(producer.mock.calls[0]!.arguments[0].length, batchSize);
+    const result = await wrapped.getMany(requests);
+    assert.equal(producer.mock.callCount(), batchSize / 20);
+    assert.ok(
+      producer.mock.calls.every(
+        ({ arguments: [requests] }) => requests.length === 20,
+      ),
+    );
     assert.deepEqual(
       result.map((entry) => (entry instanceof Error ? entry : entry.content)),
       requests.map((_, i) => i),
@@ -58,7 +60,7 @@ it("preserves ordered cache hits for a 10k warm batch", async () => {
   const producer = mock.fn(async () => {
     throw new Error("warm batch must not produce");
   });
-  const wrapped = wrapBulkProducer({ cache }, producer);
+  const wrapped = wrapProducer({ cache, produceMany: producer });
   try {
     await cache.store(
       requests.map((req, i) => ({
@@ -67,7 +69,7 @@ it("preserves ordered cache hits for a 10k warm batch", async () => {
         directives: { freshUntilAge: 60 },
       })),
     );
-    const result = await wrapped(requests);
+    const result = await wrapped.getMany(requests);
     assert.equal(producer.mock.callCount(), 0);
     assert.deepEqual(
       result.map((entry) => (entry instanceof Error ? entry : entry.content)),
@@ -80,12 +82,12 @@ it("preserves ordered cache hits for a 10k warm batch", async () => {
 
 it("classifies an invalid final ID before any cache or producer side effect", async () => {
   const { cache, store } = makeCache();
-  const read = mock.method(store, "getMany");
+  const read = mock.method(store, "get");
   const write = mock.method(store, "store");
   const producer = mock.fn(async () => []);
-  const wrapped = wrapBulkProducer({ cache }, producer);
+  const wrapped = wrapProducer({ cache, produceMany: producer });
   try {
-    await assert.rejects(wrapped([...requests, { id: "invalid" }]));
+    await assert.rejects(wrapped.getMany([...requests, { id: "invalid" }]));
     assert.equal(read.mock.callCount(), 0);
     assert.equal(write.mock.callCount(), 0);
     assert.equal(producer.mock.callCount(), 0);
@@ -107,9 +109,12 @@ it("an abort during a pending cache read prevents producer execution", async () 
     return [];
   });
   const producer = mock.fn(async () => []);
-  const wrapped = wrapBulkProducer({ cache }, producer);
+  const wrapped = wrapProducer({ cache, produceMany: producer });
   try {
-    const pending = wrapped(requests, { signal: controller.signal });
+    const pending = wrapped.getMany(requests, {
+      signal: controller.signal,
+      autoBatch: { store: false },
+    });
     const rejected = assert.rejects(pending, (error) => error === reason);
     await started.promise;
     controller.abort(reason);
@@ -122,7 +127,6 @@ it("an abort during a pending cache read prevents producer execution", async () 
     await cache.close();
   }
 });
-
 
 it("an invalid final bulk store ID prevents writes and events", async () => {
   const { cache, store } = makeCache();
@@ -153,13 +157,13 @@ it("a pre-aborted mixed batch publishes every aborted fetch before any read star
     fetches.push(message);
   };
   cacheFetchChannel.subscribe(onFetch);
-  const read = mock.method(store, "getMany");
+  const read = mock.method(store, "get");
   const producer = mock.fn(async () => []);
-  const wrapped = wrapBulkProducer({ cache }, producer);
+  const wrapped = wrapProducer({ cache, produceMany: producer });
   const reason = new Error("already aborted");
   try {
     await assert.rejects(
-      wrapped(
+      wrapped.getMany(
         [
           { id: "resource:bypass", directives: { maxAge: 0 } },
           { id: "resource:read" },
@@ -191,26 +195,60 @@ async function pauseNextMemoryWrite() {
   const { TimeSliceBudget } = await import("./utils/time-slicing.js");
   const paused = Promise.withResolvers<void>();
   const resume = Promise.withResolvers<void>();
-  const yieldPoint = mock.method(TimeSliceBudget.prototype, "yieldIfNeeded", () => {
-    yieldPoint.mock.restore();
-    paused.resolve();
-    return resume.promise;
-  });
-  return { paused: paused.promise, resume: resume.resolve, restore: () => yieldPoint.mock.restore() };
+  const yieldPoint = mock.method(
+    TimeSliceBudget.prototype,
+    "yieldIfNeeded",
+    () => {
+      yieldPoint.mock.restore();
+      paused.resolve();
+      return resume.promise;
+    },
+  );
+  return {
+    paused: paused.promise,
+    resume: resume.resolve,
+    restore: () => yieldPoint.mock.restore(),
+  };
 }
 
 it("a delete during a yielded MemoryStore write does not cancel the pending write", async () => {
   const { cache, store } = makeCache();
-  await cache.store([{ id: "resource:overlap", content: 1, directives: { freshUntilAge: 60 } }]);
+  await cache.store([
+    { id: "resource:overlap", content: 1, directives: { freshUntilAge: 60 } },
+  ]);
   const gate = await pauseNextMemoryWrite();
-  const pending = cache.store([{ id: "resource:overlap", content: 2, directives: { freshUntilAge: 60 } }]);
+  const pending = cache.store([
+    { id: "resource:overlap", content: 2, directives: { freshUntilAge: 60 } },
+  ]);
   try {
     await gate.paused;
     await cache.delete("resource:overlap");
-    assert.deepEqual(await store.get("resource:overlap", normalizeParams((name) => name, (_name, value) => value, {})), []);
+    assert.deepEqual(
+      await getOne(store, {
+        id: "resource:overlap",
+        params: normalizeParams<import("./types/index.js").AnyParams>(
+          (name) => name,
+          (_name, value) => value,
+          {},
+        ),
+      }),
+      [],
+    );
     gate.resume();
     await pending;
-    assert.equal((await store.get("resource:overlap", normalizeParams((name) => name, (_name, value) => value, {})))[0]?.content, 2);
+    assert.equal(
+      (
+        await getOne(store, {
+          id: "resource:overlap",
+          params: normalizeParams<import("./types/index.js").AnyParams>(
+            (name) => name,
+            (_name, value) => value,
+            {},
+          ),
+        })
+      )[0]?.content,
+      2,
+    );
   } finally {
     gate.resume();
     gate.restore();
@@ -222,14 +260,38 @@ it("a delete during a yielded MemoryStore write does not cancel the pending writ
 it("awaiting a yielded MemoryStore write before deleting keeps the slot absent", async () => {
   const { cache, store } = makeCache();
   const gate = await pauseNextMemoryWrite();
-  const pending = cache.store([{ id: "resource:dependent", content: 2, directives: { freshUntilAge: 60 } }]);
+  const pending = cache.store([
+    { id: "resource:dependent", content: 2, directives: { freshUntilAge: 60 } },
+  ]);
   try {
     await gate.paused;
     gate.resume();
     await pending;
-    assert.equal((await store.get("resource:dependent", normalizeParams((name) => name, (_name, value) => value, {})))[0]?.content, 2);
+    assert.equal(
+      (
+        await getOne(store, {
+          id: "resource:dependent",
+          params: normalizeParams<import("./types/index.js").AnyParams>(
+            (name) => name,
+            (_name, value) => value,
+            {},
+          ),
+        })
+      )[0]?.content,
+      2,
+    );
     await cache.delete("resource:dependent");
-    assert.deepEqual(await store.get("resource:dependent", normalizeParams((name) => name, (_name, value) => value, {})), []);
+    assert.deepEqual(
+      await getOne(store, {
+        id: "resource:dependent",
+        params: normalizeParams<import("./types/index.js").AnyParams>(
+          (name) => name,
+          (_name, value) => value,
+          {},
+        ),
+      }),
+      [],
+    );
   } finally {
     gate.resume();
     gate.restore();

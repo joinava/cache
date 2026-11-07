@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { asError, CacheContractError } from "./utils.js";
 import type { Logger } from "../types/index.js";
 import { defaultLoggersByComponent } from "../utils/utils.js";
 
@@ -86,7 +88,10 @@ export default function collapsedTaskCreator<
 
     logTrace(
       "reusing result from prior, still-in-progress run of task for args/taskKey",
-      { args, taskKey },
+      {
+        args,
+        taskKey,
+      },
     );
     return res[0];
   };
@@ -111,98 +116,210 @@ export type CollapsedInvocation = {
   readonly attachedCallerCount: () => number;
 };
 
+/** A shared request remains joinable only while its production is pending. */
+export type PendingProduction<Request> = {
+  readonly request: Request;
+  readonly trigger: CollapsedInvocation["trigger"];
+  readonly attachedCallerCount: () => number;
+  readonly attachedCallers: () => ReadonlySet<object>;
+  readonly queueWaitMs: number;
+  readonly automatic: boolean;
+};
+
 /**
- * The producer wrappers' internal variant of {@link collapsedTaskCreator}:
- * identical collapse semantics (same args + pending + within
- * `collapseTasksMs` of the task's start ⇒ reuse), but purpose-built for
- * producer-invocation telemetry:
- *
- * - each call is labeled with the trigger that motivated it; the label of
- *   the call that actually CREATES an invocation is fixed as that
- *   invocation's trigger (riders never re-label it);
- * - the task function receives a {@link CollapsedInvocation} handle so it can
- *   publish invocation-scoped diagnostics (trigger, attached-caller count);
- * - each call's return says whether it `rode` an already-in-flight
- *   invocation (true) or initiated one (false). Settlements that DEPEND on
- *   the invocation (served-from-producer / producer-error /
- *   served-stale-after-error / aborted-while-waiting) report this as the
- *   fetch channel's `collapsed` flag; cache-served settlements (fresh or
- *   stale-while-revalidating) report `collapsed: false` even when they
- *   attached a background revalidation as a rider, since their settlement
- *   never depended on it (see CacheFetchMessage.collapsed).
- *
- * Not exported from the package: the public `collapsedTaskCreator` remains
- * the general-purpose utility.
- * @internal
+ * Schedules independent producer requests and shares compatible pending work.
+ * Cancellation removes queued participation. Dispatched work always completes.
  */
-export function collapsedInvocationTaskCreator<Args extends unknown[], Result>(
-  taskCreator: (
-    invocation: CollapsedInvocation,
-    ...args: Args
-  ) => Promise<Result>,
-  collapseTasksMs: number,
-  makeKey: (args: Args) => string,
-  logger: Logger = defaultLoggersByComponent["collapsed-task-creator"],
-): (
-  trigger: CollapsedInvocation["trigger"],
-  ...args: Args
-) => { promise: Promise<Result>; rode: boolean } {
-  type PendingInvocation = {
-    promise: Promise<Result>;
-    taskStartTimestamp: number;
-    /**
-     * Its own cell so the task function can read a LIVE count: the
-     * `CollapsedInvocation` handle has to exist before `taskCreator` runs, but
-     * riders increment the count afterwards.
-     */
-    callers: { count: number };
+export function createProducerScheduler<Request, Result>(options: {
+  bulk: boolean;
+  maxBatchSize?: number;
+  batchScheduleFn?: (dispatch: () => void) => void;
+  collapseTasksMs: number;
+  key: (request: Request) => string | undefined;
+  retain?: (request: Request) => () => void;
+  dispatch: (
+    requests: readonly PendingProduction<Request>[],
+  ) => Promise<readonly (Result | Error)[]>;
+}) {
+  type Task = {
+    request: Request;
+    key: string | symbol;
+    trigger: CollapsedInvocation["trigger"];
+    createdAt: number;
+    enqueuedAt: number;
+    accumulated: boolean;
+    callers: Set<object>;
+    participants: number;
+    background: boolean;
+    state: "queued" | "running" | "settled";
+    result: ReturnType<typeof Promise.withResolvers<Result>>;
+    release: (() => void) | undefined;
   };
-  const pendingTasks = new Map<string, PendingInvocation>();
-  const logTrace = logger.bind(null, "collapsed-task-creator", "trace");
-
-  return (trigger, ...args) => {
-    const taskKey = makeKey(args);
-    const existing = pendingTasks.get(taskKey);
-    const now = Date.now();
-
-    if (existing && now - existing.taskStartTimestamp <= collapseTasksMs) {
-      logTrace(
-        "reusing result from prior, still-in-progress run of task for args/taskKey",
-        { args, taskKey },
-      );
-      existing.callers.count += 1;
-      return { promise: existing.promise, rode: true };
-    }
-
-    logTrace(
-      existing
-        ? "started new task; there _was_ an in-progress one, but it's too old"
-        : "started new task b/c there was no in-progress task for these args",
-      args,
+  const pending = new Map<string | symbol, Task>();
+  const queued = new Set<Task>();
+  const running = new Set<Promise<unknown>>();
+  const maxBatchSize = options.maxBatchSize ?? 20;
+  if (
+    maxBatchSize !== Infinity &&
+    (!Number.isInteger(maxBatchSize) || maxBatchSize < 1)
+  ) {
+    throw new TypeError(
+      "producerBatching.maxBatchSize must be a positive integer",
     );
+  }
+  let scheduled = false;
+  let draining = false;
 
-    // The caller count lives in its own cell so the handle below can be built
-    // (and read live) before the pending record exists.
-    const callers = { count: 1 };
-    const invocation: CollapsedInvocation = {
-      trigger,
-      attachedCallerCount: () => callers.count,
-    };
-
-    const promise = taskCreator(invocation, ...args).finally(() => {
-      // Only remove this task from pendingTasks if pendingTasks[taskKey]
-      // is still the same task. (It could be a new one if the old one was
-      // overwritten for taking longer than collapseTasksMs.) Identified by its
-      // promise, since that is unique per invocation.
-      if (pendingTasks.get(taskKey)?.promise === promise) {
-        logTrace("completed = new state for taskKey/args", { args, taskKey });
-        pendingTasks.delete(taskKey);
-      }
+  const forget = (task: Task) => {
+    task.release?.();
+    task.release = undefined;
+    task.state = "settled";
+    queued.delete(task);
+    if (pending.get(task.key) === task) pending.delete(task.key);
+  };
+  const dispatch = (selected: readonly Task[], automatic: boolean) => {
+    const tasks = selected.filter((task) => task.state === "queued");
+    for (
+      let offset = 0;
+      offset < tasks.length;
+      offset += options.bulk ? maxBatchSize : 1
+    ) {
+      const batch = tasks.slice(
+        offset,
+        offset + (options.bulk ? maxBatchSize : 1),
+      );
+      const now = performance.now();
+      batch.forEach((task) => {
+        task.state = "running";
+        queued.delete(task);
+      });
+      const operation = Promise.try(() =>
+        options.dispatch(
+          batch.map((task) => ({
+            request: task.request,
+            trigger: task.trigger,
+            attachedCallerCount: () => task.callers.size,
+            attachedCallers: () => task.callers,
+            queueWaitMs: task.accumulated ? now - task.enqueuedAt : 0,
+            automatic,
+          })),
+        ),
+      )
+        .then((results) => {
+          if (results.length !== batch.length)
+            throw new CacheContractError(
+              "Producer result count must match request count",
+            );
+          batch.forEach((task, index) => {
+            forget(task);
+            const result = results[index]!;
+            if (result instanceof Error) task.result.reject(result);
+            else task.result.resolve(result);
+          });
+        })
+        .catch((error: unknown) => {
+          const failure = asError(error);
+          batch.forEach((task) => {
+            forget(task);
+            task.result.reject(failure);
+          });
+        });
+      running.add(operation);
+      void operation.finally(() => running.delete(operation));
+    }
+  };
+  const schedule = () => {
+    if (scheduled || queued.size === 0) return;
+    scheduled = true;
+    const callback = AsyncLocalStorage.bind(() => {
+      scheduled = false;
+      dispatch([...queued], true);
     });
+    if (options.batchScheduleFn) options.batchScheduleFn(callback);
+    else void Promise.resolve().then(() => process.nextTick(callback));
+  };
 
-    // Save the new task as a pending task. This will be _replacing_
-    // an existing pending task for this key if the other was too old.
-    pendingTasks.set(taskKey, { promise, taskStartTimestamp: now, callers });
-    return { promise, rode: false };
+  return {
+    attach(
+      requests: readonly {
+        request: Request;
+        trigger: CollapsedInvocation["trigger"];
+        background?: boolean;
+        signal?: AbortSignal;
+        caller: object;
+      }[],
+      automatic: boolean,
+    ) {
+      const attached = requests.map(
+        ({ request, trigger, background = false, signal, caller }) => {
+          signal?.throwIfAborted();
+          const key = options.key(request) ?? Symbol();
+          signal?.throwIfAborted();
+          const existing = pending.get(key);
+          const now = Date.now();
+          const rode =
+            existing !== undefined &&
+            now - existing.createdAt <= options.collapseTasksMs;
+          const task: Task = rode
+            ? existing
+            : {
+                request,
+                key,
+                trigger,
+                createdAt: now,
+                enqueuedAt: performance.now(),
+                accumulated: options.bulk && automatic,
+                callers: new Set<object>(),
+                participants: 0,
+                background: false,
+                state: "queued",
+                result: Promise.withResolvers<Result>(),
+                release: options.retain?.(request),
+              };
+          if (!rode) {
+            pending.set(key, task);
+            queued.add(task);
+            // Cancellation can remove the last participant before anyone awaits.
+            void task.result.promise.catch(() => {});
+          }
+          task.callers.add(caller);
+          task.participants += 1;
+          task.background ||= background;
+          const abort = () => {
+            task.participants -= 1;
+            if (
+              task.state === "queued" &&
+              task.participants === 0 &&
+              !task.background
+            ) {
+              forget(task);
+              task.result.reject(signal?.reason);
+            }
+          };
+          if (!background && signal) {
+            signal.addEventListener("abort", abort, { once: true });
+            void task.result.promise
+              .finally(() => signal.removeEventListener("abort", abort))
+              .catch(() => {});
+          }
+          return { task, promise: task.result.promise, rode };
+        },
+      );
+      if (!options.bulk || !automatic || draining) {
+        // A direct caller also removes shared queued work from accumulation.
+        dispatch([...new Set(attached.map(({ task }) => task))], false);
+      } else schedule();
+      return attached.map(({ promise, rode }) => ({ promise, rode }));
+    },
+    flush() {
+      draining = true;
+      dispatch([...queued], true);
+    },
+    async drain() {
+      while (running.size > 0 || queued.size > 0) {
+        dispatch([...queued], true);
+        await Promise.allSettled(running);
+      }
+    },
   };
 }

@@ -2,7 +2,7 @@
  * @fileoverview The errors both producer wrappers raise, and the mapping that
  * puts a cache's name back on a cache-free one.
  *
- * Extracted so `wrapProducer`, `wrapBulkProducer` and `producerByIdType` can
+ * Extracted so `wrapProducer` and `producerByIdType` can
  * each raise or map them without importing one another for it: the routing
  * errors are thrown by the by-id-type helpers, and re-thrown named by whichever
  * wrapper the producer was handed to.
@@ -10,7 +10,7 @@
  * @module
  */
 import { AmbiguousResourceTypeError, UnclassifiableIdError } from "../Cache.js";
-import { assertUnreachable } from "./utils.js";
+import { CacheContractError, assertUnreachable } from "./utils.js";
 
 /**
  * Thrown by the producer wrappers (not by Cache) when a request's id
@@ -29,7 +29,7 @@ import { assertUnreachable } from "./utils.js";
  * classifiable id has a producer. Unclassifiable/ambiguous ids still fail
  * loud, from `cache.classify`.
  */
-export class NoProducerForResourceTypeError extends Error {
+export class NoProducerForResourceTypeError extends CacheContractError {
   override readonly name = "NoProducerForResourceTypeError";
   readonly cacheName: string;
   readonly resourceType: string;
@@ -86,7 +86,7 @@ export type UnroutableIdReason =
  * `cache.resourceTypes` (rather than some other object of the same shape) is
  * what keeps the two in step.
  */
-export class UnroutableIdError extends Error {
+export class UnroutableIdError extends CacheContractError {
   override readonly name = "UnroutableIdError";
   readonly id: string;
   readonly coveredResourceTypes: readonly string[];

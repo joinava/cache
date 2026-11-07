@@ -21,12 +21,11 @@ import {
 } from "./hashedInputProducerByInputType.js";
 import {
   MintedIdResourceTypeMismatchError,
-  wrapBulkHashedInputProducer,
   wrapHashedInputProducer,
 } from "./wrapHashedInputProducer.js";
 
 // Hashed-input wrappers take ONE options bag: `{ cache, hashInput, produce }` for a
-// single resource type, or `{ cache, hashedInputProducer }` for several. A hashing
+// single resource type, or `{ cache, produce: hashedInputProducer }` for several. A hashing
 // producer is built by `hashedInputProducerByInputType` with no cache at all.
 const testRegistry = {
   computed: resourceType<string>()({
@@ -78,11 +77,11 @@ describe("wrapHashedInputProducer", () => {
       produce: producer,
     });
 
-    const first = await compute({ text: "hello" });
+    const first = await compute.get({ text: "hello" });
     expect(first.content).to.eq("HELLO");
     expect(producer.mock.calls[0]?.arguments[0]).to.deep.eq({ text: "hello" });
 
-    const second = await compute({ text: "hello" });
+    const second = await compute.get({ text: "hello" });
     expect(second.content).to.eq("HELLO");
     expect(producer.mock.callCount()).to.eq(1);
   });
@@ -112,10 +111,10 @@ describe("wrapHashedInputProducer", () => {
         produce,
       });
 
-      const first = await compute({ text: "a" });
+      const first = await compute.get({ text: "a" });
       expect(store.gates).to.have.lengthOf(1); // the write is parked
       const captured = Promise.withResolvers<{ stored: Promise<void> }>();
-      const second = await compute(
+      const second = await compute.get(
         { text: "a" },
         { onStore: (stored) => captured.resolve({ stored }) },
       );
@@ -147,8 +146,8 @@ describe("wrapHashedInputProducer", () => {
       produce: producer,
     });
 
-    await compute({ text: "a" });
-    await compute({ text: "b" });
+    await compute.get({ text: "a" });
+    await compute.get({ text: "b" });
     expect(producer.mock.callCount()).to.eq(2);
   });
 
@@ -163,8 +162,8 @@ describe("wrapHashedInputProducer", () => {
       produce: producer,
     });
 
-    await compute({ text: "x" });
-    await compute({ text: "x" });
+    await compute.get({ text: "x" });
+    await compute.get({ text: "x" });
     expect(producer.mock.callCount()).to.eq(1);
   });
 
@@ -181,8 +180,8 @@ describe("wrapHashedInputProducer", () => {
     });
 
     const results = await Promise.all([
-      compute({ text: "q" }),
-      compute({ text: "q" }),
+      compute.get({ text: "q" }),
+      compute.get({ text: "q" }),
     ]);
     expect(results.map((r) => r.content)).to.deep.eq(["q", "q"]);
   });
@@ -208,10 +207,10 @@ describe("wrapHashedInputProducer", () => {
       produce: producer,
     });
 
-    await compute({ text: "primary" });
+    await compute.get({ text: "primary" });
     expect(producer.mock.callCount()).to.eq(1);
 
-    const side = await compute({ text: "side" });
+    const side = await compute.get({ text: "side" });
     expect(side.content).to.eq("SIDE");
     expect(producer.mock.callCount()).to.eq(1);
   });
@@ -226,13 +225,13 @@ describe("wrapHashedInputProducer", () => {
       produce: producer,
     });
 
-    expect((await compute({ text: "hello" })).content).to.eq("HELLO");
-    expect((await compute({ text: "hello" })).content).to.eq("HELLO");
+    expect((await compute.get({ text: "hello" })).content).to.eq("HELLO");
+    expect((await compute.get({ text: "hello" })).content).to.eq("HELLO");
     expect(producer.mock.callCount()).to.eq(1);
 
     // Bypass directives skip the cache read and force producer contact,
     // exactly as on a plain wrapped producer.
-    const forced = await compute(
+    const forced = await compute.get(
       { text: "hello" },
       { directives: { maxAge: 0 } },
     );
@@ -240,7 +239,7 @@ describe("wrapHashedInputProducer", () => {
     expect(producer.mock.callCount()).to.eq(2);
 
     // Plain calls still serve from cache (the memoized entry stands).
-    expect((await compute({ text: "hello" })).content).to.eq("HELLO");
+    expect((await compute.get({ text: "hello" })).content).to.eq("HELLO");
     expect(producer.mock.callCount()).to.eq(2);
   });
 });
@@ -261,17 +260,17 @@ describe("wrapBulkHashedInputProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text.toUpperCase())),
     );
-    const compute = wrapBulkHashedInputProducer({
+    const compute = wrapHashedInputProducer({
       cache,
       hashInput,
-      produce: producer,
+      produceMany: producer,
     });
 
-    await compute([{ text: "b" }]);
+    await compute.getMany([{ text: "b" }]);
     expect(producer.mock.callCount()).to.eq(1);
     expect(producer.mock.calls[0]?.arguments[0]).to.deep.eq([{ text: "b" }]);
 
-    const results = await compute([
+    const results = await compute.getMany([
       { text: "a" },
       { text: "b" },
       { text: "c" },
@@ -288,13 +287,13 @@ describe("wrapBulkHashedInputProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text)),
     );
-    const compute = wrapBulkHashedInputProducer({
+    const compute = wrapHashedInputProducer({
       cache,
       hashInput,
-      produce: producer,
+      produceMany: producer,
     });
 
-    const results = await compute([]);
+    const results = await compute.getMany([]);
     expect(results).to.deep.eq([]);
     expect(producer.mock.callCount()).to.eq(0);
   });
@@ -303,14 +302,14 @@ describe("wrapBulkHashedInputProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text.toUpperCase())),
     );
-    const compute = wrapBulkHashedInputProducer({
+    const compute = wrapHashedInputProducer({
       cache,
       hashInput,
-      produce: producer,
+      produceMany: producer,
     });
 
-    await compute([{ text: "a" }, { text: "b" }]);
-    const results = await compute([{ text: "a" }, { text: "b" }]);
+    await compute.getMany([{ text: "a" }, { text: "b" }]);
+    const results = await compute.getMany([{ text: "a" }, { text: "b" }]);
     expect(results.map(contentOf)).to.deep.eq(["A", "B"]);
     expect(producer.mock.callCount()).to.eq(1);
   });
@@ -319,21 +318,21 @@ describe("wrapBulkHashedInputProducer", () => {
     const producer = mock.fn(async (inputs: readonly Input[]) =>
       inputs.map((input) => result(input.text.toUpperCase())),
     );
-    const compute = wrapBulkHashedInputProducer({
+    const compute = wrapHashedInputProducer({
       cache,
       hashInput,
-      produce: producer,
+      produceMany: producer,
     });
 
     expect(
-      (await compute([{ text: "a" }, { text: "b" }])).map(contentOf),
+      (await compute.getMany([{ text: "a" }, { text: "b" }])).map(contentOf),
     ).to.deep.eq(["A", "B"]);
     expect(
-      (await compute([{ text: "a" }, { text: "b" }])).map(contentOf),
+      (await compute.getMany([{ text: "a" }, { text: "b" }])).map(contentOf),
     ).to.deep.eq(["A", "B"]);
     expect(producer.mock.callCount()).to.eq(1);
 
-    const forced = await compute([{ text: "a" }, { text: "b" }], {
+    const forced = await compute.getMany([{ text: "a" }, { text: "b" }], {
       directives: { maxAge: 0 },
     });
     expect(forced.map(contentOf)).to.deep.eq(["A", "B"]);
@@ -399,7 +398,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
   it("dispatches by matchesInput and returns the right (typed) content per branch", async () => {
     const compute = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
+      produce: hashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -420,10 +419,13 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
         .build(),
     });
 
-    const story = await compute({ kind: "story", id: "1" });
+    const story = await compute.get({ kind: "story", id: "1" });
     expect(story.content).to.deep.eq(makeStory("1"));
 
-    const collection = await compute({ kind: "collection", ids: ["1", "2"] });
+    const collection = await compute.get({
+      kind: "collection",
+      ids: ["1", "2"],
+    });
     expect(collection.content).to.deep.eq([makeStory("1"), makeStory("2")]);
   });
 
@@ -455,7 +457,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
 
     const compute = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
+      produce: hashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -470,18 +472,18 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
         .build(),
     });
 
-    const s1 = await compute({ kind: "story", id: "1" });
+    const s1 = await compute.get({ kind: "story", id: "1" });
     expect(s1.content).to.deep.eq(makeStory("1"));
     expect(storyProduce.mock.callCount()).to.eq(1);
 
     // The supplemental was cached under its own (story) input's hash, so
     // computing it directly never invokes the producer again...
-    const related = await compute({ kind: "story", id: "1-related" });
+    const related = await compute.get({ kind: "story", id: "1-related" });
     expect(related.content).to.deep.eq(makeStory("1-related"));
     expect(storyProduce.mock.callCount()).to.eq(1);
 
     // ...and collection dispatch still works independently.
-    const coll = await compute({ kind: "collection", ids: ["9"] });
+    const coll = await compute.get({ kind: "collection", ids: ["9"] });
     expect(coll.content).to.deep.eq([makeStory("9")]);
     expect(collectionProduce.mock.callCount()).to.eq(1);
   });
@@ -493,7 +495,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
     }));
     const compute = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
+      produce: hashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -526,12 +528,12 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
         .build(),
     });
 
-    const s7 = await compute({ kind: "story", id: "7" });
+    const s7 = await compute.get({ kind: "story", id: "7" });
     expect(s7.content).to.deep.eq(makeStory("7"));
 
     // The cross-branch supplemental is a hit for the collection branch: its
     // producer is never invoked.
-    const coll = await compute({ kind: "collection", ids: ["7"] });
+    const coll = await compute.get({ kind: "collection", ids: ["7"] });
     expect(coll.content).to.deep.eq([makeStory("7")]);
     expect(collectionProduce.mock.callCount()).to.eq(0);
   });
@@ -558,7 +560,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
       // builder only has if it is declared -- hence the SpecOf argument.
       const compute = wrapHashedInputProducer({
         cache: snapshotCache,
-        hashedInputProducer: hashedInputProducerByInputType<
+        produce: hashedInputProducerByInputType<
           StoryVariants,
           AnyValidators,
           AnyParams,
@@ -593,7 +595,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
           .build(),
       });
 
-      const s3 = await compute({ kind: "story", id: "3" });
+      const s3 = await compute.get({ kind: "story", id: "3" });
       expect(s3.content).to.deep.eq(makeStory("3"));
 
       // The supplemental store is fire-and-forget behind the wrapper, so
@@ -622,7 +624,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
   it("a supplemental input matching no covered branch rejects the invocation loudly", async () => {
     const compute = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
+      produce: hashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -653,7 +655,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
         .build(),
     });
 
-    await assert.rejects(() => compute({ kind: "story", id: "9" }), {
+    await assert.rejects(() => compute.get({ kind: "story", id: "9" }), {
       message: /no branch matched/,
     });
   });
@@ -680,9 +682,9 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
           directives: { freshUntilAge: 100 },
         })),
     );
-    const computeAll = wrapBulkHashedInputProducer({
+    const computeAll = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: bulkHashedInputProducerByInputType<StoryVariants>()
+      produceMany: bulkHashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -697,7 +699,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
         .build(),
     });
 
-    const first = await computeAll([
+    const first = await computeAll.getMany([
       { kind: "story", id: "1" },
       { kind: "collection", ids: ["1", "2"] },
       { kind: "story", id: "2" },
@@ -718,7 +720,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
 
     // Only the new story is a miss: the story branch is re-invoked with just
     // it, and the collection branch is not invoked at all.
-    const second = await computeAll([
+    const second = await computeAll.getMany([
       { kind: "collection", ids: ["1", "2"] },
       { kind: "story", id: "3" },
       { kind: "story", id: "1" },
@@ -737,9 +739,9 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
 
   it("bulk: one branch's per-input error is returned in place, leaving the batch's other items served", async () => {
     const boom = new Error("story 2 could not be extracted");
-    const computeAll = wrapBulkHashedInputProducer({
+    const computeAll = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: bulkHashedInputProducerByInputType<StoryVariants>()
+      produceMany: bulkHashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -766,7 +768,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
         .build(),
     });
 
-    const results = await computeAll([
+    const results = await computeAll.getMany([
       { kind: "story", id: "1" },
       { kind: "story", id: "2" },
       { kind: "collection", ids: ["5"] },
@@ -784,9 +786,9 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
           directives: { freshUntilAge: 100 },
         })),
     );
-    const computeAll = wrapBulkHashedInputProducer({
+    const computeAll = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: bulkHashedInputProducerByInputType<StoryVariants>()
+      produceMany: bulkHashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -815,9 +817,9 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
         .build(),
     });
 
-    await computeAll([{ kind: "story", id: "7" }]);
+    await computeAll.getMany([{ kind: "story", id: "7" }]);
 
-    const coll = await computeAll([{ kind: "collection", ids: ["7"] }]);
+    const coll = await computeAll.getMany([{ kind: "collection", ids: ["7"] }]);
     expect(coll.map(storyContentOf)).to.deep.eq([[makeStory("7")]]);
     expect(collectionProduce.mock.callCount()).to.eq(0);
   });
@@ -851,14 +853,14 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
     }));
     const compute = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: soleStoryBranch(produce),
+      produce: soleStoryBranch(produce),
     });
 
-    expect((await compute({ kind: "story", id: "1" })).content).to.deep.eq(
+    expect((await compute.get({ kind: "story", id: "1" })).content).to.deep.eq(
       makeStory("1"),
     );
 
-    await assert.rejects(() => compute({ kind: "story", id: "" }), {
+    await assert.rejects(() => compute.get({ kind: "story", id: "" }), {
       message: /no branch matched/,
     });
     // Still 1: the rejected input was not produced, so nothing was stored
@@ -874,9 +876,9 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
           directives: { freshUntilAge: 100 },
         })),
     );
-    const computeAll = wrapBulkHashedInputProducer({
+    const computeAll = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: bulkHashedInputProducerByInputType<StoryVariants>()
+      produceMany: bulkHashedInputProducerByInputType<StoryVariants>()
         .when(isIdentifiedStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -887,7 +889,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
 
     await assert.rejects(
       () =>
-        computeAll([
+        computeAll.getMany([
           { kind: "story", id: "1" },
           { kind: "story", id: "" },
         ]),
@@ -900,7 +902,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
   it("a supplemental the sole `.when` branch's guard rejects also rejects the invocation", async () => {
     const compute = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: soleStoryBranch(async (input) => ({
+      produce: soleStoryBranch(async (input) => ({
         content: makeStory(input.id),
         directives: { freshUntilAge: 100 },
         supplementalResources: [
@@ -916,7 +918,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
       })),
     });
 
-    await assert.rejects(() => compute({ kind: "story", id: "9" }), {
+    await assert.rejects(() => compute.get({ kind: "story", id: "9" }), {
       message: /no branch matched/,
     });
   });
@@ -930,7 +932,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
     );
     const compute = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
+      produce: hashedInputProducerByInputType<StoryVariants>()
         // Reads a field only story inputs have, the way a guard that parses or
         // dereferences its input does; on a collection input that throws.
         .when(
@@ -954,7 +956,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
         .build(),
     });
 
-    const coll = await compute({ kind: "collection", ids: ["1"] });
+    const coll = await compute.get({ kind: "collection", ids: ["1"] });
     expect(coll.content).to.deep.eq([makeStory("1")]);
     expect(collectionProduce.mock.callCount()).to.eq(1);
   });
@@ -963,7 +965,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
     const guardError = new Error("could not read the input");
     const compute = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
+      produce: hashedInputProducerByInputType<StoryVariants>()
         .when(
           (input): input is StoryInput => {
             void input;
@@ -982,7 +984,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
     });
 
     const thrown = await expectRejection(() =>
-      compute({ kind: "story", id: "1" }),
+      compute.get({ kind: "story", id: "1" }),
     );
     expect((thrown as Error).message).to.match(/no branch matched/);
     // Without this the guard's own failure is the one thing a caller cannot
@@ -995,7 +997,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
     const collectionGuardError = new Error("collection guard likewise");
     const compute = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
+      produce: hashedInputProducerByInputType<StoryVariants>()
         .when(
           (input): input is StoryInput => {
             void input;
@@ -1029,7 +1031,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
     });
 
     const thrown = await expectRejection(() =>
-      compute({ kind: "story", id: "1" }),
+      compute.get({ kind: "story", id: "1" }),
     );
     expect((thrown as Error).cause).to.be.instanceOf(AggregateError);
     expect(((thrown as Error).cause as AggregateError).errors).to.deep.eq([
@@ -1041,7 +1043,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
   it("a supplemental whose routed branch mints a misclassified id rejects loudly, naming that branch", async () => {
     const compute = wrapHashedInputProducer({
       cache,
-      hashedInputProducer: hashedInputProducerByInputType<StoryVariants>()
+      produce: hashedInputProducerByInputType<StoryVariants>()
         .when(isStory, {
           name: "story",
           hashInput: (input) => `extract:story:${input.id}` as const,
@@ -1079,7 +1081,7 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
     });
 
     const thrown = await expectRejection(() =>
-      compute({ kind: "story", id: "9" }),
+      compute.get({ kind: "story", id: "9" }),
     );
     // Its own error, not a re-worded UnclassifiableIdError: the mint DID
     // classify, to exactly one type -- just not this branch's. So the culprit is
@@ -1094,4 +1096,175 @@ describe("hashed-input wrappers with heterogeneous branches", () => {
     expect(thrown.cacheName).to.equal(cache.name);
     expect(thrown.message).to.include('branch "collection"');
   });
+});
+
+describe(
+  "hashed input ownership during producer scheduling",
+  { timeout: 10000 },
+  () => {
+    it("retains queued background inputs after the stale caller returns and a foreground joiner cancels", async () => {
+      const cache = new Cache({
+        store: new MemoryStore<SpecOf<typeof testRegistry>>(),
+        ...testCacheOptions,
+      });
+      await cache.store([
+        {
+          id: "computed:a",
+          content: "stale",
+          date: new Date(Date.now() - 10000),
+          directives: {
+            freshUntilAge: 1,
+            maxStale: {
+              withoutRevalidation: 0,
+              whileRevalidate: 60,
+              ifError: 60,
+            },
+          },
+        },
+      ]);
+      const scheduled = Promise.withResolvers<() => void>();
+      const producer = mock.fn(async (inputs: readonly Input[]) =>
+        inputs.map((input) => result(input.text)),
+      );
+      const client = wrapHashedInputProducer({
+        cache,
+        hashInput,
+        produceMany: producer,
+        producerBatching: { batchScheduleFn: scheduled.resolve },
+      });
+      assert.equal((await client.get({ text: "a" })).content, "stale");
+      const dispatch = await scheduled.promise;
+      await cache.delete("computed:a");
+      const controller = new AbortController();
+      const foreground = client.get(
+        { text: "a" },
+        { signal: controller.signal },
+      );
+      const rejected = assert.rejects(foreground, { name: "AbortError" });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      controller.abort();
+      await rejected;
+      dispatch();
+      await client.close();
+      assert.equal(producer.mock.callCount(), 1);
+      assert.deepEqual(producer.mock.calls[0]!.arguments[0], [{ text: "a" }]);
+      const lookup = await cache.get({
+        id: "computed:a",
+        params: {},
+        directives: {},
+      });
+      assert.equal(lookup.usable?.content, "a");
+      await cache.close();
+    });
+
+    it("drains accepted asynchronous hashing before closing producer admission", async () => {
+      const cache = new Cache({
+        store: new MemoryStore<SpecOf<typeof testRegistry>>(),
+        ...testCacheOptions,
+      });
+      const started = Promise.withResolvers<void>();
+      const hashing = Promise.withResolvers<void>();
+      const client = wrapHashedInputProducer({
+        cache,
+        hashInput: async (input: Input) => {
+          started.resolve();
+          await hashing.promise;
+          return hashInput(input);
+        },
+        produceMany: async (inputs) =>
+          inputs.map((input) => result(input.text)),
+        producerBatching: { batchScheduleFn: () => {} },
+      });
+      const read = client.get({ text: "a" });
+      await started.promise;
+      const closing = client.close();
+      assert.equal(client.close(), closing);
+      await assert.rejects(client.get({ text: "new" }), /closed/);
+      hashing.resolve();
+      assert.equal((await read).content, "a");
+      await closing;
+      await cache.close();
+    });
+
+    it("rejects descriptor capabilities in the wrong field and conflicting hash functions", () => {
+      const cache = new Cache({
+        store: new MemoryStore<SpecOf<typeof testRegistry>>(),
+        ...testCacheOptions,
+      });
+      const descriptor = hashedInputProducerByInputType<{
+        computed: HashedInputVariant<Input, string>;
+      }>()
+        .when(
+          (input): input is Input =>
+            typeof input === "object" && input !== null && "text" in input,
+          {
+            name: "computed",
+            hashInput,
+            produce: async (input) => result(input.text),
+          },
+        )
+        .build();
+      assert.throws(
+        () =>
+          Reflect.apply(wrapHashedInputProducer, undefined, [
+            { cache, produceMany: descriptor },
+          ]),
+        /capability/,
+      );
+      assert.throws(
+        () =>
+          Reflect.apply(wrapHashedInputProducer, undefined, [
+            { cache, produce: descriptor, hashInput },
+          ]),
+        /EITHER/,
+      );
+    });
+  },
+);
+
+describe("hashed shutdown after hashing failures", { timeout: 10000 }, () => {
+  for (const mode of ["input", "supplemental"] as const) {
+    it(`drains sibling ${mode} hashes after one hash rejects`, async () => {
+      const cache = new Cache({
+        store: new MemoryStore<SpecOf<typeof testRegistry>>(),
+        ...testCacheOptions,
+      });
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const failure = new Error("hash failed");
+      const client = wrapHashedInputProducer({
+        cache,
+        hashInput: async (input: Input) => {
+          if (input.text === "bad") throw failure;
+          if (input.text === "slow") {
+            entered.resolve();
+            await release.promise;
+          }
+          return hashInput(input);
+        },
+        produce: async () => ({
+          ...result("primary"),
+          supplementalResources: [
+            { input: { text: "bad" }, ...result("bad") },
+            { input: { text: "slow" }, ...result("slow") },
+          ],
+        }),
+      });
+      const read =
+        mode === "input"
+          ? client.getMany([{ text: "bad" }, { text: "slow" }])
+          : client.get({ text: "primary" });
+      await assert.rejects(read, (error) => error === failure);
+      await entered.promise;
+      let closed = false;
+      const closing = client.close().then(() => {
+        closed = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(closed, false);
+      release.resolve();
+      await closing;
+      await cache.close();
+    });
+  }
 });

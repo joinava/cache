@@ -93,7 +93,10 @@ export type ChannelCapture = {
  * other). Call `stop()` when done -- leaked subscribers poison other tests'
  * counts.
  */
-export function captureChannels(cacheName: string): ChannelCapture {
+export function captureChannels(
+  cacheName: string,
+  options: { measurements?: false } = {},
+): ChannelCapture {
   const read: CacheReadMessage[] = [];
   const fetch: CacheFetchMessage[] = [];
   const produce: CacheProduceMessage[] = [];
@@ -110,10 +113,24 @@ export function captureChannels(cacheName: string): ChannelCapture {
   // the full payload shapes, so a message that doesn't actually match the
   // documented type fails loudly there.
   const collect =
-    <M>(channel: CapturedMessage["channel"], bucket: M[]) =>
+    <M extends object>(channel: CapturedMessage["channel"], bucket: M[]) =>
     (msg: unknown) => {
       if (!isForThisCache(msg)) return;
-      const message = msg as M;
+      const message = { ...(msg as M) };
+      // Outcome assertions exclude measurements, which deterministic clock tests cover.
+      if (options.measurements === false) {
+        if (channel === "read" || channel === "fetch")
+          Reflect.deleteProperty(message, "durationMs");
+        if (channel === "produce")
+          [
+            "operation",
+            "automatic",
+            "requestCount",
+            "failedRequestCount",
+            "operationFailed",
+            "queueWaitTotalMs",
+          ].forEach((key) => Reflect.deleteProperty(message, key));
+      }
       bucket.push(message);
       all.push({ channel, message } as CapturedMessage);
     };

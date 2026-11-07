@@ -1,11 +1,16 @@
-import { timeSlicedForEach } from "./time-slicing.js";
+import { TimeSliceBudget, timeSlicedForEach } from "./time-slicing.js";
 import { default as debug } from "debug";
 import { maxBy } from "es-toolkit";
 
 import pLimit from "p-limit";
 import type { CacheSpec, SpecForId } from "../types/00_CacheSpec.js";
 import type { Entry, NormalizedParams } from "../types/06_Normalization.js";
-import type { Store, StoreGetManyResult } from "../types/06_Store.js";
+import type {
+  Store,
+  SingleStoreReader,
+  StoreGetManyRequest,
+  StoreGetManyResult,
+} from "../types/06_Store.js";
 import type { AnyParams, AnyValidators } from "../types/index.js";
 import { components, type Logger } from "../types/index.js";
 export type { JsonOf } from "type-party";
@@ -139,6 +144,154 @@ export async function keepMaxPerGroupCooperatively<T>(opts: {
   return result;
 }
 
+/** Package-detected invalid contracts must not become operational slot errors. */
+export class CacheContractError extends Error {
+  override readonly name: string = "CacheContractError";
+}
+
+export function asError(error: unknown): Error {
+  return error instanceof Error
+    ? error
+    : new Error("Cache operation failed", { cause: error });
+}
+
+/** Check capability presence before any dispatch. */
+export function assertStoreReader(store: {
+  get?: unknown;
+  getMany?: unknown;
+}): void {
+  const single = typeof store.get === "function";
+  const bulk = typeof store.getMany === "function";
+  if (
+    single === bulk ||
+    (!single && store.get !== undefined) ||
+    (!bulk && store.getMany !== undefined)
+  ) {
+    throw new CacheContractError(
+      "A Store must declare exactly one of get or getMany",
+    );
+  }
+}
+
+/** One actual primitive call, before operational failures become positional slots. */
+export type StoreReadObservation = {
+  operation: "get" | "getMany";
+  requestCount: number;
+  failedRequestCount: number;
+  entryCount: number;
+  durationMs: number;
+  outcome: "success" | "failure" | "cancelled";
+};
+
+/** Read a known set without accumulating independent calls. */
+export async function getMany<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
+>(
+  store: Store<Spec, Validators, Params>,
+  requests: Reqs,
+  options?: { signal?: AbortSignal },
+): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
+  return await readStoreObserved(store, requests, options);
+}
+
+export async function readStoreObserved<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
+>(
+  store: Store<Spec, Validators, Params>,
+  requests: Reqs,
+  options?: { signal?: AbortSignal },
+  observe?: (event: StoreReadObservation) => void,
+): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
+  assertStoreReader(store);
+  options?.signal?.throwIfAborted();
+  if (requests.length === 0)
+    return [] as StoreGetManyResult<Spec, Reqs, Validators, Params>;
+  if (store.getMany === undefined)
+    return readSingleStore(store, requests, 10, options, observe);
+  const startedAt = observe === undefined ? 0 : performance.now();
+  let results: StoreGetManyResult<Spec, Reqs, Validators, Params>;
+  try {
+    results = await store.getMany(requests, options);
+    if (
+      !Array.isArray(results) ||
+      results.length !== requests.length ||
+      Array.from(results).some(
+        (slot) => !(slot instanceof Error) && !Array.isArray(slot),
+      )
+    ) {
+      throw new CacheContractError(
+        "Store.getMany must return one entry array or Error per request",
+      );
+    }
+    observe?.({
+      operation: "getMany",
+      requestCount: requests.length,
+      failedRequestCount: results.filter((slot) => slot instanceof Error)
+        .length,
+      entryCount: results.reduce(
+        (total, slot) => total + (slot instanceof Error ? 0 : slot.length),
+        0,
+      ),
+      durationMs: performance.now() - startedAt,
+      outcome: results.some((slot) => slot instanceof Error)
+        ? "failure"
+        : "success",
+    });
+  } catch (failure) {
+    observe?.({
+      operation: "getMany",
+      requestCount: requests.length,
+      failedRequestCount: options?.signal?.aborted ? 0 : requests.length,
+      entryCount: 0,
+      durationMs: performance.now() - startedAt,
+      outcome: options?.signal?.aborted ? "cancelled" : "failure",
+    });
+    options?.signal?.throwIfAborted();
+    if (failure instanceof CacheContractError) throw failure;
+    const error = asError(failure);
+    return requests.map(() => error) as StoreGetManyResult<
+      Spec,
+      Reqs,
+      Validators,
+      Params
+    >;
+  }
+  options?.signal?.throwIfAborted();
+  return results;
+}
+
+/** Read one request through either primitive. Error slots reject this call. */
+export async function getOne<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  Id extends Spec["id"],
+>(
+  store: Store<Spec, Validators, Params>,
+  request: StoreGetManyRequest<Spec, NoInfer<Params>> & { readonly id: Id },
+  options?: { signal?: AbortSignal },
+) {
+  const results = await getMany(store, [request] as const, options);
+  const result = results[0];
+  if (result instanceof Error) throw result;
+  return result;
+}
+
+/** Reject the first Error in request order after all results have settled. */
+export function throwIfAnyError<const Results extends readonly unknown[]>(
+  results: Results,
+): { [K in keyof Results]: Exclude<Results[K], Error> } {
+  const failure = results.find((result) => result instanceof Error);
+  if (failure instanceof Error) throw failure;
+  return results as { [K in keyof Results]: Exclude<Results[K], Error> };
+}
+
 /**
  * A naive implementation of the `getMany` method that uses the store's `get`
  * method to fulfill all requests with limited parallelism.
@@ -168,32 +321,81 @@ export async function naiveGetMany<
     readonly params: Readonly<NormalizedParams<Params>>;
   }[],
 >(
-  store: Store<Spec, Validators, Params>,
+  store: SingleStoreReader<Spec, Validators, Params>,
   requests: Reqs,
   maxConcurrency = 10,
   options?: { signal?: AbortSignal },
 ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
+  return await readSingleStore(store, requests, maxConcurrency, options);
+}
+
+async function readSingleStore<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  const Reqs extends readonly {
+    readonly id: Spec["id"];
+    readonly params: Readonly<NormalizedParams<Params>>;
+  }[],
+>(
+  store: SingleStoreReader<Spec, Validators, Params>,
+  requests: Reqs,
+  maxConcurrency = 10,
+  options?: { signal?: AbortSignal },
+  observe?: (event: StoreReadObservation) => void,
+): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
   options?.signal?.throwIfAborted();
 
   const limit = pLimit(maxConcurrency);
+  const budget = new TimeSliceBudget();
 
   // Process all requests with controlled concurrency.
   const promises = requests.map(async (request) =>
     limit(async () => {
       options?.signal?.throwIfAborted();
+      const pendingYield = budget.yieldIfNeeded();
+      if (pendingYield !== undefined) await pendingYield;
+      options?.signal?.throwIfAborted();
+      const startedAt = observe === undefined ? 0 : performance.now();
       try {
-        return await store.get(request.id, request.params, options);
+        const invocation = budget.measure(() => ({
+          promise: store.get(request, options),
+        }));
+        const entries = await invocation.promise;
+        if (!Array.isArray(entries))
+          throw new CacheContractError("Store.get must return an entry array");
+        observe?.({
+          operation: "get",
+          requestCount: 1,
+          failedRequestCount: 0,
+          entryCount: entries.length,
+          durationMs: performance.now() - startedAt,
+          outcome: "success",
+        });
+        return entries;
       } catch (error) {
+        observe?.({
+          operation: "get",
+          requestCount: 1,
+          failedRequestCount: options?.signal?.aborted ? 0 : 1,
+          entryCount: 0,
+          durationMs: performance.now() - startedAt,
+          outcome: options?.signal?.aborted ? "cancelled" : "failure",
+        });
         options?.signal?.throwIfAborted();
-        return error instanceof Error
-          ? error
-          : new Error("Store.get failed", { cause: error });
+        if (error instanceof CacheContractError) throw error;
+        return asError(error);
       }
     }),
   );
 
-  const res = await Promise.all(promises);
+  // Wait for every dispatched read before releasing lifecycle ownership.
+  const settled = await Promise.allSettled(promises);
   options?.signal?.throwIfAborted();
+  const res = settled.map((result) => {
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  });
   return res satisfies (
     | Entry<SpecForId<Spec, Spec["id"]>, Validators, Params>[]
     | Error

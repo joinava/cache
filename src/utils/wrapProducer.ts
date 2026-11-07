@@ -1,3 +1,5 @@
+import type { BulkResourceTypeProducer } from "./bulkProducerByIdType.js";
+import type { ReadBatchOptions } from "./storeReadBatcher.js";
 import stableStringify from "safe-stable-stringify";
 import type { ReadonlyDeep } from "type-fest";
 import type { PublicInterface } from "type-party";
@@ -32,10 +34,7 @@ import type {
   Vary,
   PartialReadonlyConsumerRequest,
 } from "../types/index.js";
-import {
-  collapsedInvocationTaskCreator,
-  type CollapsedInvocation,
-} from "./collapsedTaskCreator.js";
+import { createProducerScheduler } from "./collapsedTaskCreator.js";
 import { normalizeParams, normalizeVary } from "./normalization.js";
 import { PendingResources } from "./pendingResources.js";
 import {
@@ -49,10 +48,48 @@ import {
   requestPairedProducerResultToResources,
 } from "./requestPairedProducerUtils.js";
 import {
-  assertUnreachable,
+  asError,
+  CacheContractError,
   defaultLoggersByComponent,
   raceWithSignal,
 } from "./utils.js";
+
+/**
+ * The bulk counterpart of `wrapProducer`'s `CoveringProducer` (see it for why
+ * the covered-set property carries a runtime value, and why it is optional for
+ * whole-registry coverage but REQUIRED when `Covered` is a strict subset): a
+ * bulk producer function that may additionally declare which resource types it
+ * covers. A plain function omits the property and covers the whole registry, so
+ * it sees the caller's FULL mixed batch in one call and can optimize across
+ * resource types (one upstream call spanning several types, cross-type dedup, a
+ * join).
+ */
+export type CoveringBulkProducer<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+  ErrorType extends Error = Error,
+> = BulkResourceTypeProducer<RT, Covered, Validators, Params, ErrorType> &
+  CoveredTypesCarrier<RT, Covered>;
+
+/** The internal, id-erased dispatch shape; see `LooseProducer` in wrapProducer.ts. */
+export type LooseBulkProducer<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  ErrorType extends Error,
+> = (
+  reqs: readonly LooseRequestFor<RT, Params>[],
+) => Promise<(LooseResultFor<RT, Validators, Params> | ErrorType)[]>;
+
+/** Internal input ownership hook for hashed producer scheduling. */
+export const wrappedReadStartedAt: unique symbol = Symbol(
+  "wrappedReadStartedAt",
+);
+export const producerRequestLease: unique symbol = Symbol(
+  "producerRequestLease",
+);
 
 /** Observe foreground persistence without delaying the produced result. */
 export type OnStore = (stored: Promise<void>) => void;
@@ -92,45 +129,21 @@ export type WrapProducerOptions<
    */
   cache: PublicInterface<Cache<RT, Validators, Params>>;
   /**
-   * Controls whether the function returned by `wrapProducer`/`wrapBulkProducer`
-   * will fall back to calling the produer if its attempt to read from the cache
-   * results in an error, or whether it will throw. Normally, falling back to
-   * calling the producer is desirable (so that brief unavailability of the
-   * cache doesn't effect the application), and this is the default. However,
-   * this must be considered carefully: calling through to the producer on every
-   * request can _dramatically_ increase the load it's under -- e.g., if the
-   * cache hit rate was even 95% (which is very low for many applications), then
-   * calling the producer unconditionally will increase the load its under by
-   * 20x! I.e., instead of 1 in 20 requests hitting the producer, all 20 will.
-   * If the producer is/uses a shared resource, and it doesn't have good load
-   * shedding or autoscaling mechanisms, and the requests to it that are going
-   * through this cache aren't its most important work, then sending all the
-   * requests to the producer could lead to cascading failures and/or prevent it
-   * from serving more important requests. In that case, having the function
-   * returned by `wrappedProducer` throw might be more desirable.
+   * Operational cache read failures call the producer by default. "throw"
+   * returns an Error slot instead; scalar calls reject. Cancellation and
+   * package contract violations never use this fallback. A cache outage can
+   * multiply origin load: a 95% hit rate becomes 20 times as much production.
+   * Choose this policy against the origin's capacity and load shedding.
    */
   onCacheReadFailure?: "throw" | "call-producer";
-  /**
-   * If multiple, identical requests (i.e., calls to the function returned by
-   * `wrapProducer`/`wrapBulkProducer`) are made that overlap in time (i.e., one
-   * has started, but not yet finished, at the time another starts), and
-   * multiple of these requests would be forwarded to the wrapped producer
-   * [because there's no cached value to satisfy them], these requests can be
-   * "deduplicated", so that only one request (which'll still be a bulk request
-   * in the case of wrapBulkProducer) is made to the underlying producer, and
-   * its response is used for all the overlapping requests. This setting
-   * controls the maximum number of seconds that are allowed to have elapsed
-   * between the current request and the first of the overlapping requests, if
-   * this deduplication is to occur. I.e., if a request occurred greater than
-   * `collapseOverlappingRequestsTime` seconds after the earliest, identical,
-   * overlapping request, it will not be merged with the prior one, and instead
-   * a new request will go to the producer
-   */
+  /** Maximum joining age in seconds for compatible pending work. Defaults to 3. */
   collapseOverlappingRequestsTime?: number;
   /**
    * A custom logger to use (optional).
    */
   logger?: Logger;
+  /** Bulk accumulation settings; default limit 20. Does not change participation. */
+  producerBatching?: ReadBatchOptions;
 };
 
 /**
@@ -139,6 +152,9 @@ export type WrapProducerOptions<
  * `K` it is a {@link producerByIdType} sub-producer (which sees only its own
  * branch's ids), and with a whole covered set it is the function half of
  * {@link CoveringProducer}, which is what the wrappers take.
+ *
+ * Each request remains valid when reordered, split, or shared with other calls.
+ * Producers receive original parameters; normalization promises equivalent behavior.
  *
  * Note: {@link RequestPairedProducerResult} already allows
  * `supplementalResources` from ANY spec variant, so (e.g.) a `site_day`
@@ -326,7 +342,7 @@ export function coveredTypeSet(producer: {
  */
 export function emptyProducersRecordMessage(
   helper: "producerByIdType" | "bulkProducerByIdType",
-  wrapper: "wrapProducer" | "wrapBulkProducer",
+  wrapper: "wrapProducer",
 ): string {
   return (
     `${helper}: \`producers\` must be a record with one entry per covered ` +
@@ -361,15 +377,42 @@ export function assertResourceTypeCovered(
  * signature and in the closing cast, far enough apart to drift, and the cast is
  * the only thing that would notice them disagreeing.
  */
-type WrappedProducerFn<
+export type WrappedReadOptions = {
+  signal?: AbortSignal;
+  autoBatch?: { store?: false; producer?: false };
+  onStore?: OnStore;
+};
+
+export type WrappedProducerClient<
   RT extends ResourceTypes,
   Covered extends ResourceTypeName<RT>,
   Validators extends AnyValidators,
   Params extends AnyParams,
-> = <Id extends IdOfResourceType<RT[Covered]>>(
-  req: PartialReadonlyConsumerRequest<Params, Id>,
-  options?: { signal?: AbortSignal; onStore?: OnStore },
-) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>>;
+> = {
+  get: <Id extends IdOfResourceType<RT[Covered]>>(
+    request: PartialReadonlyConsumerRequest<Params, Id>,
+    options?: WrappedReadOptions,
+  ) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>>;
+  getMany: <
+    const Requests extends readonly PartialReadonlyConsumerRequest<
+      Params,
+      IdOfResourceType<RT[Covered]>
+    >[],
+  >(
+    requests: Requests,
+    options?: WrappedReadOptions,
+  ) => Promise<{
+    -readonly [K in keyof Requests]:
+      | EntryForId<
+          SpecOf<RT>,
+          Validators,
+          Params,
+          Extract<Requests[K]["id"], SpecOf<RT>["id"]>
+        >
+      | Error;
+  }>;
+  close: () => Promise<void>;
+};
 
 /**
  * Logged by both wrappers when a producer failure is absorbed by the request's
@@ -387,145 +430,49 @@ export function throwUnreachableAbort(signal: AbortSignal | undefined): never {
 }
 
 /**
- * Fundamentally, this function takes a producer that returns values (likely
- * without the help of a cache), and returns a function that's a drop-in
- * replacement for it, except that it tries to lookup and reuse prior
- * results from a cache, before calling the underlying user-provided producer.
+ * Wrap one producer capability and return a client with get, getMany, and close.
+ * Bare callbacks cover the whole registry. Typed dispatch helpers can declare
+ * partial coverage; classification and coverage checks run before Store reads.
+ * Supplemental resources may target any registered type without adding slots.
  *
- * Exactly ONE producer function is passed, and it is the primitive:
+ * Producer requests must be independent. Results must remain valid when work
+ * is reordered, split, deduplicated, or combined with other requests. Producers
+ * perform side-effect-free reads. maxAge: 0 skips cache lookup and requires
+ * production; storeFor: 0 prevents retention of a produced resource.
  *
- * - A **bare function covers the whole registry.** `Covered` defaults to
- *   every registry type name, and the compiler makes the function prove it --
- *   its parameter must accept every registry id. Sole-type caches therefore
- *   just pass their producer.
- * - **Partial coverage requires {@link producerByIdType}**, which turns a
- *   per-resource-type record into a single function carrying its covered set
- *   in the optional {@link coveredTypes} property. `Covered` is inferred from
- *   that property (inference beats the default whenever it is present), which
- *   bounds the returned function's request type: it accepts exactly the
- *   covered types' ids, and requests for uncovered types are compile errors.
+ * Single producers dispatch promptly. Bulk producers accumulate ready work by
+ * default, separately from Store accumulation. autoBatch.producer: false waits
+ * for classification of the known set, then dispatches its foreground cohort.
+ * A direct caller can also dispatch compatible queued work immediately.
  *
- * A type with no producer in any wrapper is legal and normal: its entries are
- * written as other producers' supplemental resources (or direct `store()`
- * calls) and read via `Cache.get` -- the serve-if-present contract. Partial
- * coverage is also what makes capability-scoped and split wrappers honest: a
- * second `wrapProducer` call can cover a different subset of the same cache,
- * and adding a registry type grants no existing wrapper-holder fetch authority
- * over it.
+ * Sharing covers pending requests within collapseOverlappingRequestsTime.
+ * Compatibility uses normalized parameters and directives. Producers receive
+ * original parameters, whose behavior must be equivalent under normalization.
+ * Failed normalization cannot establish sharing; permitted read-failure
+ * fallback produces independently with the original parameters.
  *
- * The wrapper calls `cache.classify(req.id)` once per request; the classify
- * result is what stamps `resourceType` on the `fetch`/`produce` diagnostics
- * messages. If the producer declared a covered set and the classified type is
- * not in it -- reachable only via a cast or loosely-typed id -- the wrapper
- * throws {@link NoProducerForResourceTypeError} before reading the cache. A
- * bare function declares no covered set, so that check is skipped entirely
- * (its coverage is the whole registry by construction).
+ * Cancellation removes unused queued participation. It never aborts shared
+ * dispatched work or an accepted background refresh. Bulk operational failures
+ * remain positional Errors; scalar reads reject their Error slot. Cancellation
+ * and package contract violations reject the complete public call.
  *
- * ## Producer purity contract
+ * Produced values return before their writes finish. Eligible primary and
+ * supplemental resources remain in this wrapper's pending-write overlay until
+ * persistence settles. Each ordinary lookup merges Store candidates with a
+ * retained pending snapshot using canonical freshness and variant rules.
+ * Newer persisted candidates can win; equal birth dates prefer pending entries.
+ * The overlay models all eligible candidates, not the Store's retained subset.
+ * It never survives a settled write and does not cross wrapper/process borders.
  *
- * A producer passed to any wrapper must be a side-effect-free read of its
- * resource type's origin: every invocation may be collapsed (shared with
- * other concurrent logical callers) and its result stored, so producer calls
- * are never 1:1 with callers. Requests "made for their side effects" should
- * not route through a wrapper at all; a consumer that must reach the origin
- * sends bypass directives (`maxAge: 0`); a producer whose response must not
- * be stored returns `storeFor: 0` directives.
+ * onStore observes every foreground write before reporting the first failure
+ * in request order. Pending hits and stale fallbacks observe the selected
+ * entry's original write. Stale returns exclude their background refresh.
+ * A successful foreground refresh observes its new write instead.
  *
- * ## Bypass requests skip the cache read
- *
- * When the consumer's directives could never be satisfied by cached data
- * (`maxAge: 0`), the wrapper does not call `Cache.get` at all: `maxAge: 0`
- * structurally guarantees producer contact (closing the age-≤0/clock-skew
- * hole where a same-millisecond or future-dated entry has age ≤ 0 and would
- * satisfy `maxAge: 0` from cache), and bypass requests don't pollute the
- * `read` channel. Bypass requests still collapse (only with
- * identical-directive peers -- the collapse key includes directives) and
- * their results are still stored.
- *
- * Note that any supplemental resources returned by a producer will be
- * cached but not returned to the caller.
- *
- * The wrapped function is generic over the specific id of an incoming request
- * so that the result's content type is narrowed to the covered spec variants
- * compatible with that id.
- *
- * ## AbortSignal support
- *
- * The returned function accepts an optional `{ signal }` parameter. The
- * signal is forwarded to `cache.get()`, so the store read can be aborted. If
- * the signal fires before the cache read completes, the function throws
- * without ever contacting the producer. Once the cache read resolves and the
- * producer must be called, no signal reaches the producer -- because that call
- * may be sharing one underlying producer invocation with other callers who have
- * not aborted. Producers accordingly take **no** `options` parameter at all
- * (see {@link CoveringProducer}): every producer call goes through the
- * collapsed-invocation task, so there is never a single caller's signal that
- * could be forwarded without letting one caller cancel another's work. The
- * caller's wait for the producer result is instead **raced** against the signal,
- * so the caller can bail out immediately without waiting for the producer to
- * finish.
- *
- * Critically, bailing out does NOT prevent the producer's result from being
- * stored: the collapsed invocation always fires a (non-awaited)
- * `cache.store()` after the producer resolves (see the next section), so the
- * work is never wasted. The trade-off is that the producer itself cannot
- * observe the signal to cancel its own in-progress work (e.g., an outgoing
- * HTTP request). Supporting that would require either (a) aborting the shared
- * task only when *all* callers have aborted, which adds significant
- * complexity, or (b) giving up request collapsing for callers that pass a
- * signal, which would defeat its purpose.
- *
- * ## The store is fire-and-forget; in-flight writes still count as hits
- *
- * The returned function resolves as soon as the producer has a value; the
- * `cache.store()` of that value (primary and supplemental resources alike) is
- * fired but NOT awaited, so a caller never waits on a store round trip and a
- * failed write never fails the call (it is logged and dropped). The precise
- * guarantee about repeated calls is then:
- *
- * - Identical calls that overlap the producer invocation share it, subject to
- *   the collapse time window (request collapsing, above).
- * - A call that arrives after the producer resolved but before its
- *   `cache.store()` settled is answered from the wrapper's own in-memory
- *   overlay of in-flight writes -- consulted before the cache read, and
- *   honoring the request's params against each entry's `vary` and the
- *   caller's directives through the same lookup rules as stored entries.
- *   Every lookup consults the store and merges its candidates with a snapshot
- *   of matching pending entries. A newer persisted fresh entry can therefore
- *   beat an older pending fresh entry. Equal birth dates prefer the pending
- *   candidate, which comes later in the combined candidate order.
- *   Stale-while-revalidate starts a background refresh; stale-if-error serves
- *   the selected entry only if production fails. The read diagnostic reports
- *   the store lookup; the fetch diagnostic reports the combined result.
- * - Once the store call settles the overlay forgets the entry, on success
- *   (the store answers for it now) and on failure alike: a failed write is
- *   never pinned, so the next call reads the store, misses, and runs the
- *   producer again. An ongoing lookup retains its candidate snapshot across
- *   the store read, including when a write settles during that read. Its
- *   onStore promise still reports that candidate's persistence result.
- * - The overlay is per wrapper instance and in-process. It does not cover a
- *   different wrapper over the same cache or a different process.
- *
- * Await the promise passed to `onStore` when subsequent work requires
- * persistence. Overlay hits and stale fallbacks expose the selected entry's
- * original write. A stale return excludes its background refresh write;
- * a successful foreground refresh exposes that refresh's write.
- * Store shutdown guarantees differ: SQLite drains its writer, while MemoryStore
- * and PostgresStore do not drain outstanding writes. Postgres callers own the
- * database connection and must await persistence before closing that connection.
- *
- * @param options - The cache to wrap, plus the wrapping behaviour; see
- *   {@link WrapProducerOptions}. `options.cache` is where values returned by
- *   the producer (see below) will actually be stored.
- *
- * @param producer - The function actually responsible for returning the
- *   results that will be sent to the user and/or stored in the cache. It acts
- *   as the origin or "producer" for every resource type it covers. It is
- *   passed the request (id and params) along with the caller's cache
- *   directives, which may be needed in case the producer is itself backed by a
- *   cache, and it needs to decide whether to contact its origin. Pass a bare
- *   function to cover the whole registry, or {@link producerByIdType}'s result
- *   to cover a subset with one sub-producer per resource type.
+ * Close clients before their Cache and externally owned dependencies. close()
+ * rejects new calls, flushes queues, and drains accepted pipelines, background
+ * refreshes, and writes. It takes no timeout and does not replay operation errors.
+ * Await onStore separately when successful persistence matters.
  */
 export default function wrapProducer<
   RT extends ResourceTypes,
@@ -533,474 +480,576 @@ export default function wrapProducer<
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
 >(
-  options: WrapProducerOptions<RT, Validators, Params>,
-  producer: CoveringProducer<RT, Covered, Validators, Params>,
-): WrappedProducerFn<RT, Covered, Validators, Params> {
+  options: WrapProducerOptions<RT, Validators, Params> &
+    (
+      | {
+          produce: CoveringProducer<RT, Covered, Validators, Params>;
+          produceMany?: never;
+        }
+      | {
+          produce?: never;
+          produceMany: CoveringBulkProducer<RT, Covered, Validators, Params>;
+        }
+    ),
+): WrappedProducerClient<RT, Covered, Validators, Params> {
   const {
     cache,
     collapseOverlappingRequestsTime = 3,
     onCacheReadFailure = "call-producer",
     logger = defaultLoggersByComponent["wrap-producer"],
   } = options;
-
-  // SAFETY: see LooseProducer.
-  const looseProducer = producer as unknown as LooseProducer<
-    RT,
-    Validators,
-    Params
-  >;
-
+  const single = options.produce;
+  const bulk = options.produceMany;
+  if (
+    (typeof single === "function") === (typeof bulk === "function") ||
+    (single !== undefined && typeof single !== "function") ||
+    (bulk !== undefined && typeof bulk !== "function")
+  ) {
+    throw new CacheContractError(
+      "wrapProducer requires exactly one of produce or produceMany",
+    );
+  }
+  if (
+    options.producerBatching !== undefined &&
+    (options.producerBatching === null ||
+      typeof options.producerBatching !== "object")
+  ) {
+    throw new CacheContractError("producerBatching must be a settings object");
+  }
+  const producer = single ?? bulk!;
   const covered = coveredTypeSet(producer);
-
-  const logTrace = logger.bind(null, "wrap-producer", "trace");
-  const logWarning = logger.bind(null, "wrap-producer", "warn");
-
-  type LooseRequest = LooseRequestFor<RT, Params>;
-  type LooseResult = LooseResultFor<RT, Validators, Params>;
-  type LooseEntry = LooseEntryFor<RT, Validators, Params>;
-  type LooseLookupResult = LooseLookupResultFor<RT, Validators, Params>;
-
+  type Request = LooseRequestFor<RT, Params>;
+  type Result = LooseResultFor<RT, Validators, Params>;
+  type ResultEntry = LooseEntryFor<RT, Validators, Params>;
+  type Lookup = LooseLookupResultFor<RT, Validators, Params>;
+  type Produced = { entry: ResultEntry; stored: Promise<void> };
+  type Work = { request: Request; resourceType: string };
+  // Classification and coverage checks prove this erasure before dispatch.
+  const produceOne = single as
+    | LooseProducer<RT, Validators, Params>
+    | undefined;
+  const produceMany = bulk as
+    | LooseBulkProducer<RT, Validators, Params, Error>
+    | undefined;
   const normalizeVaryBound = (vary: Vary<Params>) =>
     normalizeVary(cache.normalizeParamName, cache.normalizeParamValue, vary);
-  const normalizeParamsBound = (params: LooseRequest["params"]) =>
-    normalizeParams(
-      cache.normalizeParamName,
-      cache.normalizeParamValue,
-      params,
-    );
-
-  // Entries whose cache.store() is still in flight, consulted before every
-  // cache read; see the function docs and PendingResources.
   const pendingResources = new PendingResources<SpecOf<RT>, Validators, Params>(
     normalizeVaryBound,
   );
+  const writes = new Set<Promise<void>>();
+  const calls = new Set<Promise<unknown>>();
+  const pipelines = new Set<Promise<unknown>>();
+  let closed = false;
+  let closing: Promise<void> | undefined;
 
-  const callProducerAndLog = async (req: LooseRequest) => {
-    logTrace("contacting producer", req);
-    let resp: LooseResult;
-    try {
-      resp = await looseProducer(req);
-    } catch (error: unknown) {
-      // A by-id-type producer routes ids itself and may throw a special
-      // UnroutableIdError if the id can't be classified to a covered type.
-      // However, the producer has no cache to name in its errors, so this is
-      // where the cache's name is attached.
-      rethrowUnroutableWithCacheName(cache.name, error);
-    }
-    logTrace("got response from producer", resp);
-    return resp;
-  };
-
-  // Suppose the caller is requesting a resource, and we're already in the
-  // process of requesting that resource from the producer (or storing the
-  // response), and our pending request had the same id and the same params.
-  // This can happen in practice, e.g.: a user signs in; that triggers 10 items
-  // to load to show on home screen; but each of those 10 depend on some
-  // cache-managed resource, so 10 requests hit the cache for that resource
-  // essentially at once; one will start first, and the other 9 will be in the
-  // situation of asking the cache to request data for which the same request is
-  // already pending.
-  //
-  // In a situation like the above, what are we to do? Technically, it is
-  // _posssible_ for the resource at the origin to change after the 10th request
-  // came in to the cache, but before the origin's response to the cache's first
-  // outbound request arrived. Therefore, there's an argument that the cache
-  // technically should issue a new request to the origin for each of the 10
-  // requests described in our hypothetical above.
-  //
-  // In practice, though, such behavior would risk bombarding the origin and
-  // surprising users (who, by virtue of using a cache, might only be expecting
-  // one request to the origin) for very little gain, as it's highly unlikely
-  // that the resource will change at the origin just in the window of time that
-  // the origin's response to an identical request is in transit.
-  //
-  // In other words, its not usually our job to add layers of caching that the
-  // caller didn't ask for [which is what not hitting the origin 10 times would
-  // be], but this case is special because the fact that the response hasn't
-  // finished saving to the store yet means that, even if the user _does_ want
-  // caching here (and they probably do), there's no directive they can use to
-  // request it.
-  //
-  // So, here, we decide to keep track of the in-flight requests to the origin
-  // (and their pending saves to the store), and, if there is an identical
-  // request pending that was issued less than `collapseOverlappingRequestsTime`
-  // seconds ago, we wait for and use the response of the already-pending
-  // request, rather than issuing a new one. We make
-  // `collapseOverlappingRequestsTime` configurable to placate any user worried
-  // about the miniscule risk of inconsistency from this caching.
-  //
-  // We do this using the collapsedInvocationTaskCreator utility (the
-  // metadata-carrying sibling of the public collapsedTaskCreator). That
-  // utility does track the pending tasks in memory, so this optimzation will
-  // be hindered a bit if the cache frontend is horizontally-scaled across
-  // more than one server, but that's fine. We _could_ put this data in the
-  // backing store, but that seems like it could create more race conditions?
-  // And since batching identical requests at all is an optimization, putting
-  // this in the store would probably be overkill.
-  //
-  // Finally, note is that we only collapse requests that target the same id
-  // _with the same parameters_. If we didn't require the params to match, we
-  // could get back a response to the first/pending request, only to find out
-  // that it includes a `varyKeys` value that makes it unsuitable to serve the
-  // second request (that we were trying to avoid making). So we'd have to add
-  // fallback logic to handle actually issuing the second request in that case,
-  // and that would be too much extra complexity to be worth it. We're in a
-  // similar situation with directives, which must also match -- which is also
-  // what keeps bypass (`maxAge: 0`) invocations from ever being shared with
-  // plain-miss callers.
-  //
-  // No signal reaches the producer (`CoveringProducer` takes no options
-  // parameter at all), because the
-  // task may be shared with other callers who haven't aborted. It always
-  // fires a (non-awaited) cache.store() after the producer resolves. This is
-  // critical for the abort-signal design: since collapsed producer calls
-  // don't receive a signal and can't be cancelled by individual callers, we
-  // rely on the fact that the producer's work always flows into the cache --
-  // ensuring it isn't wasted even when the caller that triggered it has
-  // aborted.
-  //
-  // Because the store is not awaited, the collapse map alone leaves a window
-  // -- from the producer resolving until the write lands -- in which an
-  // identical call would read the store, miss, and run the producer again.
-  // The entries handed to cache.store() are therefore also held in
-  // `pendingResources` until that store call settles (see PendingResources), and
-  // the wrapped function consults that overlay before reading the store.
-  //
-  // It also publishes the invocation's `produce` diagnostics message when the
-  // producer settles (one message per actual invocation; collapsed callers
-  // share one).
-  const collapsedCallProducerAndStore = collapsedInvocationTaskCreator(
-    async (
-      invocation: CollapsedInvocation,
-      req: LooseRequest,
-      resourceType: string,
-    ) => {
-      const start = performance.now();
-      let requestPairedResult: LooseResult;
-
-      const publishProduce = (outcome: "success" | "error") => {
-        // `publish` would discard the message, but not before the argument was
-        // built -- so the test has to be here, not left to the channel. Same
-        // reasoning as the bulk wrapper and `Cache.store`.
-        if (!cacheProduceChannel.hasSubscribers) {
-          return;
+  const scheduler = createProducerScheduler<Work, Produced>({
+    bulk: bulk !== undefined,
+    ...options.producerBatching,
+    collapseTasksMs: collapseOverlappingRequestsTime * 1000,
+    key: ({ request }) => {
+      try {
+        return stableStringify({
+          ...request,
+          params: normalizeParams(
+            cache.normalizeParamName,
+            cache.normalizeParamValue,
+            request.params,
+          ),
+        });
+      } catch {
+        // Failed normalization cannot prove compatibility. Preserve production
+        // with original parameters, but do not share this request's work.
+        return undefined;
+      }
+    },
+    retain: ({ request }) => {
+      if (
+        producerRequestLease in producer &&
+        typeof producer[producerRequestLease] === "function"
+      ) {
+        return producer[producerRequestLease](request.id);
+      }
+      return () => {};
+    },
+    dispatch: async (tasks) => {
+      const startedAt = performance.now();
+      let results: readonly (Result | Error)[];
+      const common = {
+        operation:
+          bulk === undefined ? ("produce" as const) : ("produceMany" as const),
+        automatic: tasks[0]!.automatic,
+        requestCount: tasks.length,
+        queueWaitTotalMs: tasks.reduce(
+          (sum, task) => sum + task.queueWaitMs,
+          0,
+        ),
+        trigger: tasks.every((task) => task.trigger === tasks[0]!.trigger)
+          ? tasks[0]!.trigger
+          : ("mixed" as const),
+      };
+      try {
+        results =
+          produceMany !== undefined
+            ? await produceMany(tasks.map(({ request }) => request.request))
+            : [await produceOne!(tasks[0]!.request.request)];
+        const definedCount = Array.isArray(results)
+          ? Array.from(results).filter(
+              (result) => result !== undefined && result !== null,
+            ).length
+          : 0;
+        if (
+          !Array.isArray(results) ||
+          results.length !== tasks.length ||
+          definedCount !== tasks.length
+        ) {
+          throw new CacheContractError(
+            `producer returned ${String(definedCount)} results for ${String(tasks.length)} requests`,
+          );
         }
+        const contractFailure = results.find(
+          (result) => result instanceof CacheContractError,
+        );
+        if (contractFailure instanceof CacheContractError)
+          throw contractFailure;
+      } catch (error) {
+        if (cacheProduceChannel.hasSubscribers)
+          publishCacheProduce({
+            cache: cache.name,
+            ...common,
+            requests: tasks.map(({ request }) => ({
+              resourceType: request.resourceType,
+              resourceId: request.request.id,
+            })),
+            collapsedCallerCount: new Set(
+              tasks.flatMap((task) => [...task.attachedCallers()]),
+            ).size,
+            operationFailed: true,
+            failedRequestCount: tasks.length,
+            outcome: "error",
+            durationMs: performance.now() - startedAt,
+          });
+        rethrowUnroutableWithCacheName(cache.name, error);
+      }
+      if (cacheProduceChannel.hasSubscribers)
         publishCacheProduce({
           cache: cache.name,
-          trigger: invocation.trigger,
-          requests: [{ resourceType, resourceId: req.id }],
-          collapsedCallerCount: invocation.attachedCallerCount(),
-          outcome,
-          durationMs: performance.now() - start,
+          ...common,
+          requests: tasks.map(({ request }) => ({
+            resourceType: request.resourceType,
+            resourceId: request.request.id,
+          })),
+          collapsedCallerCount: new Set(
+            tasks.flatMap((task) => [...task.attachedCallers()]),
+          ).size,
+          operationFailed: false,
+          failedRequestCount: results.filter(
+            (result) => result instanceof Error,
+          ).length,
+          outcome: "success",
+          durationMs: performance.now() - startedAt,
         });
-      };
-
-      try {
-        requestPairedResult = await callProducerAndLog(req);
-      } catch (error) {
-        publishProduce("error");
-        throw error;
-      }
-      publishProduce("success");
-
-      logTrace(`attempting to store response.`);
-      // Share one fallback date with the actual write and any later pending
-      // lookup. Lazy normalization must not reset the resource's age.
+      // One physical write retains batching for a producer invocation's resources.
       const now = new Date();
-      const resources = requestPairedProducerResultToResources(
-        requestPairedResult,
-        req.id,
-      ).map((resource) => ({ ...resource, date: resource.date ?? now }));
-      const stored = Promise.try(() => cache.store(resources)).then(() => {
-        logTrace(`successfully stored producer's response`);
-      });
-      void stored.catch((error: unknown) => {
-        logTrace(`error storing producer's response`, error);
-      });
-
-      pendingResources.track(resources, stored, now);
-
-      return { result: requestPairedResult, stored };
-    },
-    collapseOverlappingRequestsTime * 1000,
-    // The key covers the full request (id, params, directives) but not the
-    // resourceType arg, which is derived from the id and so adds nothing.
-    ([req]) => stableStringify(req),
-  );
-
-  const wrappedProducer = async function (
-    req: PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>,
-    callOptions?: { signal?: AbortSignal; onStore?: OnStore },
-  ): Promise<LooseEntry> {
-    const signal = callOptions?.signal;
-
-    const finalRequest = completeRequest(req) as LooseRequest;
-    const { id, params, directives } = finalRequest;
-
-    // Classify once per request: the result dispatches to the producer AND
-    // stamps `resourceType` on the fetch/produce messages, so dispatch and
-    // telemetry cannot disagree. Classification errors propagate (they're
-    // contract violations, not dispositions -- no fetch message).
-    const resourceType = cache.classify(id);
-
-    // A classified type outside this wrapper's DECLARED coverage throws BEFORE
-    // any cache read (see NoProducerForResourceTypeError's docs). Skipped
-    // entirely for a bare producer, which declares no covered set because it
-    // covers the whole registry.
-    assertResourceTypeCovered(cache.name, covered, resourceType, id);
-
-    const publishFetch = (
-      collapsed: boolean,
-      disposition: CacheFetchDisposition,
-    ) => {
-      publishCacheFetch({
-        cache: cache.name,
-        resourceType,
-        resourceId: id,
-        collapsed,
-        ...disposition,
-      });
-    };
-
-    const directivesImpliedBypass = isRequestingCacheBypass(directives);
-
-    // Every abort-caused rejection settles the logical request as `aborted`.
-    const throwAborted = (collapsed: boolean): never => {
-      publishFetch(collapsed, {
-        disposition: "aborted",
-        directivesImpliedBypass,
-      });
-      throwUnreachableAbort(signal);
-    };
-
-    if (signal?.aborted) {
-      throwAborted(false);
-    }
-
-    // This call retains the selected entries' write promises even after the
-    // shared overlay removes its records, so onStore can observe those writes.
-    const storePromisesByEntry = new Map<LooseEntry, Promise<void>>();
-    const lookupPending = (): LooseLookupResult => {
-      // Bypass calls return before this lookup runs. Closed caches and absent
-      // IDs contribute no pending candidates to the combined lookup.
-      if (cache.closed || !pendingResources.has(id)) return { validatable: [] };
-      const entries = pendingResources.matching(
-        id,
-        normalizeParamsBound(params),
-      );
-      entries.forEach(({ entry, stored }) =>
-        storePromisesByEntry.set(entry, stored),
-      );
-      return classifyCacheEntries(
-        entries.map(({ entry }) => entry),
-        directives,
-        new Date(),
-      ).result;
-    };
-    const storePromisesForEntry = (entry: LooseEntry): Promise<void>[] => {
-      const stored = storePromisesByEntry.get(entry);
-      return stored === undefined ? [] : [stored];
-    };
-
-    // Awaits an in-flight producer invocation on behalf of this caller:
-    // races the caller's wait against its signal, settles the fetch message,
-    // and applies the caller's own usableIfError fallback on producer error.
-    const settleOnProducer = async (
-      attached: {
-        promise: Promise<{ result: LooseResult; stored: Promise<void> }>;
-        rode: boolean;
-      },
-      usableIfError: LooseEntry | undefined,
-    ): Promise<LooseEntry> => {
-      let result: LooseEntry;
-      try {
-        result = await raceWithSignal(
-          attached.promise.then(({ result: it }) =>
+      const prepared = results.map((result, index) => {
+        if (result instanceof Error) return result;
+        const id = tasks[index]!.request.request.id;
+        try {
+          const resources = requestPairedProducerResultToResources<
+            SpecOf<RT>,
+            Validators,
+            Params
+          >(result, id).map((resource) => ({
+            ...resource,
+            date: resource.date ?? now,
+          }));
+          const entry =
             primaryNormalizedResultResourceFromRequestPairedProducerResult<
               SpecOf<RT>,
               Validators,
               Params,
               SpecOf<RT>["id"]
-            >(normalizeVaryBound, it, id),
-          ),
-          signal,
-        );
-      } catch (error) {
-        // If the error was the signal being aborted, propagate that; don't
-        // treat it as a producer failure (or fall back to a cached
-        // usable-if-error value).
-        if (signal?.aborted) {
-          throwAborted(attached.rode);
+            >(normalizeVaryBound, result, id, now);
+          return { entry, resources };
+        } catch (error) {
+          if (error instanceof CacheContractError) throw error;
+          return asError(error);
         }
-
-        if (usableIfError) {
-          logWarning(PRODUCER_ERROR_FALLBACK_WARNING, {
-            error,
-            entry: usableIfError,
-          });
-          publishFetch(attached.rode, {
-            disposition: "served-stale-after-error",
-            vary: usableIfError.vary,
-          });
-          notifyStore(
-            storePromisesForEntry(usableIfError),
-            callOptions?.onStore,
-          );
-          return usableIfError;
-        }
-
-        publishFetch(attached.rode, {
-          disposition: "producer-error",
-          directivesImpliedBypass,
-        });
-        throw error;
-      }
-
-      publishFetch(attached.rode, {
-        disposition: "served-from-producer",
-        directivesImpliedBypass,
       });
-      if (callOptions?.onStore !== undefined) {
-        const invocation = await attached.promise;
-        notifyStore([invocation.stored], callOptions.onStore);
-      }
-      return result;
-    };
-
-    // Bypass requests skip the cache read entirely (see the function docs):
-    // no `read` message, guaranteed producer contact, result still stored,
-    // still collapsed with identical-directive peers.
-    if (directivesImpliedBypass) {
-      logTrace(
-        `request has cache-bypassing directives; skipping the cache read`,
-        { id, params },
+      const resources = prepared.flatMap((result) =>
+        result instanceof Error ? [] : result.resources,
       );
-      return settleOnProducer(
-        collapsedCallProducerAndStore("bypass", finalRequest, resourceType),
-        undefined,
+      const stored =
+        resources.length === 0
+          ? Promise.resolve()
+          : Promise.try(() => cache.store(resources)).then(() => {});
+      writes.add(stored);
+      void stored
+        .finally(() => writes.delete(stored))
+        .catch((error: unknown) =>
+          logger(
+            "wrap-producer",
+            "trace",
+            "error storing producer's response",
+            error,
+          ),
+        );
+      pendingResources.track(resources, stored, now);
+      return prepared.map((result) =>
+        result instanceof Error ? result : { entry: result.entry, stored },
+      );
+    },
+  });
+
+  const run = async (
+    requests: readonly PartialReadonlyConsumerRequest<
+      Params,
+      SpecOf<RT>["id"]
+    >[],
+    callOptions: WrappedReadOptions = {},
+    startedAt = performance.now(),
+  ): Promise<(ResultEntry | Error)[]> => {
+    const { signal } = callOptions;
+    const caller = {};
+    const batching = callOptions.autoBatch;
+    if (
+      batching !== undefined &&
+      (batching === null ||
+        typeof batching !== "object" ||
+        (batching.store !== undefined && batching.store !== false) ||
+        (batching.producer !== undefined && batching.producer !== false))
+    ) {
+      throw new CacheContractError(
+        "autoBatch accepts only { store?: false, producer?: false }",
       );
     }
-
-    logTrace(`asking the cache for a response`, { id, params });
-
-    const cacheRes = await Promise.try(async () => {
-      // Keep the pending snapshot across the read. The store can snapshot a
-      // miss before a write lands and removes its entry from the overlay.
-      const pendingLookup = lookupPending();
-      const storedLookup = await cache.get<SpecOf<RT>["id"]>(
-        finalRequest,
-        callOptions,
-      );
-      // Stored candidates precede pending candidates. The canonical selector
-      // chooses the later pending candidate when birth dates are equal.
-      return mergeCacheLookups([storedLookup, pendingLookup]);
-    }).catch((e: unknown) => {
-      // If the errror was the signal being aborted, propagate that (as an
-      // `aborted` settlement); don't assume a read failure.
-      if (signal?.aborted) {
-        throwAborted(false);
-      }
-
-      switch (onCacheReadFailure) {
-        case "throw":
-          // The request never reached a disposition: no fetch message.
-          throw e;
-        case "call-producer":
-          // Pretend the cache returned no results so that we'll fall through to
-          // the producer
+    // Classify every ID before dispatch. Contract failures never become slot errors.
+    const items = requests.map((input) => {
+      const complete = completeRequest(input) as Request;
+      const request = complete;
+      const resourceType = cache.classify(request.id);
+      assertResourceTypeCovered(cache.name, covered, resourceType, request.id);
+      const bypass = isRequestingCacheBypass(request.directives);
+      const snapshot = (() => {
+        try {
+          const pending =
+            !signal?.aborted &&
+            !bypass &&
+            !cache.closed &&
+            pendingResources.has(request.id)
+              ? pendingResources.matching(
+                  request.id,
+                  normalizeParams(
+                    cache.normalizeParamName,
+                    cache.normalizeParamValue,
+                    complete.params,
+                  ),
+                )
+              : [];
+          const pendingLookup = classifyCacheEntries(
+            pending.map(({ entry }) => entry),
+            request.directives,
+            new Date(),
+          ).result;
+          return { pending, pendingLookup, failure: undefined };
+        } catch (error) {
+          signal?.throwIfAborted();
           return {
-            validatable: [],
-          } satisfies LooseLookupResult as LooseLookupResult;
-        default:
-          assertUnreachable(onCacheReadFailure);
+            pending: [],
+            pendingLookup: { validatable: [] } satisfies Lookup,
+            failure: asError(error),
+          };
+        }
+      })();
+      return {
+        request,
+        readRequest: complete,
+        resourceType,
+        bypass,
+        ...snapshot,
+      };
+    });
+    if (signal?.aborted) {
+      items.forEach((item) =>
+        publishCacheFetch({
+          cache: cache.name,
+          resourceType: item.resourceType,
+          resourceId: item.request.id,
+          collapsed: false,
+          disposition: "aborted",
+          directivesImpliedBypass: item.bypass,
+          durationMs: performance.now() - startedAt,
+        }),
+      );
+      signal.throwIfAborted();
+    }
+    const eligible = items.filter(
+      ({ bypass, failure }) => !bypass && failure === undefined,
+    );
+    // A direct known set uses one Cache call. Automatic reads settle independently
+    // when their own Store invocation finishes, without a whole-set barrier.
+    const directReads =
+      batching?.store === false && eligible.length > 0
+        ? cache.getMany(
+            eligible.map(({ readRequest }) => readRequest),
+            { ...(signal === undefined ? {} : { signal }), autoBatch: false },
+          )
+        : undefined;
+    const readByItem = new Map(
+      eligible.map((item, index) => [
+        item,
+        directReads === undefined
+          ? cache.get(item.readRequest, signal === undefined ? {} : { signal })
+          : directReads.then((results) => {
+              const result = results[index]!;
+              if (result instanceof Error) throw result;
+              return result;
+            }),
+      ]),
+    );
+    const lookups = items.map(async (item): Promise<Lookup | Error> => {
+      if (item.bypass) return { validatable: [] };
+      try {
+        if (item.failure !== undefined) throw item.failure;
+        const stored = await readByItem.get(item)!;
+        return mergeCacheLookups([stored, item.pendingLookup]);
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (error instanceof CacheContractError) throw error;
+        return onCacheReadFailure === "throw"
+          ? asError(error)
+          : { validatable: [] };
       }
     });
-
-    const { usable, usableIfError, usableWhileRevalidate } = cacheRes;
-
-    // We have ready-to-go content from the cache, w/ no refresh required.
-    if (usable) {
-      publishFetch(false, {
-        disposition: "served-from-cache",
-        vary: usable.vary,
-      });
-      notifyStore(storePromisesForEntry(usable), callOptions?.onStore);
-      return usable;
-    }
-
-    if (signal?.aborted) {
-      throwAborted(false);
-    }
-
-    // If we're here, we either don't have usable content at all, or we have
-    // content that's only usable in the event of an origin error, or if we make
-    // a background request to revalidate it. In any case, we're gonna need to
-    // contact the origin for the result.
-    //
-    // TODO: Support validation requests and invalidation. How to do this is
-    // actually tricker than it seems. There are questions like does the
-    // validation response create a new Entry [potentially leaving the old entry
-    // still there to match on other requests], or should it update an existing
-    // one? [Does this mean entries need some notion of an id? Who generates
-    // that?] What if the existing entry has since been deleted or aged out of
-    // the store? Can the response update more than one entry? Can it update
-    // things about it beyond reseting age to zero (e.g., changing the producer
-    // directives)? Etc. For some HTTP context, see
-    // https://tools.ietf.org/html/rfc7234#section-4.3.4 For invalidation, the
-    // idea would be to somehow let request A passing through the producer
-    // trigger the invalidation of other cached results [a la a POST
-    // invalidating a GET in HTTP], but how? Call a user-provided invalidate
-    // function and pass it the just-made request, the promise for its response,
-    // and the entry store, and can delete entries made invalid by the request
-    // that just passed through?
-    //
-    // The collapsed call doesn't receive the signal directly (since the
-    // underlying task may be shared with other callers who haven't aborted).
-    // However, we race the caller's observation of the result against the
-    // signal so they can bail out immediately. The underlying producer task
-    // keeps running and its result is stored via the collapsed invocation.
-    //
-    // The trigger labels the invocation's INITIATING cause; if this call
-    // instead rides an invocation already in flight, that invocation's
-    // original trigger stands.
-    const attached = collapsedCallProducerAndStore(
-      usableWhileRevalidate ? "revalidation" : "miss",
-      finalRequest,
-      resourceType,
+    const stores: Promise<void>[][] = items.map(() => []);
+    const fetchEvents: (
+      | (CacheFetchDisposition & { collapsed: boolean })
+      | undefined
+    )[] = items.map(() => undefined);
+    type Attachment = ReturnType<typeof scheduler.attach>[number];
+    const attach = (
+      item: (typeof items)[number],
+      lookup: Lookup,
+      background: boolean,
+    ) => ({
+      request: { request: item.request, resourceType: item.resourceType },
+      trigger: item.bypass
+        ? ("bypass" as const)
+        : lookup.usableWhileRevalidate
+          ? ("revalidation" as const)
+          : ("miss" as const),
+      background,
+      caller,
+      ...(background ? {} : { signal }),
+    });
+    const directAttachments =
+      bulk !== undefined && batching?.producer === false
+        ? Promise.all(lookups).then((results) => {
+            signal?.throwIfAborted();
+            const foreground = items.flatMap((item, index) => {
+              const lookup = results[index]!;
+              return lookup instanceof Error ||
+                lookup.usable ||
+                lookup.usableWhileRevalidate
+                ? []
+                : [{ item, lookup }];
+            });
+            const attachments = scheduler.attach(
+              foreground.map(({ item, lookup }) => attach(item, lookup, false)),
+              false,
+            );
+            return new Map(
+              foreground.map(({ item }, index) => [item, attachments[index]!]),
+            );
+          })
+        : undefined;
+    // Observe an early rejected barrier while independent slot handlers settle.
+    void directAttachments?.catch(() => {});
+    const slotPipelines = items.map(
+      async (item, index): Promise<ResultEntry | Error> => {
+        let rode = false;
+        const publish = (disposition: CacheFetchDisposition) => {
+          fetchEvents[index] = { collapsed: rode, ...disposition };
+        };
+        const observeEntry = (entry: ResultEntry) => {
+          stores[index] = item.pending
+            .filter((candidate) => candidate.entry === entry)
+            .map(({ stored }) => stored);
+        };
+        try {
+          const lookup = await lookups[index]!;
+          if (lookup instanceof Error) {
+            publish({
+              disposition: "cache-read-error",
+              directivesImpliedBypass: false,
+            });
+            return lookup;
+          }
+          signal?.throwIfAborted();
+          if (lookup.usable) {
+            observeEntry(lookup.usable);
+            publish({
+              disposition: "served-from-cache",
+              vary: lookup.usable.vary,
+            });
+            return lookup.usable;
+          }
+          if (lookup.usableWhileRevalidate) {
+            // The refresh obligation survives both the stale return and later joiner cancellation.
+            const [background] = scheduler.attach(
+              [attach(item, lookup, true)],
+              batching?.producer !== false,
+            );
+            void background!.promise.catch((error: unknown) =>
+              logger(
+                "wrap-producer",
+                "warn",
+                "error asynchronously requesting refreshed content from producer",
+                error,
+              ),
+            );
+            observeEntry(lookup.usableWhileRevalidate);
+            publish({
+              disposition: "served-stale-while-revalidating",
+              vary: lookup.usableWhileRevalidate.vary,
+            });
+            return lookup.usableWhileRevalidate;
+          }
+          const attachment: Attachment =
+            directAttachments !== undefined
+              ? (await directAttachments).get(item)!
+              : scheduler.attach(
+                  [attach(item, lookup, false)],
+                  batching?.producer !== false,
+                )[0]!;
+          rode = attachment.rode;
+          try {
+            const produced = await raceWithSignal(attachment.promise, signal);
+            stores[index] = [produced.stored];
+            publish({
+              disposition: "served-from-producer",
+              directivesImpliedBypass: item.bypass,
+            });
+            return produced.entry;
+          } catch (error) {
+            signal?.throwIfAborted();
+            if (error instanceof CacheContractError) throw error;
+            if (lookup.usableIfError) {
+              logger("wrap-producer", "warn", PRODUCER_ERROR_FALLBACK_WARNING, {
+                error,
+                entry: lookup.usableIfError,
+              });
+              observeEntry(lookup.usableIfError);
+              publish({
+                disposition: "served-stale-after-error",
+                vary: lookup.usableIfError.vary,
+              });
+              return lookup.usableIfError;
+            }
+            publish({
+              disposition: "producer-error",
+              directivesImpliedBypass: item.bypass,
+            });
+            return asError(error);
+          }
+        } catch (error) {
+          if (signal?.aborted) {
+            publish({
+              disposition: "aborted",
+              directivesImpliedBypass: item.bypass,
+            });
+            signal.throwIfAborted();
+          }
+          throw error;
+        }
+      },
     );
-
-    if (usableWhileRevalidate) {
-      // swallow error rather than crash.
-      attached.promise.catch(() => {
-        logWarning(
-          "error asynchronously requesting refreshed content from producer",
-          { id, params, directives },
+    slotPipelines.forEach((pipeline) => {
+      pipelines.add(pipeline);
+      void pipeline.finally(() => pipelines.delete(pipeline)).catch(() => {});
+    });
+    const results = await Promise.all(slotPipelines).catch((error: unknown) => {
+      if (signal?.aborted)
+        items.forEach((item, index) =>
+          publishCacheFetch({
+            cache: cache.name,
+            resourceType: item.resourceType,
+            resourceId: item.request.id,
+            collapsed: fetchEvents[index]?.collapsed ?? false,
+            disposition: "aborted",
+            directivesImpliedBypass: item.bypass,
+            durationMs: performance.now() - startedAt,
+          }),
         );
-      });
-      publishFetch(false, {
-        disposition: "served-stale-while-revalidating",
-        vary: usableWhileRevalidate.vary,
-      });
-      notifyStore(
-        storePromisesForEntry(usableWhileRevalidate),
-        callOptions?.onStore,
-      );
-      return usableWhileRevalidate;
-    }
-
-    return settleOnProducer(attached, usableIfError);
+      throw error;
+    });
+    signal?.throwIfAborted();
+    items.forEach((item, index) => {
+      const event = fetchEvents[index];
+      if (event !== undefined)
+        publishCacheFetch({
+          cache: cache.name,
+          resourceType: item.resourceType,
+          resourceId: item.request.id,
+          ...event,
+          durationMs: performance.now() - startedAt,
+        });
+    });
+    notifyStore(stores.flat(), callOptions.onStore);
+    return results;
   };
 
-  // SAFETY: the runtime function is id-erased internally (see LooseProducer),
-  // but every path upholds the per-id contract the signature promises: the
-  // cache read narrows by id, and the producer's request-paired result is
-  // stamped with the request's own id.
-  return wrappedProducer as unknown as WrappedProducerFn<
-    RT,
-    Covered,
-    Validators,
-    Params
-  >;
+  const getMany = (
+    requests: readonly PartialReadonlyConsumerRequest<
+      Params,
+      SpecOf<RT>["id"]
+    >[],
+    callOptions?: WrappedReadOptions,
+  ) => {
+    if (closed)
+      return Promise.reject(
+        new CacheContractError("Producer wrapper is closed"),
+      );
+    // Register admission before user hooks or producer callbacks can close the client.
+    const startedAt =
+      callOptions !== undefined &&
+      wrappedReadStartedAt in callOptions &&
+      typeof callOptions[wrappedReadStartedAt] === "number"
+        ? callOptions[wrappedReadStartedAt]
+        : performance.now();
+    const promise = Promise.resolve().then(() =>
+      run(requests, callOptions, startedAt),
+    );
+    calls.add(promise);
+    void promise.finally(() => calls.delete(promise)).catch(() => {});
+    return promise;
+  };
+  return {
+    get: async (request, callOptions) => {
+      let stored: Promise<void> | undefined;
+      const [result] = await getMany([request], {
+        ...callOptions,
+        onStore: (promise) => {
+          stored = promise;
+        },
+      });
+      if (result instanceof Error) throw result;
+      if (stored !== undefined) callOptions?.onStore?.(stored);
+      return result!;
+    },
+    getMany,
+    close: () => {
+      if (closing) return closing;
+      closed = true;
+      scheduler.flush();
+      closing = (async () => {
+        await Promise.allSettled(calls);
+        await Promise.allSettled(pipelines);
+        await scheduler.drain();
+        await Promise.allSettled(writes);
+      })();
+      return closing;
+    },
+  } as WrappedProducerClient<RT, Covered, Validators, Params>;
 }
 
 export function isRequestingCacheBypass(

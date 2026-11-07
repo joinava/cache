@@ -1,3 +1,4 @@
+import { getOne } from "../utils/utils.js";
 import { isEqual } from "es-toolkit";
 import fc from "fast-check";
 import assert from "node:assert/strict";
@@ -77,27 +78,33 @@ function relationshipsOf(
 
 describe("Store change-detection conformance", () => {
   describe("MemoryStore", () => {
-    defineChangeDetectionConformance(async () => {
-      const store = new MemoryStore<TestSpec, AnyValidators, TestParams>();
-      return { store, cleanup: async () => store.close() };
-    }, { entriesExpire: true });
+    defineChangeDetectionConformance(
+      async () => {
+        const store = new MemoryStore<TestSpec, AnyValidators, TestParams>();
+        return { store, cleanup: async () => store.close() };
+      },
+      { entriesExpire: true },
+    );
   });
 
   describe("SqliteStore", () => {
-    defineChangeDetectionConformance(async () => {
-      const directory = await mkdtemp(join(tmpdir(), "cache-sqlite-cd-"));
-      const store = new SqliteStore<TestSpec, AnyValidators, TestParams>({
-        databasePath: join(directory, "cache.sqlite"),
-        readWorkerCount: 2,
-      });
-      return {
-        store,
-        cleanup: async () => {
-          await store.close();
-          await rm(directory, { recursive: true, force: true });
-        },
-      };
-    }, { entriesExpire: true });
+    defineChangeDetectionConformance(
+      async () => {
+        const directory = await mkdtemp(join(tmpdir(), "cache-sqlite-cd-"));
+        const store = new SqliteStore<TestSpec, AnyValidators, TestParams>({
+          databasePath: join(directory, "cache.sqlite"),
+          readWorkerCount: 2,
+        });
+        return {
+          store,
+          cleanup: async () => {
+            await store.close();
+            await rm(directory, { recursive: true, force: true });
+          },
+        };
+      },
+      { entriesExpire: true },
+    );
   });
 
   describe(
@@ -134,7 +141,10 @@ describe("Store change-detection conformance", () => {
       }
     }
     assert.ok(seen.has("is-new"), "generator never produced an is-new case");
-    assert.ok(seen.has("unchanged"), "generator never produced an unchanged case");
+    assert.ok(
+      seen.has("unchanged"),
+      "generator never produced an unchanged case",
+    );
     assert.ok(seen.has("changed"), "generator never produced a changed case");
     assert.ok(
       seen.has("undefined"),
@@ -494,7 +504,7 @@ function defineChangeDetectionConformance(
       ]);
       assert.equal(relationshipsOf(storeA2)[0], "changed");
 
-      const stored = await store.get("id", matchingParams);
+      const stored = await getOne(store, { id: "id", params: matchingParams });
       assert.equal(stored.length, 1);
       assert.deepEqual(stored[0]?.validators, validatorsA);
     });
@@ -609,7 +619,7 @@ function defineChangeDetectionConformance(
       assert.deepEqual(rels, ["unchanged", undefined]);
 
       // The winner is what actually persisted, even though it came FIRST.
-      const stored = await store.get("id", matchingParams);
+      const stored = await getOne(store, { id: "id", params: matchingParams });
       assert.equal(stored.length, 1);
       assert.deepEqual(stored[0]?.validators, validatorsA);
       assert.equal(stored[0]?.content.value, "winner");
@@ -760,15 +770,13 @@ function makeOracle() {
   const stored = new Map<number, AnyValidators>();
   return {
     expectAndApply(call: OracleCall): (StoreEntryRelationship | undefined)[] {
-      const expected = call.map(
-        (op): StoreEntryRelationship | undefined => {
-          if (Object.keys(op.validators).length === 0) return undefined;
-          if (!stored.has(op.slotIdx)) return "is-new";
-          return isEqual(stored.get(op.slotIdx), op.validators)
-            ? "unchanged"
-            : "changed";
-        },
-      );
+      const expected = call.map((op): StoreEntryRelationship | undefined => {
+        if (Object.keys(op.validators).length === 0) return undefined;
+        if (!stored.has(op.slotIdx)) return "is-new";
+        return isEqual(stored.get(op.slotIdx), op.validators)
+          ? "unchanged"
+          : "changed";
+      });
       // Storing any entry (even empty-validators) occupies the slot, so the
       // next store to that slot compares against it rather than seeing is-new.
       for (const op of call) stored.set(op.slotIdx, op.validators);

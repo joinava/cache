@@ -21,8 +21,7 @@ import {
   type SpecOf,
 } from "../index.js";
 import type { NormalizedProducerResult } from "../types/06_Normalization.js";
-import { type mapTuple } from "./utils.js";
-import { wrapBulkProducer } from "./wrapBulkProducer.js";
+import { throwIfAnyError, type mapTuple } from "./utils.js";
 
 // The wrapper takes ONE producer function over a required registry, and a bare
 // function covers the whole registry. This suite's behavior is
@@ -44,14 +43,13 @@ const testCacheOptions = {
 // on writes), so the factory hands back both. Instantiated at a concrete
 // registry, which is why it needs no cast -- see the note in
 // test/v2AcceptanceHelpers.ts.
-const makeTestStoreAndCache = (batchReads?: false) => {
+const makeTestStoreAndCache = () => {
   const store = new MemoryStore<SpecOf<typeof testRegistry>>();
   return {
     store,
     cache: new Cache({
       store,
       ...testCacheOptions,
-      batchReads: batchReads ?? {},
     }),
   };
 };
@@ -69,19 +67,21 @@ describe("wrapBulkProducer", () => {
               const producer = mock.fn(function (_) {
                 throw new Error("not called");
               });
-              const wrappedProducer = wrapProducer(
-                { cache, collapseOverlappingRequestsTime: 0 },
-                producer,
-              );
-              const wrappedBulkProducer = wrapBulkProducer(
-                { cache, collapseOverlappingRequestsTime: 0 },
-                producer,
-              );
+              const wrappedProducer = wrapProducer({
+                cache,
+                collapseOverlappingRequestsTime: 0,
+                produce: producer,
+              });
+              const wrappedBulkProducer = wrapProducer({
+                cache,
+                collapseOverlappingRequestsTime: 0,
+                produceMany: producer,
+              });
 
               const request = { id: entry.id, directives: consumerDirs };
               const [result, bulkResult] = await Promise.all([
-                wrappedProducer(request),
-                wrappedBulkProducer([request]),
+                wrappedProducer.get(request),
+                wrappedBulkProducer.getMany([request]),
               ]);
 
               assert.deepEqual(result, bulkResult[0]);
@@ -109,7 +109,7 @@ describe("wrapBulkProducer", () => {
           fc.asyncProperty(
             UsableWhileRevalidateEntryArb,
             async ({ entry, consumerDirs }) => {
-              const { store, cache } = makeTestStoreAndCache(false);
+              const { store, cache } = makeTestStoreAndCache();
               const storeMock = mock.method(store, "store");
               try {
                 await store.store([{ entry, maxStoreForSeconds: 100 }]);
@@ -118,24 +118,29 @@ describe("wrapBulkProducer", () => {
                 const singleProducer = mock.fn(producerBase);
                 const bulkProducer = mock.fn(bulkProducerBase);
 
-                const wrappedProducer = wrapProducer({ cache }, singleProducer);
-                const wrappedBulkProducer = wrapBulkProducer(
-                  { cache },
-                  bulkProducer,
-                );
+                const wrappedProducer = wrapProducer({
+                  cache,
+                  produce: singleProducer,
+                });
+                const wrappedBulkProducer = wrapProducer({
+                  cache,
+                  produceMany: bulkProducer,
+                });
 
                 const request = { id: entry.id, directives: consumerDirs };
                 const [result, bulkResult] = await Promise.all([
-                  wrappedProducer(request),
-                  wrappedBulkProducer([request]),
+                  wrappedProducer.get(request),
+                  wrappedBulkProducer.getMany([request]),
                 ]);
 
                 assertResultsApproximatelyEqual(result, bulkResult[0]);
                 assert.equal(result.content, entry.content);
+                await Promise.all([
+                  wrappedProducer.close(),
+                  wrappedBulkProducer.close(),
+                ]);
                 assert.equal(singleProducer.mock.callCount(), 1);
                 assert.equal(bulkProducer.mock.callCount(), 1);
-
-                await delay(10);
                 assert.equal(storeMock.mock.callCount(), 2);
               } finally {
                 await cache.close();
@@ -171,24 +176,29 @@ describe("wrapBulkProducer", () => {
                   },
                 );
 
-                const wrappedProducer = wrapProducer({ cache }, singleProducer);
-                const wrappedBulkProducer = wrapBulkProducer(
-                  { cache },
-                  bulkProducer,
-                );
+                const wrappedProducer = wrapProducer({
+                  cache,
+                  produce: singleProducer,
+                });
+                const wrappedBulkProducer = wrapProducer({
+                  cache,
+                  produceMany: bulkProducer,
+                });
 
                 const request = { id: entry.id, directives: consumerDirs };
                 const [result, bulkResult] = await Promise.all([
-                  wrappedProducer(request),
-                  wrappedBulkProducer([request]),
+                  wrappedProducer.get(request),
+                  wrappedBulkProducer.getMany([request]),
                 ]);
 
                 assertResultsApproximatelyEqual(result, bulkResult[0]);
                 assert.equal(result.content, entry.content);
+                await Promise.all([
+                  wrappedProducer.close(),
+                  wrappedBulkProducer.close(),
+                ]);
                 assert.equal(singleProducer.mock.callCount(), 1);
                 assert.equal(bulkProducer.mock.callCount(), 1);
-
-                await delay(10);
                 assert.equal(storeMock.mock.callCount(), 0);
               } finally {
                 await cache.close();
@@ -211,7 +221,7 @@ describe("wrapBulkProducer", () => {
             UnusableEntryArb,
             fc.boolean(),
             async ({ entry, consumerDirs }, shouldStoreEntry) => {
-              const { store, cache } = makeTestStoreAndCache(false);
+              const { store, cache } = makeTestStoreAndCache();
               try {
                 if (shouldStoreEntry) {
                   await store.store([{ entry, maxStoreForSeconds: 100 }]);
@@ -220,16 +230,19 @@ describe("wrapBulkProducer", () => {
                 const singleProducer = mock.fn(producerBase);
                 const bulkProducer = mock.fn(bulkProducerBase);
 
-                const wrappedProducer = wrapProducer({ cache }, singleProducer);
-                const wrappedBulkProducer = wrapBulkProducer(
-                  { cache },
-                  bulkProducer,
-                );
+                const wrappedProducer = wrapProducer({
+                  cache,
+                  produce: singleProducer,
+                });
+                const wrappedBulkProducer = wrapProducer({
+                  cache,
+                  produceMany: bulkProducer,
+                });
 
                 const request = { id: entry.id, directives: consumerDirs };
                 const [result, bulkResult] = await Promise.all([
-                  wrappedProducer(request),
-                  wrappedBulkProducer([request]),
+                  wrappedProducer.get(request),
+                  wrappedBulkProducer.getMany([request]),
                 ]);
 
                 assertResultsApproximatelyEqual(result, bulkResult[0]);
@@ -351,12 +364,12 @@ describe("wrapBulkProducer", () => {
                 }),
               );
 
-              const wrappedBulkProducer = wrapBulkProducer(
-                { cache },
-                bulkProducer,
-              );
+              const wrappedBulkProducer = wrapProducer({
+                cache,
+                produceMany: bulkProducer,
+              });
 
-              const results = await wrappedBulkProducer(
+              const results = await wrappedBulkProducer.getMany(
                 storableGeneratedData
                   .concat(Unstored)
                   .map(({ entry, consumerDirs }) => ({
@@ -404,51 +417,13 @@ describe("wrapBulkProducer", () => {
                 }
               }
 
-              const producerWontError = (it: { entry: { id: string } }) =>
-                !shouldError(it.entry.id);
-
-              // A request whose directives imply a cache bypass (`maxAge: 0`)
-              // never reaches the cache read at all, so it joins neither the
-              // miss nor the revalidation group: it gets its OWN collapsed
-              // invocation, fired before the read, with its own `cache.store()`.
-              // So a batch can produce THREE store calls, not two -- see the
-              // COLLAPSE GRANULARITY note in wrapBulkProducer.ts.
-              //
-              // Only `UnusableEntryArb` ever generates `maxAge: 0` (with it, any
-              // entry of positive age classifies as Unusable), so this partition
-              // is what makes the count right for ~0.4% of generated entries.
-              // Folding bypass into the miss group instead was a genuine bug: it
-              // coincidentally agreed whenever bypass was the ONLY storing
-              // group, and disagreed otherwise (~5% of property runs).
-              const impliesBypass = (it: {
-                consumerDirs: { maxAge?: number | undefined };
-              }) => it.consumerDirs.maxAge === 0;
-
-              const allItems = [
-                ...Usable,
-                ...UsableWhileRevalidate,
-                ...UsableIfError,
-                ...Unusable,
-                ...Unstored,
-              ];
-              const bypassGroup = allItems.filter(impliesBypass);
-              const missGroup = [
-                ...Unstored,
-                ...Unusable,
-                ...UsableIfError,
-              ].filter((it) => !impliesBypass(it));
-              const revalidationGroup = UsableWhileRevalidate.filter(
-                (it) => !impliesBypass(it),
-              );
-
-              const expectedStoreCalls =
-                (bypassGroup.filter(producerWontError).length > 0 ? 1 : 0) +
-                (missGroup.filter(producerWontError).length > 0 ? 1 : 0) +
-                (revalidationGroup.filter(producerWontError).length > 0
-                  ? 1
-                  : 0);
-
-              await delay(10);
+              // Automatic batches can combine readiness classes and split at 20.
+              // Every invocation with successful resources writes those resources once.
+              await wrappedBulkProducer.close();
+              const expectedStoreCalls = bulkProducer.mock.calls.filter(
+                ({ arguments: [requests] }) =>
+                  requests.some(({ id }) => !shouldError(id)),
+              ).length;
               assert.equal(storeMock.mock.callCount(), expectedStoreCalls);
             } finally {
               await cache.close();
@@ -515,13 +490,14 @@ describe("wrapBulkProducer", () => {
               );
 
               // Create wrapped bulk producer
-              const wrappedBulk = wrapBulkProducer(
-                { cache, collapseOverlappingRequestsTime: 0 },
-                bulkProducer,
-              );
+              const wrappedBulk = wrapProducer({
+                cache,
+                collapseOverlappingRequestsTime: 0,
+                produceMany: bulkProducer,
+              });
 
               // Call wrapBulkProducer with the requests
-              const bulkResults = await wrappedBulk(requests);
+              const bulkResults = await wrappedBulk.getMany(requests);
 
               // Verify results are in the correct order
               assert.equal(bulkResults.length, requests.length);
@@ -560,11 +536,14 @@ describe("wrapBulkProducer", () => {
           },
         ],
       );
-      const wrappedBulkProducer = wrapBulkProducer({ cache }, bulkProducer);
+      const wrappedBulkProducer = wrapProducer({
+        cache,
+        produceMany: bulkProducer,
+      });
 
       try {
         await assert.rejects(
-          async () => wrappedBulkProducer([{ id: "a" }, { id: "b" }]),
+          async () => wrappedBulkProducer.getMany([{ id: "a" }, { id: "b" }]),
           /producer returned 3 results for 2 requests/,
         );
         // Not even the two results that DO have requests are kept: the whole
@@ -588,11 +567,14 @@ describe("wrapBulkProducer", () => {
         { content: "ok-a", directives: { freshUntilAge: 100 } },
         undefined as never,
       ]);
-      const wrappedBulkProducer = wrapBulkProducer({ cache }, bulkProducer);
+      const wrappedBulkProducer = wrapProducer({
+        cache,
+        produceMany: bulkProducer,
+      });
 
       try {
         await assert.rejects(
-          async () => wrappedBulkProducer([{ id: "a" }, { id: "b" }]),
+          async () => wrappedBulkProducer.getMany([{ id: "a" }, { id: "b" }]),
           /producer returned 1 results for 2 requests/,
         );
         assert.equal(storeMock.mock.callCount(), 0);
@@ -619,13 +601,20 @@ describe("wrapBulkProducer", () => {
 
           const bulkProducer = mock.fn(bulkProducerFromProducer(producer));
 
-          const wrappedBulkProducer = wrapBulkProducer(
-            { cache, onCacheReadFailure: "throw" },
-            bulkProducer,
-          );
+          const wrappedBulkProducer = wrapProducer({
+            cache,
+            onCacheReadFailure: "throw",
+            produceMany: bulkProducer,
+          });
 
           await assert.rejects(
-            async () => wrappedBulkProducer([{ id: "test1" }, { id: "test2" }]),
+            async () =>
+              throwIfAnyError(
+                await wrappedBulkProducer.getMany([
+                  { id: "test1" },
+                  { id: "test2" },
+                ]),
+              ),
             /Cache read error/,
           );
 
@@ -654,12 +643,13 @@ describe("wrapBulkProducer", () => {
 
           const bulkProducer = mock.fn(bulkProducerFromProducer(producer));
 
-          const wrappedBulkProducer = wrapBulkProducer(
-            { cache, onCacheReadFailure: "call-producer" },
-            bulkProducer,
-          );
+          const wrappedBulkProducer = wrapProducer({
+            cache,
+            onCacheReadFailure: "call-producer",
+            produceMany: bulkProducer,
+          });
 
-          const _results = await wrappedBulkProducer([
+          const _results = await wrappedBulkProducer.getMany([
             { id: "test1" },
             { id: "test2" },
           ]);
@@ -699,16 +689,17 @@ describe("wrapBulkProducer", () => {
 
           const bulkProducer = mock.fn(bulkProducerFromProducer(producer));
 
-          const wrappedBulkProducer = wrapBulkProducer(
-            { cache, collapseOverlappingRequestsTime: 1 }, // 1 second window
-            bulkProducer,
-          );
+          const wrappedBulkProducer = wrapProducer({
+            cache,
+            collapseOverlappingRequestsTime: 1,
+            produceMany: bulkProducer,
+          });
 
           // Make multiple overlapping requests for the same resources
           const resultSets = await Promise.all([
-            wrappedBulkProducer([{ id: "a" }, { id: "b" }]),
-            wrappedBulkProducer([{ id: "a" }, { id: "b" }]),
-            wrappedBulkProducer([{ id: "a" }, { id: "b" }]),
+            wrappedBulkProducer.getMany([{ id: "a" }, { id: "b" }]),
+            wrappedBulkProducer.getMany([{ id: "a" }, { id: "b" }]),
+            wrappedBulkProducer.getMany([{ id: "a" }, { id: "b" }]),
           ]);
 
           const [results1, results2, results3] = resultSets as ReturnType<
@@ -746,15 +737,16 @@ describe("wrapBulkProducer", () => {
 
           const bulkProducer = mock.fn(bulkProducerFromProducer(producer));
 
-          const wrappedBulkProducer = wrapBulkProducer(
-            { cache, collapseOverlappingRequestsTime: 0.05 }, // 50ms window
-            bulkProducer,
-          );
+          const wrappedBulkProducer = wrapProducer({
+            cache,
+            collapseOverlappingRequestsTime: 0.05,
+            produceMany: bulkProducer,
+          });
 
           // Make requests with delay between them
-          const results1 = await wrappedBulkProducer([{ id: "a" }]);
+          const results1 = await wrappedBulkProducer.getMany([{ id: "a" }]);
           await delay(100); // Wait longer than collapse window
-          const results2 = await wrappedBulkProducer([{ id: "a" }]);
+          const results2 = await wrappedBulkProducer.getMany([{ id: "a" }]);
 
           // Results should be different (from different producer calls)
           assert.notEqual(
@@ -795,10 +787,13 @@ describe("wrapBulkProducer", () => {
             },
           );
 
-          const wrappedBulkProducer = wrapBulkProducer({ cache }, bulkProducer);
+          const wrappedBulkProducer = wrapProducer({
+            cache,
+            produceMany: bulkProducer,
+          });
 
           // Request main resources
-          const results = await wrappedBulkProducer([
+          const results = await wrappedBulkProducer.getMany([
             { id: "res1" },
             { id: "res2" },
           ]);
@@ -816,7 +811,7 @@ describe("wrapBulkProducer", () => {
           await writes.mock.calls[0]!.result;
 
           // Now request the supplemental resources - they should be cached
-          const suppResults = await wrappedBulkProducer([
+          const suppResults = await wrappedBulkProducer.getMany([
             { id: "supp-res1" },
             { id: "supp-res2" },
           ]);
@@ -851,14 +846,14 @@ describe("wrapBulkProducer", () => {
           })),
         );
 
-        const wrappedBulk = wrapBulkProducer({ cache }, producer);
+        const wrappedBulk = wrapProducer({ cache, produceMany: producer });
 
         const controller = new AbortController();
         controller.abort(new Error("pre-aborted"));
 
         await assert.rejects(
           async () =>
-            wrappedBulk([{ id: "a" }, { id: "b" }], {
+            wrappedBulk.getMany([{ id: "a" }, { id: "b" }], {
               signal: controller.signal,
             }),
           { message: "pre-aborted" },
@@ -889,14 +884,18 @@ describe("wrapBulkProducer", () => {
           })),
         );
 
-        const wrappedBulk = wrapBulkProducer(
-          { cache, collapseOverlappingRequestsTime: 0 },
-          producer,
-        );
-
-        const resultPromise = wrappedBulk([{ id: "abort-during-read" }], {
-          signal: controller.signal,
+        const wrappedBulk = wrapProducer({
+          cache,
+          collapseOverlappingRequestsTime: 0,
+          produceMany: producer,
         });
+
+        const resultPromise = wrappedBulk.getMany(
+          [{ id: "abort-during-read" }],
+          {
+            signal: controller.signal,
+          },
+        );
 
         await delay(5);
         controller.abort(new Error("cancelled-during-read"));
@@ -939,12 +938,13 @@ describe("wrapBulkProducer", () => {
             }),
         );
 
-        const wrappedBulk = wrapBulkProducer(
-          { cache, collapseOverlappingRequestsTime: 0 },
-          slowProducer,
-        );
+        const wrappedBulk = wrapProducer({
+          cache,
+          collapseOverlappingRequestsTime: 0,
+          produceMany: slowProducer,
+        });
 
-        const resultPromise = wrappedBulk([{ id: "mid-abort" }], {
+        const resultPromise = wrappedBulk.getMany([{ id: "mid-abort" }], {
           signal: controller.signal,
         });
 
@@ -959,7 +959,7 @@ describe("wrapBulkProducer", () => {
         await delay(150);
 
         // Verify the result was still stored.
-        const results = await wrappedBulk([{ id: "mid-abort" }]);
+        const results = await wrappedBulk.getMany([{ id: "mid-abort" }]);
         const entries = results as Exclude<(typeof results)[number], Error>[];
         assert.equal(entries[0]?.content, "slow-mid-abort");
         assert.equal(slowProducer.mock.callCount(), 1);
@@ -980,13 +980,14 @@ describe("wrapBulkProducer", () => {
           })),
         );
 
-        const wrappedBulk = wrapBulkProducer(
-          { cache, collapseOverlappingRequestsTime: 0 },
-          producer,
-        );
+        const wrappedBulk = wrapProducer({
+          cache,
+          collapseOverlappingRequestsTime: 0,
+          produceMany: producer,
+        });
 
         // Populate cache
-        await wrappedBulk([{ id: "hit-a" }, { id: "hit-b" }]);
+        await wrappedBulk.getMany([{ id: "hit-a" }, { id: "hit-b" }]);
         assert.equal(producer.mock.callCount(), 1);
 
         assert.equal(writes.mock.callCount(), 1);
@@ -994,9 +995,12 @@ describe("wrapBulkProducer", () => {
 
         // Second call with signal should still get cache hits
         const controller = new AbortController();
-        const results = await wrappedBulk([{ id: "hit-a" }, { id: "hit-b" }], {
-          signal: controller.signal,
-        });
+        const results = await wrappedBulk.getMany(
+          [{ id: "hit-a" }, { id: "hit-b" }],
+          {
+            signal: controller.signal,
+          },
+        );
 
         const entries = results as Exclude<(typeof results)[number], Error>[];
         assert.equal(entries[0]?.content, "fresh-hit-a");
@@ -1025,17 +1029,20 @@ describe("wrapBulkProducer", () => {
           })),
         );
 
-        const wrappedBulk = wrapBulkProducer(
-          { cache, onCacheReadFailure: "call-producer" },
-          producer,
-        );
+        const wrappedBulk = wrapProducer({
+          cache,
+          onCacheReadFailure: "call-producer",
+          produceMany: producer,
+        });
 
         const controller = new AbortController();
         controller.abort(new Error("aborted-during-getmany"));
 
         await assert.rejects(
           async () =>
-            wrappedBulk([{ id: "test" }], { signal: controller.signal }),
+            wrappedBulk.getMany([{ id: "test" }], {
+              signal: controller.signal,
+            }),
           { message: "aborted-during-getmany" },
         );
 
@@ -1092,9 +1099,7 @@ describe("wrapBulkProducer", () => {
     }
 
     throw new Error(
-      `Data mismatch: expected ${JSON.stringify(expected)}, got ${JSON.stringify(
-        actual,
-      )}`,
+      `Data mismatch: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
     );
   }
 });

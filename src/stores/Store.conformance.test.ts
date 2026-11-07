@@ -1,3 +1,4 @@
+import { getOne, throwIfAnyError, getMany } from "../utils/utils.js";
 import { sortBy } from "es-toolkit";
 import fc from "fast-check";
 import assert from "node:assert/strict";
@@ -120,8 +121,14 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       await store.store([]);
       await store.delete("missing");
 
-      assert.deepEqual(await store.get("missing", matchingParams), []);
-      assert.deepEqual(await store.getMany([] as const), []);
+      assert.deepEqual(
+        await getOne(store, { id: "missing", params: matchingParams }),
+        [],
+      );
+      assert.deepEqual(
+        await getMany(store, [] as const).then(throwIfAnyError),
+        [],
+      );
     });
   });
 
@@ -142,7 +149,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       const originalEntry = snapshotEntry(entry);
 
       await store.store([{ entry, maxStoreForSeconds: 60 }]);
-      const result = await store.get("id", matchingParams);
+      const result = await getOne(store, { id: "id", params: matchingParams });
 
       assert.deepEqual(snapshotEntry(entry), originalEntry);
       assert.equal(result.length, 1);
@@ -235,7 +242,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
 
           await store.delete(entry.id);
           await store.store([{ entry, maxStoreForSeconds: Infinity }]);
-          const result = await store.get(entry.id, params);
+          const result = await getOne(store, { id: entry.id, params: params });
 
           assert.equal(result.length, 1, "expected exactly one matching entry");
           const got = result[0];
@@ -270,7 +277,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       });
 
       await store.store([{ entry, maxStoreForSeconds: 60 }]);
-      const result = await store.get("id", matchingParams);
+      const result = await getOne(store, { id: "id", params: matchingParams });
 
       assert.equal(result.length, 1);
       assert.equal(result[0]?.directives.freshUntilAge, Infinity);
@@ -291,7 +298,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         { entry: makeEntry("other", "unwanted"), maxStoreForSeconds: 60 },
       ]);
 
-      const result = await store.get("id", matchingParams);
+      const result = await getOne(store, { id: "id", params: matchingParams });
 
       assert.deepEqual(
         result.map(({ id, content }) => [id, content.value]),
@@ -319,13 +326,13 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       ]);
 
       assert.deepEqual(
-        (await store.get("id", matchingParams))
+        (await getOne(store, { id: "id", params: matchingParams }))
           .map(({ content }) => content.value)
           .sort(),
         ["audience", "empty", "format", "lang"],
       );
       assert.deepEqual(
-        (await store.get("id", unmatchedParams))
+        (await getOne(store, { id: "id", params: unmatchedParams }))
           .map(({ content }) => content.value)
           .sort(),
         ["audience", "empty", "lang"],
@@ -344,13 +351,13 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       ]);
 
       assert.deepEqual(
-        (await store.get("id", missingFormatParams))
+        (await getOne(store, { id: "id", params: missingFormatParams }))
           .map(({ content }) => content.value)
           .sort(),
         ["empty", "missing-format"],
       );
       assert.deepEqual(
-        (await store.get("id", matchingParams)).map(
+        (await getOne(store, { id: "id", params: matchingParams })).map(
           ({ content }) => content.value,
         ),
         ["empty"],
@@ -384,7 +391,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       // e.g. "constructor" to the inherited function and fail to match here.
       const noParams = {} as NormalizedParams<TestParams>;
       assert.deepEqual(
-        (await store.get("id", noParams))
+        (await getOne(store, { id: "id", params: noParams }))
           .map(({ content }) => content.value)
           .sort(),
         ["all-absent", "empty"],
@@ -399,7 +406,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         string
       > as unknown as NormalizedParams<TestParams>;
       assert.deepEqual(
-        (await store.get("id", withConstructorParam)).map(
+        (await getOne(store, { id: "id", params: withConstructorParam })).map(
           ({ content }) => content.value,
         ),
         ["empty"],
@@ -418,12 +425,12 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         { entry: makeEntry("two", "two-json"), maxStoreForSeconds: 60 },
       ]);
 
-      const result = await store.getMany([
+      const result = await getMany(store, [
         { id: "one", params: matchingParams },
         { id: "missing", params: matchingParams },
         { id: "two", params: unmatchedParams },
         { id: "one", params: unmatchedParams },
-      ] as const);
+      ] as const).then(throwIfAnyError);
 
       assert.ok(!(result[0] instanceof Error));
       assert.ok(!(result[3] instanceof Error));
@@ -449,14 +456,20 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         },
       ]);
       for (const id of ["\ud800x", "\ud801x", "\udc00x"]) {
-        assert.deepEqual(await store.get(id, matchingParams), []);
         assert.deepEqual(
-          await store.getMany([{ id, params: matchingParams }]),
+          await getOne(store, { id: id, params: matchingParams }),
+          [],
+        );
+        assert.deepEqual(
+          await getMany(store, [{ id, params: matchingParams }]).then(
+            throwIfAnyError,
+          ),
           [[]],
         );
       }
       assert.equal(
-        (await store.get("�x", matchingParams))[0]?.content.value,
+        (await getOne(store, { id: "�x", params: matchingParams }))[0]?.content
+          .value,
         "replacement",
       );
     });
@@ -482,8 +495,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
           throw error;
       }
       for (const id of ["�x", "\ud801x", "\ud800x"]) {
-        const single = await store.get(id, matchingParams);
-        const [bulk] = await store.getMany([{ id, params: matchingParams }]);
+        const single = await getOne(store, { id: id, params: matchingParams });
+        const [bulk] = await getMany(store, [
+          { id, params: matchingParams },
+        ]).then(throwIfAnyError);
         assert.ok(single.every((entry) => entry.id === id));
         assert.ok(bulk !== undefined && !(bulk instanceof Error));
         assert.ok(bulk.every((entry) => entry.id === id));
@@ -509,7 +524,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         const params = { format } as NormalizedParams<TestParams>;
         // Both Postgres paths reject ill-formed JSONB params.
         try {
-          assert.deepEqual(await store.get("vary-unicode", params), []);
+          assert.deepEqual(
+            await getOne(store, { id: "vary-unicode", params: params }),
+            [],
+          );
         } catch (error) {
           if (
             !(error instanceof Error) ||
@@ -520,7 +538,9 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         }
         try {
           assert.deepEqual(
-            await store.getMany([{ id: "vary-unicode", params }]),
+            await getMany(store, [{ id: "vary-unicode", params }]).then(
+              throwIfAnyError,
+            ),
             [[]],
           );
         } catch (error) {
@@ -560,10 +580,13 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
           const params = {
             format: requestedFormat,
           } as NormalizedParams<TestParams>;
-          const single = await store.get("stored-vary-unicode", params);
-          const [bulk] = await store.getMany([
+          const single = await getOne(store, {
+            id: "stored-vary-unicode",
+            params: params,
+          });
+          const [bulk] = await getMany(store, [
             { id: "stored-vary-unicode", params },
-          ]);
+          ]).then(throwIfAnyError);
           assert.ok(bulk !== undefined && !(bulk instanceof Error));
           for (const entry of [...single, ...bulk]) {
             assert.equal(entry.id, "stored-vary-unicode");
@@ -651,12 +674,19 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
               ) as NormalizedParams<TestParams>,
             }));
             const requests = [...matchingRequests, ...randomRequests].map(
-              ({ id, params }) => ({ id: scoped(id), params }),
+              ({ id, params }) => ({
+                id: scoped(id),
+                params,
+              }),
             );
 
-            const viaGetMany = await store.getMany(requests);
+            const viaGetMany = await getMany(store, requests).then(
+              throwIfAnyError,
+            );
             const viaGet = await Promise.all(
-              requests.map(async ({ id, params }) => store.get(id, params)),
+              requests.map(async ({ id, params }) =>
+                getOne(store, { id: id, params: params }),
+              ),
             );
 
             assert.ok(
@@ -698,10 +728,17 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
 
       await store.delete("id");
 
-      assert.deepEqual(await store.get("id", matchingParams), []);
-      assert.deepEqual((await store.get("other", matchingParams))[0]?.content, {
-        value: "other",
-      });
+      assert.deepEqual(
+        await getOne(store, { id: "id", params: matchingParams }),
+        [],
+      );
+      assert.deepEqual(
+        (await getOne(store, { id: "other", params: matchingParams }))[0]
+          ?.content,
+        {
+          value: "other",
+        },
+      );
     });
   });
 
@@ -713,7 +750,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
 
       await store.delete("missing");
 
-      assert.equal((await store.get("id", matchingParams)).length, 1);
+      assert.equal(
+        (await getOne(store, { id: "id", params: matchingParams })).length,
+        1,
+      );
     });
   });
 
@@ -732,9 +772,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         ),
       );
 
-      const result = await store.getMany(
+      const result = await getMany(
+        store,
         ids.map((id) => ({ id, params: matchingParams })),
-      );
+      ).then(throwIfAnyError);
 
       assert.deepEqual(
         result
@@ -767,7 +808,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
               maxStoreForSeconds: 60,
             },
           ]),
-          store.get(id, matchingParams).then((entries) => {
+          getOne(store, { id: id, params: matchingParams }).then((entries) => {
             for (const entry of entries) {
               assert.equal(entry.id, id);
               assert.deepEqual(entry.vary, varyOnFormat);
