@@ -6,11 +6,13 @@ import type { Vary } from "./types/04_ProducerResult.js";
 import type { StoreEntryRelationship } from "./types/06_Store.js";
 
 /**
- * @fileoverview The package's diagnostics channels. There are four:
+ * @fileoverview The package's diagnostics channels. There are five:
  *
  * - `@zingage/cache:read` -- what did a cache lookup find? Published by
  *   `Cache.get`/`Cache.getMany` (including direct callers that never touch a
  *   wrapper).
+ * - `@zingage/cache:read-batch` -- one actual Store read, automatic or direct,
+ *   with queue wait, Store duration, and request/entry/failure counts.
  * - `@zingage/cache:fetch` -- how was a logical wrapped-producer request
  *   answered? Published by the producer wrappers, once per call of the
  *   wrapped function (per request element, for bulk), at settlement.
@@ -20,7 +22,8 @@ import type { StoreEntryRelationship } from "./types/06_Store.js";
  * - `@zingage/cache:store-entry` -- one message per entry passed to
  *   `Cache.store()`.
  *
- * Every message carries the same two attribution fields ({@link Attribution};
+ * Store-read messages carry only the cache name because they can mix resource
+ * types. Other messages carry the same two attribution fields ({@link Attribution};
  * `produce` carries them per element of `requests[]` instead): the cache
  * instance's `name` and the resource-type name from the cache's registry.
  *
@@ -159,7 +162,11 @@ export type CacheReadFound = CacheReadFoundWithEntry | "none";
  * cache helpers' return types, so helper changes require an explicit decision
  * about diagnostic message changes.
  */
-export type CacheReadMessage = Attribution & { resourceId: string } & (
+export type CacheReadMessage = Attribution & {
+  resourceId: string;
+  /** Elapsed lookup time through classification, in milliseconds. Bulk slots share a start time. */
+  durationMs?: number;
+} & (
     | {
         found: CacheReadFoundWithEntry;
         /** The selected entry's normalized vary identifies its stored variant. */
@@ -450,3 +457,32 @@ export const cacheStoreEntryChannel = typedChannel<CacheStoreEntryMessage>()(
 export function publishCacheStoreEntry(message: CacheStoreEntryMessage): void {
   cacheStoreEntryChannel.publish(message);
 }
+
+/**
+ * One actual Store read invoked by Cache: automatic getMany batches, direct
+ * getMany calls, or unbatched get calls. Empty or entirely cancelled automatic
+ * batches emit nothing. Requests cancelled before dispatch do not count.
+ * Duration covers the Store call and automatic result-length validation,
+ * excluding Cache classification. Direct calls have zero queue wait. Automatic
+ * queue wait is summed across dispatched requests; divide by requestCount for
+ * the mean. Entry errors count as failed requests while successful slots still
+ * contribute entries. Whole-operation failures report no returned entries and
+ * fail every dispatched request. Direct Store rejection after caller cancellation
+ * reports cancelled with zero failed requests. Cancellation after dispatch does not erase
+ * the underlying Store operation's eventual result.
+ * No resource IDs, payloads, or error values are included.
+ */
+export type CacheReadBatchMessage = {
+  cache: string;
+  operation: "get" | "getMany";
+  outcome: "success" | "failure" | "cancelled";
+  requestCount: number;
+  entryCount: number;
+  failedRequestCount: number;
+  durationMs: number;
+  queueWaitTotalMs: number;
+};
+export const CACHE_READ_BATCH_CHANNEL_NAME = "@zingage/cache:read-batch";
+export const cacheReadBatchChannel = typedChannel<CacheReadBatchMessage>()(
+  CACHE_READ_BATCH_CHANNEL_NAME,
+);
