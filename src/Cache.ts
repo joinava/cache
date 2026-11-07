@@ -735,11 +735,7 @@ export default class Cache<
                 cache: this.name,
                 operation: event.operation,
                 automatic: queueWaitTotalMs !== undefined,
-                outcome: event.operationFailed
-                  ? "failure"
-                  : event.failedRequestCount > 0
-                    ? "partial"
-                    : "success",
+                outcome: event.outcome,
                 requestCount: event.requestCount,
                 failedRequestCount: event.failedRequestCount,
                 entryCount: event.entryCount,

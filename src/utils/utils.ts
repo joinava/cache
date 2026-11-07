@@ -180,7 +180,7 @@ export type StoreReadObservation = {
   failedRequestCount: number;
   entryCount: number;
   durationMs: number;
-  operationFailed: boolean;
+  outcome: "success" | "failure" | "cancelled";
 };
 
 /** Read a known set without accumulating independent calls. */
@@ -239,16 +239,18 @@ export async function readStoreObserved<
         0,
       ),
       durationMs: performance.now() - startedAt,
-      operationFailed: false,
+      outcome: results.some((slot) => slot instanceof Error)
+        ? "failure"
+        : "success",
     });
   } catch (failure) {
     observe?.({
       operation: "getMany",
       requestCount: requests.length,
-      failedRequestCount: requests.length,
+      failedRequestCount: options?.signal?.aborted ? 0 : requests.length,
       entryCount: 0,
       durationMs: performance.now() - startedAt,
-      operationFailed: true,
+      outcome: options?.signal?.aborted ? "cancelled" : "failure",
     });
     options?.signal?.throwIfAborted();
     if (failure instanceof CacheContractError) throw failure;
@@ -368,17 +370,17 @@ async function readSingleStore<
           failedRequestCount: 0,
           entryCount: entries.length,
           durationMs: performance.now() - startedAt,
-          operationFailed: false,
+          outcome: "success",
         });
         return entries;
       } catch (error) {
         observe?.({
           operation: "get",
           requestCount: 1,
-          failedRequestCount: 1,
+          failedRequestCount: options?.signal?.aborted ? 0 : 1,
           entryCount: 0,
           durationMs: performance.now() - startedAt,
-          operationFailed: true,
+          outcome: options?.signal?.aborted ? "cancelled" : "failure",
         });
         options?.signal?.throwIfAborted();
         if (error instanceof CacheContractError) throw error;

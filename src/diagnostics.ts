@@ -467,13 +467,15 @@ export function publishCacheStoreEntry(message: CacheStoreEntryMessage): void {
 /**
  * One physical Store read, including direct calls and automatic batches.
  * Queue wait is summed across dispatched requests. Cancelled queued slots are excluded.
- * Failed operations and affected request slots have separate counts.
+ * Error slots report failure while successful slots still contribute entries.
+ * Direct Store rejection after caller cancellation reports cancelled with no failed slots.
+ * Cancellation after automatic dispatch preserves the eventual Store outcome.
  */
 export type CacheReadBatchMessage = {
   cache: string;
   operation: "get" | "getMany";
   automatic: boolean;
-  outcome: "success" | "partial" | "failure";
+  outcome: "success" | "failure" | "cancelled";
   requestCount: number;
   failedRequestCount: number;
   entryCount: number;

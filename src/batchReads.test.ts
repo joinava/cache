@@ -1158,3 +1158,157 @@ describe("Cache mutation drain", suiteOptions, () => {
     assert.deepEqual(events, ["write settled", "delete settled", "cleanup"]);
   });
 });
+
+describe("Store read diagnostics compatibility", suiteOptions, () => {
+  for (const bulk of [false, true]) {
+    it(`reports cancellation for a rejected direct ${bulk ? "bulk" : "single"} read`, async (t) => {
+      const { cacheReadBatchChannel } = await import("./diagnostics.js");
+      const store = bulk ? bulkMemoryStore<Spec>() : new MemoryStore<Spec>();
+      const gate = Promise.withResolvers<void>();
+      const started = Promise.withResolvers<void>();
+      const rejectAfterGate = async () => {
+        started.resolve();
+        await gate.promise;
+        throw new Error("underlying read rejected");
+      };
+      if ("getMany" in store) t.mock.method(store, "getMany", rejectAfterGate);
+      else t.mock.method(store, "get", rejectAfterGate);
+      const cache = new Cache({
+        store,
+        name: `direct-cancel-${bulk}`,
+        resourceTypes: ACCEPT_ANY_REGISTRY,
+      });
+      const messages: import("./diagnostics.js").CacheReadBatchMessage[] = [];
+      const observe = (
+        message: import("./diagnostics.js").CacheReadBatchMessage,
+      ) => {
+        if (message.cache === cache.name) messages.push(message);
+      };
+      cacheReadBatchChannel.subscribe(observe);
+      t.after(async () => {
+        cacheReadBatchChannel.unsubscribe(observe);
+        await cache.close();
+      });
+      const controller = new AbortController();
+      const read = cache.get(lookup("a"), {
+        autoBatch: false,
+        signal: controller.signal,
+      });
+      const rejected = assert.rejects(read);
+      await started.promise;
+      controller.abort();
+      await rejected;
+      assert.equal(messages.length, 0);
+      gate.resolve();
+      await cache.close();
+      assert.equal(messages.length, 1);
+      assert.equal(messages[0]?.operation, bulk ? "getMany" : "get");
+      assert.equal(messages[0]?.outcome, "cancelled");
+      assert.equal(messages[0]?.failedRequestCount, 0);
+      assert.equal(messages[0]?.requestCount, 1);
+      assert.equal(messages[0]?.entryCount, 0);
+      assert.equal(messages[0]?.queueWaitTotalMs, 0);
+    });
+  }
+
+  for (const autoBatch of [undefined, false] as const) {
+    it(`reports partial slots as failure for ${autoBatch === false ? "direct" : "automatic"} reads`, async (t) => {
+      const { cacheReadBatchChannel } = await import("./diagnostics.js");
+      const store = bulkMemoryStore<Spec>();
+      const cache = batchedCacheOver(store);
+      await cache.store([
+        { id: "good", content: "good", directives: freshFor100 },
+      ]);
+      const primitive = store.getMany.bind(store);
+      t.mock.method(
+        store,
+        "getMany",
+        async (...args: Parameters<typeof primitive>) => {
+          const slots = await primitive(...args);
+          return slots.map((slot, index) =>
+            index === 0 ? new Error("bad slot") : slot,
+          );
+        },
+      );
+      const messages: import("./diagnostics.js").CacheReadBatchMessage[] = [];
+      const observe = (
+        message: import("./diagnostics.js").CacheReadBatchMessage,
+      ) => {
+        if (message.cache === cache.name) messages.push(message);
+      };
+      cacheReadBatchChannel.subscribe(observe);
+      t.after(async () => {
+        cacheReadBatchChannel.unsubscribe(observe);
+        await cache.close();
+      });
+      const result = await cache.getMany(
+        [lookup("bad"), lookup("good")],
+        autoBatch === false ? { autoBatch } : undefined,
+      );
+      assert.ok(result[0] instanceof Error);
+      assert.equal(messages.length, 1);
+      assert.equal(messages[0]?.outcome, "failure");
+      assert.equal(messages[0]?.requestCount, 2);
+      assert.equal(messages[0]?.failedRequestCount, 1);
+      assert.equal(messages[0]?.entryCount, 1);
+    });
+  }
+});
+
+for (const settlement of ["queued", "success", "failure"] as const) {
+  it(`preserves automatic Store accounting after ${settlement} cancellation`, async (t) => {
+    const { cacheReadBatchChannel } = await import("./diagnostics.js");
+    const scheduled = Promise.withResolvers<() => void>();
+    const started = Promise.withResolvers<void>();
+    const gate = Promise.withResolvers<void>();
+    const { store } = spiedStore({
+      beforeGetMany: async () => {
+        started.resolve();
+        await gate.promise;
+        if (settlement === "failure")
+          throw new Error("Store failed after caller cancellation");
+      },
+    });
+    const cache = new Cache({
+      store,
+      name: `automatic-cancel-${settlement}`,
+      resourceTypes: ACCEPT_ANY_REGISTRY,
+      readBatching: { batchScheduleFn: scheduled.resolve },
+    });
+    const messages: import("./diagnostics.js").CacheReadBatchMessage[] = [];
+    const observe = (
+      message: import("./diagnostics.js").CacheReadBatchMessage,
+    ) => {
+      if (message.cache === cache.name) messages.push(message);
+    };
+    cacheReadBatchChannel.subscribe(observe);
+    t.after(async () => {
+      cacheReadBatchChannel.unsubscribe(observe);
+      await cache.close();
+    });
+    const controller = new AbortController();
+    const read = cache.get(lookup("a"), { signal: controller.signal });
+    const rejected = assert.rejects(read);
+    const dispatch = await scheduled.promise;
+    if (settlement !== "queued") {
+      dispatch();
+      await started.promise;
+    }
+    controller.abort();
+    await rejected;
+    assert.equal(messages.length, 0);
+    dispatch();
+    gate.resolve();
+    await cache.close();
+    if (settlement === "queued") assert.equal(messages.length, 0);
+    else {
+      assert.equal(messages.length, 1);
+      assert.equal(messages[0]?.operation, "getMany");
+      assert.equal(messages[0]?.outcome, settlement);
+      assert.equal(
+        messages[0]?.failedRequestCount,
+        settlement === "failure" ? 1 : 0,
+      );
+    }
+  });
+}
