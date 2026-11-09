@@ -184,10 +184,11 @@ export function createProducerScheduler<Request, Result>(options: {
       offset < tasks.length;
       offset += options.bulk ? maxBatchSize : 1
     ) {
-      const batch = tasks.slice(
-        offset,
-        offset + (options.bulk ? maxBatchSize : 1),
-      );
+      // Producer code can synchronously cancel or flush later queued tasks.
+      const batch = tasks
+        .slice(offset, offset + (options.bulk ? maxBatchSize : 1))
+        .filter((task) => task.state === "queued");
+      if (batch.length === 0) continue;
       const now = performance.now();
       batch.forEach((task) => {
         task.state = "running";

@@ -173,7 +173,7 @@ export default class SqliteStore<
     try {
       const entries = await this.#read({
         type: "getMany",
-        requests,
+        requests: requests.map(({ id, params }) => ({ id, params })),
         cancelled,
       });
       options?.signal?.throwIfAborted();

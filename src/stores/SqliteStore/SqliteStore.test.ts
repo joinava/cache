@@ -42,6 +42,27 @@ const emptyVary = {} as NormalizedVary<TestParams>;
 const directives = { freshUntilAge: 60 } as NormalizedProducerDirectives;
 
 describe("SqliteStore", () => {
+  it("projects request metadata out of worker payloads", async () => {
+    await withTempStore(async ({ store }) => {
+      await store.store([
+        { entry: makeEntry("hit", "value"), maxStoreForSeconds: 60 },
+      ]);
+      const observer = () =>
+        assert.fail("request metadata must not be invoked");
+      const results = await store.getMany([
+        { id: "hit", params: matchingParams, observer },
+        { id: "miss", params: matchingParams, observer },
+      ]);
+      const hit = results[0];
+      if (hit instanceof Error) throw hit;
+      assert.deepEqual(
+        hit.map(({ content }) => content),
+        [{ value: "value" }],
+      );
+      assert.deepEqual(results[1], []);
+    });
+  });
+
   it("roundtrips stored entries through a reopened database", async () => {
     await withTempStore(async ({ databasePath }) => {
       const store = new SqliteStore<TestSpec, {}, TestParams>({ databasePath });

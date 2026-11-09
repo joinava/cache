@@ -1,0 +1,82 @@
+import assert from "node:assert/strict";
+import { it } from "node:test";
+import { createProducerScheduler } from "./collapsedTaskCreator.js";
+
+it(
+  "skips tasks cancelled synchronously by an earlier producer slice",
+  { timeout: 5_000 },
+  async () => {
+    const scheduled = Promise.withResolvers<() => void>();
+    const controller = new AbortController();
+    const failure = new Error("cancelled during production");
+    const calls: string[] = [];
+    const scheduler = createProducerScheduler<string, string>({
+      bulk: true,
+      maxBatchSize: 1,
+      collapseTasksMs: 3_000,
+      key: (request) => request,
+      batchScheduleFn: (dispatch) => scheduled.resolve(dispatch),
+      dispatch: async (requests) => {
+        const values = requests.map(({ request }) => request);
+        calls.push(...values);
+        if (values.includes("a")) controller.abort(failure);
+        return await Promise.resolve(values);
+      },
+    });
+    const attached = scheduler.attach(
+      ["a", "b", "c"].map((request) => ({
+        request,
+        trigger: "miss",
+        caller: {},
+        ...(request === "b" ? { signal: controller.signal } : {}),
+      })),
+      true,
+    );
+    const results = Promise.allSettled(attached.map(({ promise }) => promise));
+    (await scheduled.promise)();
+    await scheduler.drain();
+    assert.deepEqual(calls, ["a", "c"]);
+    assert.deepEqual(await results, [
+      { status: "fulfilled", value: "a" },
+      { status: "rejected", reason: failure },
+      { status: "fulfilled", value: "c" },
+    ]);
+  },
+);
+
+it(
+  "does not redispatch tasks flushed synchronously by an earlier producer slice",
+  { timeout: 5_000 },
+  async () => {
+    const scheduled = Promise.withResolvers<() => void>();
+    const calls: string[] = [];
+    const scheduler = createProducerScheduler<string, string>({
+      bulk: true,
+      maxBatchSize: 1,
+      collapseTasksMs: 3_000,
+      key: (request) => request,
+      batchScheduleFn: (dispatch) => scheduled.resolve(dispatch),
+      dispatch: async (requests) => {
+        const values = requests.map(({ request }) => request);
+        calls.push(...values);
+        if (values.includes("a")) scheduler.flush();
+        return await Promise.resolve(values);
+      },
+    });
+    const attached = scheduler.attach(
+      ["a", "b", "c"].map((request) => ({
+        request,
+        trigger: "miss",
+        caller: {},
+      })),
+      true,
+    );
+    (await scheduled.promise)();
+    await scheduler.drain();
+    assert.deepEqual(calls, ["a", "b", "c"]);
+    assert.deepEqual(
+      await Promise.all(attached.map(({ promise }) => promise)),
+      ["a", "b", "c"],
+    );
+  },
+);

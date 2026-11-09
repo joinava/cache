@@ -10,7 +10,6 @@ import {
   type AnyValidators,
   type Entry,
   type EntryForId,
-  type NormalizedParams,
   type StoreEntryInput,
   type StoreGetManyRequest,
 } from "../../types/index.js";
@@ -157,13 +156,7 @@ export default class MemoryStore<
     options?: { signal?: AbortSignal },
   ): Promise<Entry<SpecForId<Spec, Id>, Validators, Params>[]> {
     options?.signal?.throwIfAborted();
-    return this.#getOneSync(request.id, request.params);
-  }
-
-  #getOneSync<Id extends Spec["id"]>(
-    id: Id,
-    normalizedParams: NormalizedParams<Params>,
-  ): EntryForId<Spec, Validators, Params, Id>[] {
+    const { id, params: normalizedParams } = request;
     const resourceMetadata = this.resourceMetadataMap.get(id);
 
     if (!resourceMetadata) {
