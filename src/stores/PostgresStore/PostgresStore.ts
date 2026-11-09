@@ -1,4 +1,4 @@
-import { chunk } from "es-toolkit";
+import { chunk, groupBy } from "es-toolkit";
 import { sortCooperatively } from "../../utils/cooperative.js";
 import { timeSlicedMap, timeSlicedForEach } from "../../utils/time-slicing.js";
 import type { ColumnType, PostgresPool, RawBuilder, SqlBool } from "kysely";
@@ -257,31 +257,32 @@ export default class PostgresStore<
       resource_id: string;
       entry: TableEntry<Spec, Validators, Params>;
     };
-    const results: (Entry<Spec, Validators, Params>[] | Error)[] = requests.map(
-      () => [],
-    );
-    for (const [batchIndex, requestsChunk] of chunk(
-      requests,
-      MAX_REQUESTS_PER_GET_MANY_QUERY,
-    ).entries()) {
+    type ReadResult = Entry<Spec, Validators, Params>[] | Error;
+
+    const readChunk = async (
+      requestsChunk: readonly StoreGetManyRequest<Spec, Params>[],
+      offset: number,
+    ): Promise<ReadResult[]> => {
       signal?.throwIfAborted();
-      const offset = batchIndex * MAX_REQUESTS_PER_GET_MANY_QUERY;
-      const encoded = requestsChunk.flatMap(({ id, params }, index) => {
+      const encoded = requestsChunk.map(({ id, params }, index) => {
         const requestIndex = offset + index;
         try {
-          return [
-            {
-              requestIndex,
-              value: sql`(${requestIndex}::integer, ${id}::text, ${jsonStringify(params)}::jsonb)`,
-            },
-          ];
+          return {
+            requestIndex,
+            value: sql`(${requestIndex}::integer, ${id}::text, ${jsonStringify(params)}::jsonb)`,
+          };
         } catch (error) {
-          results[requestIndex] = asError(error);
-          return [];
+          return asError(error);
         }
       });
-      if (encoded.length === 0) continue;
-      const values = sql.join(encoded.map(({ value }) => value));
+      const queryRequests = encoded.filter(
+        (value): value is Exclude<typeof value, Error> =>
+          !(value instanceof Error),
+      );
+      if (queryRequests.length === 0)
+        return encoded.map((value) => (value instanceof Error ? value : []));
+
+      const values = sql.join(queryRequests.map(({ value }) => value));
       let rows: RequestRow[];
       try {
         const batch =
@@ -295,37 +296,54 @@ export default class PostgresStore<
       } catch (failure) {
         signal?.throwIfAborted();
         const error = asError(failure);
-        encoded.forEach(({ requestIndex }) => {
-          results[requestIndex] = error;
-        });
-        continue;
+        return encoded.map((value) => (value instanceof Error ? value : error));
       }
       signal?.throwIfAborted();
-      // SQL text binding can replace lone surrogates. Require exact IDs in
-      // both the SQL key and persisted entry before grouping the matches.
+
+      // Every returned row must belong to a slot included in this query.
       const expectedIndices = new Set(
-        encoded.map(({ requestIndex }) => requestIndex),
+        queryRequests.map(({ requestIndex }) => requestIndex),
       );
-      for (const row of rows) {
-        if (!expectedIndices.has(row.request_index))
-          throw new CacheContractError(
-            "Postgres returned an unexpected request index",
-          );
-        const request = requests[row.request_index]!;
-        if (row.resource_id !== request.id) continue;
-        const current = results[row.request_index]!;
-        if (current instanceof Error) continue;
+      if (rows.some((row) => !expectedIndices.has(row.request_index)))
+        throw new CacheContractError(
+          "Postgres returned an unexpected request index",
+        );
+      const rowsByRequest = groupBy(rows, (row) => row.request_index);
+
+      return encoded.map((value, index): ReadResult => {
+        if (value instanceof Error) return value;
+        const request = requestsChunk[index]!;
         try {
-          const entry = this.deserializeEntry(row.entry);
-          if (entry.id === request.id) current.push(entry);
+          // SQL bindings can replace lone surrogates. A different SQL key or
+          // persisted ID is a miss, even if Postgres considered it a match.
+          return (rowsByRequest[value.requestIndex] ?? []).flatMap((row) => {
+            if (row.resource_id !== request.id) return [];
+            const entry = this.deserializeEntry(row.entry);
+            return entry.id === request.id ? [entry] : [];
+          });
         } catch (failure) {
           // One invalid variant invalidates the complete request result.
-          results[row.request_index] = asError(failure);
+          return asError(failure);
         }
-      }
+      });
+    };
+
+    // Keep SQL chunks sequential; ordinary failures become slots, allowing
+    // later chunks to run without retries or increased concurrency.
+    const results: ReadResult[][] = [];
+    for (const [batchIndex, requestsChunk] of chunk(
+      requests,
+      MAX_REQUESTS_PER_GET_MANY_QUERY,
+    ).entries()) {
+      results.push(
+        await readChunk(
+          requestsChunk,
+          batchIndex * MAX_REQUESTS_PER_GET_MANY_QUERY,
+        ),
+      );
     }
     // Preserve duplicate slots and misses in the original request order.
-    return results as StoreGetManyResult<Spec, Reqs, Validators, Params>;
+    return results.flat() as StoreGetManyResult<Spec, Reqs, Validators, Params>;
   }
 
   async store(
