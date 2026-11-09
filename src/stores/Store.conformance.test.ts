@@ -48,6 +48,8 @@ type TestParams = PostgresStoreSupportedParams & {
 };
 type TestStore = Store<TestSpec, AnyValidators, TestParams>;
 
+type StoreName = "MemoryStore" | "SqliteStore" | "PostgresStore";
+
 type StoreFixture = {
   store: TestStore;
   cleanup: () => Promise<void>;
@@ -75,9 +77,9 @@ const varyOnAudience = { audience: "public" } as NormalizedVary<TestParams>;
 const varyOnMissingFormat = { format: null } as NormalizedVary<TestParams>;
 const directives = { freshUntilAge: 60 } as NormalizedProducerDirectives;
 
-describe("Store conformance", () => {
+describe("Store conformance and common behavior", () => {
   describe("MemoryStore", () => {
-    defineStoreConformance(async () => {
+    defineStoreConformance("MemoryStore", async () => {
       const store = new MemoryStore<TestSpec, AnyValidators, TestParams>();
       return {
         store,
@@ -87,7 +89,7 @@ describe("Store conformance", () => {
   });
 
   describe("SqliteStore", () => {
-    defineStoreConformance(async () => {
+    defineStoreConformance("SqliteStore", async () => {
       const directory = await mkdtemp(join(tmpdir(), "cache-sqlite-store-"));
       const store = new SqliteStore<TestSpec, AnyValidators, TestParams>({
         databasePath: join(directory, "cache.sqlite"),
@@ -110,7 +112,7 @@ describe("Store conformance", () => {
       ? {}
       : { skip: "Postgres environment variables are not configured" },
     () => {
-      defineStoreConformance(async () => {
+      defineStoreConformance("PostgresStore", async () => {
         const fixture = postgresStoreFixture();
         return {
           store: fixture.postgresStore as unknown as TestStore,
@@ -121,7 +123,13 @@ describe("Store conformance", () => {
   );
 });
 
-function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
+function defineStoreConformance(
+  storeName: StoreName,
+  createFixture: () => Promise<StoreFixture>,
+) {
+  describe("Common behavior (not required by Store)", () => {
+    defineCommonStoreBehavior(storeName, createFixture);
+  });
   it("ignores extra request metadata when reading hits and misses", async () => {
     await withStore(createFixture, async (store) => {
       await store.store([
@@ -139,47 +147,6 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         [{ value: "value" }],
       );
       assert.deepEqual(results[1], []);
-    });
-  });
-
-  it("replaces an existing variant on later store calls", async () => {
-    await withStore(createFixture, async (store) => {
-      await store.store([
-        { entry: makeEntry("id", "first"), maxStoreForSeconds: 60 },
-      ]);
-      await store.store([
-        {
-          entry: makeEntry("id", "replacement", varyOnFormat, {
-            date: new Date("2023-01-01T00:00:00.000Z"),
-          }),
-          maxStoreForSeconds: 60,
-        },
-      ]);
-
-      const result = await getOne(store, { id: "id", params: matchingParams });
-
-      assert.equal(result.length, 1);
-      assert.deepEqual(result[0]?.content, { value: "replacement" });
-    });
-  });
-
-  it("keeps one complete entry after concurrent writes to one variant", async () => {
-    await withStore(createFixture, async (store) => {
-      const writes = Array.from({ length: 20 }, (_, i) =>
-        store.store([
-          {
-            entry: makeEntry("id", `value:${i}`, varyOnFormat),
-            maxStoreForSeconds: 60,
-          },
-        ]),
-      );
-
-      await Promise.all(writes);
-
-      const result = await getOne(store, { id: "id", params: matchingParams });
-
-      assert.equal(result.length, 1);
-      assert.match(result[0]?.content.value ?? "", /^value:\d+$/);
     });
   });
 
@@ -910,6 +877,186 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
   });
 }
 
+// Shared implementation policies, separate from the Store interface contract.
+// Each case lists stores that do not implement that policy. An empty list runs
+// the case against every configured Store.
+function defineCommonStoreBehavior(
+  storeName: StoreName,
+  createFixture: () => Promise<StoreFixture>,
+) {
+  const commonBehavior = (
+    name: string,
+    unsupportedStores: readonly StoreName[],
+    run: (store: TestStore) => Promise<void>,
+  ) => {
+    it(
+      name,
+      {
+        skip: unsupportedStores.includes(storeName)
+          ? `${storeName} does not support this implementation policy`
+          : false,
+      },
+      async () => {
+        await withStore(createFixture, run);
+      },
+    );
+  };
+
+  commonBehavior(
+    "replaces an existing variant on later store calls",
+    [],
+    async (store) => {
+      await store.store([
+        { entry: makeEntry("id", "first"), maxStoreForSeconds: 60 },
+      ]);
+      await store.store([
+        {
+          entry: makeEntry("id", "replacement", varyOnFormat, {
+            date: new Date("2023-01-01T00:00:00.000Z"),
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      const result = await getOne(store, { id: "id", params: matchingParams });
+
+      assert.equal(result.length, 1);
+      assert.deepEqual(result[0]?.content, { value: "replacement" });
+    },
+  );
+
+  commonBehavior(
+    "keeps one complete entry after concurrent writes to one variant",
+    [],
+    async (store) => {
+      const writes = Array.from({ length: 20 }, (_, i) =>
+        store.store([
+          {
+            entry: makeEntry("id", `value:${i}`, varyOnFormat),
+            maxStoreForSeconds: 60,
+          },
+        ]),
+      );
+
+      await Promise.all(writes);
+
+      const result = await getOne(store, { id: "id", params: matchingParams });
+
+      assert.equal(result.length, 1);
+      assert.match(result[0]?.content.value ?? "", /^value:\d+$/);
+    },
+  );
+
+  commonBehavior(
+    "dedupes in-call duplicates by newest birth date; the winner reports against the pre-call snapshot and the dropped duplicate is omitted",
+    [],
+    async (store) => {
+      const validatorsA = { etag: "A" };
+      const validatorsB = { etag: "B" };
+
+      // Pre-call stored value for the slot.
+      await store.store([
+        {
+          entry: makeEntry("id", "seed", varyOnFormat, {
+            validators: validatorsA,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      // A single call has three entries for the SAME slot. The MIDDLE entry has
+      // the newest birth date, so it must win under the built-in Stores' shared
+      // newest-birth-date retention policy -- a last-write-wins implementation would
+      // persist (and report for) the last entry instead. Crucially the
+      // winner's validators equal the *pre-call* stored value A, so the winner
+      // must report "unchanged", proving the comparison is against the
+      // pre-call snapshot and NOT against the other in-call entry B (which
+      // would give "changed").
+      const results = await store.store([
+        {
+          entry: makeEntry("id", "oldest", varyOnFormat, {
+            validators: validatorsB,
+            date: new Date("2024-01-01T00:00:00.000Z"),
+          }),
+          maxStoreForSeconds: 60,
+        },
+        {
+          entry: makeEntry("id", "winner", varyOnFormat, {
+            validators: validatorsA,
+            date: new Date("2024-05-01T00:00:00.000Z"),
+            initialAge: 0,
+          }),
+          maxStoreForSeconds: 60,
+        },
+        {
+          entry: makeEntry("id", "loser", varyOnFormat, {
+            validators: validatorsB,
+            date: new Date("2024-02-01T00:00:00.000Z"),
+            initialAge: 0,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      assert.equal(results.length, 3);
+      const rels = relationshipsOf(results);
+
+      // Winner (index 1, newest birth date) reports against the pre-call
+      // snapshot A; the dropped duplicate persists nothing and is omitted.
+      assert.deepEqual(rels, [undefined, "unchanged", undefined]);
+
+      // The winner is what actually persisted, even though it came in the MIDDLE.
+      const stored = await getOne(store, { id: "id", params: matchingParams });
+      assert.equal(stored.length, 1);
+      assert.deepEqual(stored[0]?.validators, validatorsA);
+      assert.equal(stored[0]?.content.value, "winner");
+      assert.equal(
+        stored[0]?.date.getTime(),
+        new Date("2024-05-01T00:00:00.000Z").getTime(),
+      );
+    },
+  );
+
+  commonBehavior(
+    "matches a naive newest-validators-per-slot oracle over random store sequences",
+    [],
+    async (store) => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.record({ runId: fc.uuid(), calls: operationsArb }),
+          async ({ runId, calls }) => {
+            const oracle = makeOracle();
+            for (const call of calls) {
+              const expected = oracle.expectAndApply(call);
+              const inputs = call.map((op) => {
+                const { id, vary } = slotSpec(runId, op.slotIdx);
+                return {
+                  entry: makeEntry(id, "v", vary, {
+                    validators: op.validators,
+                    date: op.date,
+                    initialAge: op.initialAge,
+                  }),
+                  maxStoreForSeconds: 60,
+                };
+              });
+
+              const results = await store.store(inputs);
+              assert.equal(results.length, inputs.length);
+              assert.deepEqual(relationshipsOf(results), expected);
+            }
+
+            // Each iteration namespaces its slots under a unique runId; delete
+            // them so long-lived stores don't accumulate across iterations.
+            await store.delete(`${runId}:a`);
+            await store.delete(`${runId}:b`);
+          },
+        ),
+        { numRuns: 100 },
+      );
+    },
+  );
+}
+
 async function withStore(
   createFixture: () => Promise<StoreFixture>,
   test: (store: TestStore) => Promise<void>,
@@ -1453,112 +1600,7 @@ function defineChangeDetectionConformance(
 
   // -- Within-a-single-store()-call duplicates -------------------------------
 
-  it("dedupes in-call duplicates by newest birth date; the winner reports against the pre-call snapshot and the dropped duplicate is omitted", async () => {
-    await withStore(createFixture, async (store) => {
-      const validatorsA = { etag: "A" };
-      const validatorsB = { etag: "B" };
-
-      // Pre-call stored value for the slot.
-      await store.store([
-        {
-          entry: makeEntry("id", "seed", varyOnFormat, {
-            validators: validatorsA,
-          }),
-          maxStoreForSeconds: 60,
-        },
-      ]);
-
-      // A single call has three entries for the SAME slot. The MIDDLE entry has
-      // the newest birth date, so it must win under the contract's uniform
-      // newest-birth-date dedup rule -- a last-write-wins implementation would
-      // persist (and report for) the last entry instead. Crucially the
-      // winner's validators equal the *pre-call* stored value A, so the winner
-      // must report "unchanged", proving the comparison is against the
-      // pre-call snapshot and NOT against the other in-call entry B (which
-      // would give "changed").
-      const results = await store.store([
-        {
-          entry: makeEntry("id", "oldest", varyOnFormat, {
-            validators: validatorsB,
-            date: new Date("2024-01-01T00:00:00.000Z"),
-          }),
-          maxStoreForSeconds: 60,
-        },
-        {
-          entry: makeEntry("id", "winner", varyOnFormat, {
-            validators: validatorsA,
-            date: new Date("2024-05-01T00:00:00.000Z"),
-            initialAge: 0,
-          }),
-          maxStoreForSeconds: 60,
-        },
-        {
-          entry: makeEntry("id", "loser", varyOnFormat, {
-            validators: validatorsB,
-            date: new Date("2024-02-01T00:00:00.000Z"),
-            initialAge: 0,
-          }),
-          maxStoreForSeconds: 60,
-        },
-      ]);
-
-      assert.equal(results.length, 3);
-      const rels = relationshipsOf(results);
-
-      // Winner (index 1, newest birth date) reports against the pre-call
-      // snapshot A; the dropped duplicate persists nothing and is omitted.
-      assert.deepEqual(rels, [undefined, "unchanged", undefined]);
-
-      // The winner is what actually persisted, even though it came in the MIDDLE.
-      const stored = await getOne(store, { id: "id", params: matchingParams });
-      assert.equal(stored.length, 1);
-      assert.deepEqual(stored[0]?.validators, validatorsA);
-      assert.equal(stored[0]?.content.value, "winner");
-      assert.equal(
-        stored[0]?.date.getTime(),
-        new Date("2024-05-01T00:00:00.000Z").getTime(),
-      );
-    });
-  });
-
   // -- Property: random store sequences vs a naive newest-per-slot oracle ----
-
-  it("matches a naive newest-validators-per-slot oracle over random store sequences", async () => {
-    await withStore(createFixture, async (store) => {
-      await fc.assert(
-        fc.asyncProperty(
-          fc.record({ runId: fc.uuid(), calls: operationsArb }),
-          async ({ runId, calls }) => {
-            const oracle = makeOracle();
-            for (const call of calls) {
-              const expected = oracle.expectAndApply(call);
-              const inputs = call.map((op) => {
-                const { id, vary } = slotSpec(runId, op.slotIdx);
-                return {
-                  entry: makeEntry(id, "v", vary, {
-                    validators: op.validators,
-                    date: op.date,
-                    initialAge: op.initialAge,
-                  }),
-                  maxStoreForSeconds: 60,
-                };
-              });
-
-              const results = await store.store(inputs);
-              assert.equal(results.length, inputs.length);
-              assert.deepEqual(relationshipsOf(results), expected);
-            }
-
-            // Each iteration namespaces its slots under a unique runId; delete
-            // them so long-lived stores don't accumulate across iterations.
-            await store.delete(`${runId}:a`);
-            await store.delete(`${runId}:b`);
-          },
-        ),
-        { numRuns: 100 },
-      );
-    });
-  });
 }
 
 // ===========================================================================
@@ -1690,10 +1732,10 @@ function makeOracle() {
 //     call, so the "multiple inputs for one slot in one store() call" case is
 //     unreachable by the property. Covered by
 //     "dedupes in-call duplicates by newest birth date...", which pins the
-//     contract's uniform rule: every store keeps the entry with the newest
-//     birth date. (Rationale for still excluding duplicates here: randomly
+//     shared retention policy: the built-in Stores keep the entry with the
+//     newest birth date. (Rationale for still excluding duplicates here: randomly
 //     generated dates can tie, and the winner among birth-date ties is
-//     implementation-defined, so a store-agnostic oracle can't predict it.)
+//     implementation-defined, so this policy oracle can't predict it.)
 //
 //  2. Newest-birth-date dedup among MULTIPLE same-call entries is never
 //     exercised: with <= 1 entry per slot and distinct slots per call, each
