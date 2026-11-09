@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import { setTimeout as delay } from "timers/promises";
+import { staleWhileRevalidating } from "../../test/v2AcceptanceHelpers.js";
 import Cache from "../Cache.js";
 import {
   MemoryStore,
@@ -1105,16 +1106,7 @@ describe("wrapProducer", () => {
           return await refresh.promise;
         }
         return {
-          content: "stale",
-          date: new Date(Date.now() - 10_000),
-          directives: {
-            freshUntilAge: 1,
-            maxStale: {
-              whileRevalidate: 60,
-              ifError: 60,
-              withoutRevalidation: 0,
-            },
-          },
+          ...staleWhileRevalidating("stale", { ifError: 100 }),
         };
       });
       const originalStore = gatedCache.store.bind(gatedCache);
@@ -1156,16 +1148,7 @@ describe("wrapProducer", () => {
         if (produce.mock.callCount() > 0)
           throw new Error("background origin failed");
         return {
-          content: "stale",
-          date: new Date(Date.now() - 10_000),
-          directives: {
-            freshUntilAge: 1,
-            maxStale: {
-              whileRevalidate: 60,
-              ifError: 60,
-              withoutRevalidation: 0,
-            },
-          },
+          ...staleWhileRevalidating("stale", { ifError: 100 }),
         };
       });
       const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
@@ -1264,16 +1247,7 @@ describe("wrapProducer", () => {
       store.releaseAll();
       await persisted;
       const produce = mock.fn(async () => ({
-        content: "pending-stale",
-        date: new Date(Date.now() - 10_000),
-        directives: {
-          freshUntilAge: 1,
-          maxStale: {
-            whileRevalidate: 60,
-            ifError: 60,
-            withoutRevalidation: 0,
-          },
-        },
+        ...staleWhileRevalidating("pending-stale", { ifError: 100 }),
       }));
       const wrapped = wrapProducer({ cache: gatedCache, produce: produce });
       await wrapped.get({ id: "x", directives: { maxAge: 0 } });

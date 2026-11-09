@@ -432,9 +432,10 @@ describe("v4 direct producer dispatch", suiteOptions, () => {
       name: "producer-direct-revalidation",
       // A limit of 1 proves the direct cohort is not split.
       producerBatching: { maxBatchSize: 1 },
-      seed: ["stale-1", "stale-2"].map((id) =>
-        staleWhileRevalidating(id, `old ${id}`),
-      ),
+      seed: ["stale-1", "stale-2"].map((id) => ({
+        id,
+        ...staleWhileRevalidating(`old ${id}`),
+      })),
       content: (id) => `new ${id}`,
       onProduce: async () => {
         refreshed.resolve();
@@ -467,7 +468,7 @@ describe("v4 direct producer dispatch", suiteOptions, () => {
       store,
       // Separate Store reads, so the stale entry classifies before the cancel.
       readBatching: { maxBatchSize: 1 },
-      seed: [staleWhileRevalidating("stale", "old")],
+      seed: [{ id: "stale", ...staleWhileRevalidating("old") }],
       content: (id) => `new ${id}`,
     });
     const controller = new AbortController();

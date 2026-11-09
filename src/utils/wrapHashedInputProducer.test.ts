@@ -4,7 +4,10 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { setTimeout as delay } from "timers/promises";
 import type { ReadonlyDeep } from "type-fest";
 
-import { expectRejection } from "../../test/v2AcceptanceHelpers.js";
+import {
+  expectRejection,
+  staleWhileRevalidating,
+} from "../../test/v2AcceptanceHelpers.js";
 import Cache from "../Cache.js";
 import {
   idStartsWith,
@@ -1110,16 +1113,7 @@ describe(
       await cache.store([
         {
           id: "computed:a",
-          content: "stale",
-          date: new Date(Date.now() - 10000),
-          directives: {
-            freshUntilAge: 1,
-            maxStale: {
-              withoutRevalidation: 0,
-              whileRevalidate: 60,
-              ifError: 60,
-            },
-          },
+          ...staleWhileRevalidating("stale", { ifError: 100 }),
         },
       ]);
       const scheduled = Promise.withResolvers<() => void>();

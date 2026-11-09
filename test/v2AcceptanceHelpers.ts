@@ -40,14 +40,20 @@ export const ACCEPT_ANY_REGISTRY = {
  */
 export const freshFor100 = { freshUntilAge: 100 };
 
-/** A stored entry that is stale, but usable while a refresh runs. */
-export const staleWhileRevalidating = (id: string, content: string) => ({
-  id,
+/**
+ * Content that is 10 seconds old and stale, but usable while a refresh runs.
+ * Spread it into a stored entry or return it from a producer. Pass `ifError`
+ * to also allow serving it when the refresh fails.
+ */
+export const staleWhileRevalidating = (
+  content: string,
+  { ifError = 0 }: { ifError?: number } = {},
+) => ({
   content,
   date: new Date(Date.now() - 10_000),
   directives: {
     freshUntilAge: 1,
-    maxStale: { withoutRevalidation: 0, whileRevalidate: 100, ifError: 0 },
+    maxStale: { withoutRevalidation: 0, whileRevalidate: 100, ifError },
   },
 });
 
