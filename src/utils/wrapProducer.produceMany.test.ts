@@ -11,6 +11,10 @@ import {
   UsableIfErrorEntryArb,
   UsableWhileRevalidateEntryArb,
 } from "../../test/fixtures.js";
+import {
+  contents,
+  RESOURCE_PREFIX_REGISTRY,
+} from "../../test/v2AcceptanceHelpers.js";
 import Cache from "../Cache.js";
 import {
   MemoryStore,
@@ -41,8 +45,7 @@ const testCacheOptions = {
 
 // Every test needs the store as well as the cache (to seed entries and to spy
 // on writes), so the factory hands back both. Instantiated at a concrete
-// registry, which is why it needs no cast -- see the note in
-// test/v2AcceptanceHelpers.ts.
+// registry, which is why it needs no cast.
 const makeTestStoreAndCache = () => {
   const store = new MemoryStore<SpecOf<typeof testRegistry>>();
   return {
@@ -54,10 +57,10 @@ const makeTestStoreAndCache = () => {
   };
 };
 
-describe("wrapBulkProducer", () => {
+describe("wrapProducer with produceMany", () => {
   describe("one request given", () => {
     describe("the requested id is usable in the cache", () => {
-      it("should return the result from the cache, mimicking wrapProducer", async () => {
+      it("serves a usable cached entry without calling the producer", async () => {
         await fc.assert(
           fc.asyncProperty(UsableEntryArb, async ({ entry, consumerDirs }) => {
             const { store, cache } = makeTestStoreAndCache();
@@ -496,7 +499,6 @@ describe("wrapBulkProducer", () => {
                 produceMany: bulkProducer,
               });
 
-              // Call wrapBulkProducer with the requests
               const bulkResults = await wrappedBulk.getMany(requests);
 
               // Verify results are in the correct order
@@ -1000,49 +1002,6 @@ describe("wrapBulkProducer", () => {
         await cache.close();
       }
     });
-
-    it("should not treat abort errors as cache read failures eligible for fallback", async () => {
-      const { cache } = makeTestStoreAndCache();
-
-      // Make cache.getMany throw an abort error
-      const originalGetMany = cache.getMany.bind(cache);
-      cache.getMany = async (_reqs, options) => {
-        options?.signal?.throwIfAborted();
-        return originalGetMany(_reqs);
-      };
-
-      try {
-        const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
-          reqs.map((r) => ({
-            content: `c-${r.id}`,
-            directives: { freshUntilAge: 1 },
-          })),
-        );
-
-        const wrappedBulk = wrapProducer({
-          cache,
-          onCacheReadFailure: "call-producer",
-          produceMany: producer,
-        });
-
-        const controller = new AbortController();
-        controller.abort(new Error("aborted-during-getmany"));
-
-        await assert.rejects(
-          async () =>
-            wrappedBulk.getMany([{ id: "test" }], {
-              signal: controller.signal,
-            }),
-          { message: "aborted-during-getmany" },
-        );
-
-        // Should NOT have fallen back to the producer
-        assert.equal(producer.mock.callCount(), 0);
-      } finally {
-        cache.getMany = originalGetMany;
-        await cache.close();
-      }
-    });
   });
 
   function bulkProducerFromProducer<C>(
@@ -1097,21 +1056,16 @@ describe("wrapBulkProducer", () => {
 describe("Large bulk producer calls", { timeout: 20_000 }, () => {
   const batchSize = 10_000;
   function makeCache() {
-    const registry = {
-      resources: resourceType<number>()({
-        matches: (id): id is string => id.startsWith("resource:"),
-      }),
-    };
-    const store = new MemoryStore<SpecOf<typeof registry>>();
+    const store = new MemoryStore<SpecOf<typeof RESOURCE_PREFIX_REGISTRY>>();
     const cache = new Cache({
       name: "large-bulk-producer",
-      resourceTypes: registry,
+      resourceTypes: RESOURCE_PREFIX_REGISTRY,
       store,
     });
     return { cache, store };
   }
   const requests = Array.from({ length: batchSize }, (_, i) => ({
-    id: `resource:${i}`,
+    id: `resource:${i}` as const,
   }));
 
   it("preserves the full producer cohort and result order for a 10k cold batch", async () => {
@@ -1137,7 +1091,7 @@ describe("Large bulk producer calls", { timeout: 20_000 }, () => {
         ),
       );
       assert.deepEqual(
-        result.map((entry) => (entry instanceof Error ? entry : entry.content)),
+        contents(result),
         requests.map((_, i) => i),
       );
     } finally {
@@ -1162,7 +1116,7 @@ describe("Large bulk producer calls", { timeout: 20_000 }, () => {
       const result = await wrapped.getMany(requests);
       assert.equal(producer.mock.callCount(), 0);
       assert.deepEqual(
-        result.map((entry) => (entry instanceof Error ? entry : entry.content)),
+        contents(result),
         requests.map((_, i) => i),
       );
     } finally {

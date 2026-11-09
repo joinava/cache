@@ -279,7 +279,7 @@ Subscribers must use bounded cache names, resource types, operation kinds, and o
 - Replace `wrapBulkHashedInputProducer` with `wrapHashedInputProducer` and move its capability into `produceMany`.
 - Move typed `hashedInputProducer` descriptors into the matching capability field.
 - Handle bulk Error slots or explicitly call `throwIfAnyError`.
-- Replace direct Store reads with its declared primitive or the exported adapters.
+- Read through a Cache instead of reading a Store directly. The package no longer exports `getOne`, `getMany`, or `naiveGetMany`.
 - Close all clients before their shared Cache, then close externally owned producer dependencies and database pools.
 
 ## Mutation ordering

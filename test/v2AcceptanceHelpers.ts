@@ -9,6 +9,7 @@ import {
   type CacheFetchMessage,
   type CacheProduceMessage,
   type CacheReadMessage,
+  type CacheReadStoreMessage,
   type CacheStoreEntryMessage,
   type ResourceTypes,
 } from "../src/index.js";
@@ -39,6 +40,22 @@ export const ACCEPT_ANY_REGISTRY = {
  * a fixture's freshness is never the thing that makes it flake.
  */
 export const freshFor100 = { freshUntilAge: 100 };
+
+/**
+ * A registry with one resource type for ids that start with "resource:".
+ * Classification tests use it where ACCEPT_ANY_REGISTRY would accept a bad id.
+ */
+export const RESOURCE_PREFIX_REGISTRY = {
+  resource: resourceType<number>()({
+    matches: idStartsWith("resource:"),
+  }),
+} satisfies ResourceTypes;
+
+/** Each result's content, or the Error in its slot. */
+export const contents = <T>(
+  results: readonly ({ content: T } | Error)[],
+): (T | Error)[] =>
+  results.map((entry) => (entry instanceof Error ? entry : entry.content));
 
 /**
  * Content that is 10 seconds old and stale, but usable while a refresh runs.
@@ -84,19 +101,22 @@ export const V2_CHANNEL_NAMES = {
   fetch: "@zingage/cache:fetch",
   produce: "@zingage/cache:produce",
   storeEntry: "@zingage/cache:store-entry",
+  readStore: "@zingage/cache:read-store",
 } as const;
 
 export type CapturedMessage =
   | { channel: "read"; message: CacheReadMessage }
   | { channel: "fetch"; message: CacheFetchMessage }
   | { channel: "produce"; message: CacheProduceMessage }
-  | { channel: "store-entry"; message: CacheStoreEntryMessage };
+  | { channel: "store-entry"; message: CacheStoreEntryMessage }
+  | { channel: "read-store"; message: CacheReadStoreMessage };
 
 export type ChannelCapture = {
   read: CacheReadMessage[];
   fetch: CacheFetchMessage[];
   produce: CacheProduceMessage[];
   storeEntry: CacheStoreEntryMessage[];
+  readStore: CacheReadStoreMessage[];
   /** Every captured message, across channels, in arrival order. */
   all: CapturedMessage[];
   /** Unsubscribes all listeners. Always call (e.g. in `finally`). */
@@ -104,20 +124,26 @@ export type ChannelCapture = {
 };
 
 /**
- * Subscribes to all four 2.0 diagnostics channels and collects the messages
+ * Subscribes to every diagnostics channel and collects the messages
  * attributed to `cacheName` (every documented message type carries a `cache`
  * field, so filtering on it isolates concurrently-running tests from each
  * other). Call `stop()` when done -- leaked subscribers poison other tests'
  * counts.
+ *
+ * By default, each message drops its timing fields and the produce and
+ * read-store batching fields. Outcome tests deep-equal messages, and those
+ * fields depend on timing or batch boundaries. Pass `{ measurements: true }`
+ * to keep them, as the timing and batching tests do.
  */
 export function captureChannels(
   cacheName: string,
-  options: { measurements?: false } = {},
+  options: { measurements?: true } = {},
 ): ChannelCapture {
   const read: CacheReadMessage[] = [];
   const fetch: CacheFetchMessage[] = [];
   const produce: CacheProduceMessage[] = [];
   const storeEntry: CacheStoreEntryMessage[] = [];
+  const readStore: CacheReadStoreMessage[] = [];
   const all: CapturedMessage[] = [];
 
   const isForThisCache = (msg: unknown): boolean =>
@@ -134,10 +160,13 @@ export function captureChannels(
     (msg: unknown) => {
       if (!isForThisCache(msg)) return;
       const message = { ...(msg as M) };
-      // Outcome assertions exclude measurements, which deterministic clock tests cover.
-      if (options.measurements === false) {
+      if (options.measurements !== true) {
         if (channel === "read" || channel === "fetch")
           Reflect.deleteProperty(message, "durationMs");
+        if (channel === "read-store")
+          ["durationMs", "queueWaitTotalMs"].forEach((key) =>
+            Reflect.deleteProperty(message, key),
+          );
         if (channel === "produce")
           [
             "operation",
@@ -159,23 +188,27 @@ export function captureChannels(
     "store-entry",
     storeEntry,
   );
+  const onReadStore = collect<CacheReadStoreMessage>("read-store", readStore);
 
   subscribe(V2_CHANNEL_NAMES.read, onRead);
   subscribe(V2_CHANNEL_NAMES.fetch, onFetch);
   subscribe(V2_CHANNEL_NAMES.produce, onProduce);
   subscribe(V2_CHANNEL_NAMES.storeEntry, onStoreEntry);
+  subscribe(V2_CHANNEL_NAMES.readStore, onReadStore);
 
   return {
     read,
     fetch,
     produce,
     storeEntry,
+    readStore,
     all,
     stop: () => {
       unsubscribe(V2_CHANNEL_NAMES.read, onRead);
       unsubscribe(V2_CHANNEL_NAMES.fetch, onFetch);
       unsubscribe(V2_CHANNEL_NAMES.produce, onProduce);
       unsubscribe(V2_CHANNEL_NAMES.storeEntry, onStoreEntry);
+      unsubscribe(V2_CHANNEL_NAMES.readStore, onReadStore);
     },
   };
 }

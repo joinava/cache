@@ -2,14 +2,19 @@ import { throwIfAnyError } from "./utils/utils.js";
 import { expect } from "chai";
 import assert from "node:assert/strict";
 import { describe, it, mock } from "node:test";
-import { setTimeout as delay } from "timers/promises";
+import {
+  setImmediate as nextTurn,
+  setTimeout as delay,
+} from "node:timers/promises";
 
+import { cacheOver, suiteOptions } from "../test/fixtures.js";
 import {
   captureChannels,
   expectCachePathFetch,
   expectProducerPathFetch,
   expectProduceMessage,
   expectRejection,
+  RESOURCE_PREFIX_REGISTRY,
   sortByResourceId,
   uniqueCacheName,
   V2_CHANNEL_NAMES,
@@ -20,6 +25,7 @@ import {
   CACHE_FETCH_CHANNEL_NAME,
   CACHE_PRODUCE_CHANNEL_NAME,
   CACHE_READ_CHANNEL_NAME,
+  CACHE_READ_STORE_CHANNEL_NAME,
   CACHE_STORE_ENTRY_CHANNEL_NAME,
   cacheFetchChannel,
   cacheProduceChannel,
@@ -32,7 +38,6 @@ import {
   resourceType,
   wrapProducer,
   wrapHashedInputProducer,
-  type SpecOf,
   type CacheFetchMessage,
   type CacheProduceMessage,
   type CacheReadMessage,
@@ -80,8 +85,6 @@ const makeHarness = (label: string) => {
   const name = uniqueCacheName(label);
   const store = new MemoryStore();
   const cache = new Cache({
-    // These tests inject or count individual store.get calls.
-
     store: store,
     name,
     resourceTypes: registry,
@@ -97,6 +100,9 @@ describe("diagnostics channels (§6.5)", () => {
       expect(CACHE_PRODUCE_CHANNEL_NAME).to.equal("@zingage/cache:produce");
       expect(CACHE_STORE_ENTRY_CHANNEL_NAME).to.equal(
         "@zingage/cache:store-entry",
+      );
+      expect(CACHE_READ_STORE_CHANNEL_NAME).to.equal(
+        "@zingage/cache:read-store",
       );
     });
 
@@ -162,7 +168,7 @@ describe("diagnostics channels (§6.5)", () => {
   describe("read channel (§6.5.1)", () => {
     it("direct Cache.get on a miss publishes exactly one fully-attributed message with found: 'none'", async () => {
       const { name, cache } = makeHarness("read-miss");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         await cache.get({ id: "site:missing", params: {}, directives: {} });
         expect(capture.read).to.deep.equal([
@@ -187,7 +193,7 @@ describe("diagnostics channels (§6.5)", () => {
       await cache.store([
         { id: "site:a", content: "fresh", directives: freshFor100 },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         const res = await cache.get({
           id: "site:a",
@@ -220,7 +226,7 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         const res = await cache.get({
           id: "site:a",
@@ -253,7 +259,7 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         const res = await cache.get({
           id: "site:a",
@@ -287,7 +293,7 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         const res = await cache.get({
           id: "site:a",
@@ -319,7 +325,7 @@ describe("diagnostics channels (§6.5)", () => {
       await cache.store([
         { id: "site:a", content: "fresh", directives: freshFor100 },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         await cache
           .getMany([
@@ -363,8 +369,6 @@ describe("diagnostics channels (§6.5)", () => {
       const name = uniqueCacheName("read-after-close");
       const store = new MemoryStore();
       const cache = new Cache({
-        // These tests inject or count individual store.get calls.
-
         store: store,
         name,
         resourceTypes: registry,
@@ -372,7 +376,7 @@ describe("diagnostics channels (§6.5)", () => {
         onStoreAfterClose: "no-op",
       });
       await cache.close();
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         const res = await cache.get({
           id: "site:a",
@@ -413,7 +417,7 @@ describe("diagnostics channels (§6.5)", () => {
       store.get = async () => {
         throw readError;
       };
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         const thrown = await expectRejection(() =>
           cache.get({ id: "site:a", params: {}, directives: {} }),
@@ -440,7 +444,7 @@ describe("diagnostics channels (§6.5)", () => {
       store.get = async () => {
         throw readError;
       };
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         const thrown = await expectRejection(() =>
           cache
@@ -492,7 +496,7 @@ describe("diagnostics channels (§6.5)", () => {
         controller.abort();
         throw new Error("aborted by signal");
       };
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         await expectRejection(() =>
           cache.get(
@@ -521,7 +525,7 @@ describe("diagnostics channels (§6.5)", () => {
       await cache.store([
         { id: "site:a", content: "cached", directives: freshFor100 },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => ({
         content: "never",
         directives: freshFor100,
@@ -562,7 +566,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("served-from-producer is published at SETTLEMENT, after the producer resolves -- not at classification time", async () => {
       const { name, cache } = makeHarness("fetch-settlement");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const { promise: gate, resolve: releaseProducer } =
         Promise.withResolvers<void>();
       const producer = mock.fn(async (req: { readonly id: string }) => {
@@ -613,7 +617,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("producer-error: the error propagates; the fetch message arrives only after the producer rejects", async () => {
       const { name, cache } = makeHarness("fetch-producer-error");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producerError = new Error("origin down");
       const { promise: gate, resolve: releaseProducer } =
         Promise.withResolvers<void>();
@@ -672,7 +676,7 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => {
         await delay(30);
         return { content: "fresh-v2", directives: freshFor100 };
@@ -755,7 +759,7 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => {
         await delay(10);
         throw new Error("origin down");
@@ -806,7 +810,7 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => {
         await delay(10);
         throw new Error("origin down");
@@ -852,7 +856,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("aborted: the fetch settles as 'aborted' BEFORE the invocation's produce message; the result is still stored", async () => {
       const { name, cache } = makeHarness("fetch-abort-mid-producer");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => {
         await delay(80);
         return { content: "slow-but-stored", directives: freshFor100 };
@@ -923,7 +927,7 @@ describe("diagnostics channels (§6.5)", () => {
       const { promise: storeRead, resolve: releaseStoreRead } =
         Promise.withResolvers<never[]>();
       store.get = (async () => storeRead) as typeof store.get;
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => ({
         content: "never",
         directives: freshFor100,
@@ -967,7 +971,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("a pre-aborted signal settles as 'aborted' with no read message (the read never happened, so there is nothing to report -- distinct from a read that happened and failed)", async () => {
       const { name, cache } = makeHarness("fetch-pre-aborted");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => ({
         content: "never",
         directives: freshFor100,
@@ -1010,7 +1014,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("riders: a concurrent identical request performs its own read, then rides the in-flight invocation -- no new produce, fetch collapsed: true, collapsedCallerCount 2 (§7)", async () => {
       const { name, cache } = makeHarness("fetch-rider");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       // Gated rather than delayed, so the initiator's invocation is held
       // open for as long as the rider's read takes (a fixed pending window
       // flakes under suite load: the invocation settles and stores first,
@@ -1115,7 +1119,7 @@ describe("diagnostics channels (§6.5)", () => {
           directives: swrWindowDirectives,
         },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       let releaseProducer = () => {};
       const gate = new Promise<void>((resolve) => {
         releaseProducer = resolve;
@@ -1180,7 +1184,7 @@ describe("diagnostics channels (§6.5)", () => {
       store.get = async () => {
         throw readError;
       };
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => ({
         content: "from-producer",
         directives: freshFor100,
@@ -1226,7 +1230,7 @@ describe("diagnostics channels (§6.5)", () => {
       store.get = async () => {
         throw readError;
       };
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => ({
         content: "never",
         directives: freshFor100,
@@ -1262,13 +1266,13 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("wrapBulkProducer + onCacheReadFailure: 'throw': a mixed bypass and failed read returns independent slot outcomes", async () => {
+    it("produceMany + onCacheReadFailure: 'throw': a mixed bypass and failed read returns independent slot outcomes", async () => {
       const { name, store, cache } = makeHarness("fetch-bulk-throw-bypass");
       const readError = new Error("store exploded");
       store.get = async () => {
         throw readError;
       };
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(
         async (reqs: readonly { readonly id: string }[]) =>
           reqs.map((req) => ({
@@ -1328,13 +1332,11 @@ describe("diagnostics channels (§6.5)", () => {
     it("sole-type caches attribute every message to the sole resource type, even with the trivial guard", async () => {
       const name = uniqueCacheName("fetch-sole-type");
       const cache = new Cache({
-        // These tests inject or count individual store.get calls.
-
         store: new MemoryStore(),
         name,
         resourceTypes: soleVisitsRegistry,
       });
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async (req: { readonly id: string }) => ({
         content: `content-${req.id}`,
         directives: freshFor100,
@@ -1358,6 +1360,50 @@ describe("diagnostics channels (§6.5)", () => {
         capture.stop();
         await cache.close();
       }
+    });
+
+    describe("Bulk cancellation diagnostics", { timeout: 5_000 }, () => {
+      it("a pre-aborted mixed batch publishes every aborted fetch before any read starts", async () => {
+        const store = new MemoryStore();
+        const cache = new Cache({
+          store,
+          name: uniqueCacheName("bulk-cancellation"),
+          resourceTypes: RESOURCE_PREFIX_REGISTRY,
+        });
+        const capture = captureChannels(cache.name);
+        const read = mock.method(store, "get");
+        const producer = mock.fn(async () => []);
+        const wrapped = wrapProducer({ cache, produceMany: producer });
+        const reason = new Error("already aborted");
+        try {
+          await assert.rejects(
+            wrapped.getMany(
+              [
+                { id: "resource:bypass", directives: { maxAge: 0 } },
+                { id: "resource:read" },
+              ],
+              { signal: AbortSignal.abort(reason) },
+            ),
+            (error) => error === reason,
+          );
+          assert.deepEqual(
+            capture.fetch.map(({ resourceId, disposition }) => ({
+              resourceId,
+              disposition,
+            })),
+            [
+              { resourceId: "resource:bypass", disposition: "aborted" },
+              { resourceId: "resource:read", disposition: "aborted" },
+            ],
+          );
+          assert.equal(read.mock.callCount(), 0);
+          assert.equal(producer.mock.callCount(), 0);
+        } finally {
+          capture.stop();
+          await wrapped.close();
+          await cache.close();
+        }
+      });
     });
   });
 
@@ -1392,7 +1438,7 @@ describe("diagnostics channels (§6.5)", () => {
           directives: freshFor100,
         },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         const fr = await cache.get({
           id: "site:a",
@@ -1442,7 +1488,7 @@ describe("diagnostics channels (§6.5)", () => {
           directives: freshFor100,
         },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => ({
         content: "never",
         directives: freshFor100,
@@ -1501,7 +1547,7 @@ describe("diagnostics channels (§6.5)", () => {
           directives: freshFor100,
         },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         await cache
           .getMany([
@@ -1558,7 +1604,7 @@ describe("diagnostics channels (§6.5)", () => {
           date: secondsAgo(1),
         },
       ]);
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => {
         await delay(10);
         throw new Error("origin down");
@@ -1603,7 +1649,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("a varying producer's serves join to its stores on (resourceId, vary) -- the correlation the field exists for", async () => {
       const { name, cache } = makeHarness("vary-store-correlation");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(
         async (req: { readonly params: Readonly<Record<string, unknown>> }) => {
           const locale = req.params["locale"] === "fr" ? "fr" : "en";
@@ -1683,7 +1729,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("dispositions with no served variant OMIT the key rather than reporting `{}` (a real variant)", async () => {
       const { name, cache } = makeHarness("vary-absent-not-empty");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producerError = new Error("origin down");
       const producer = mock.fn(async () => {
         throw producerError;
@@ -1729,7 +1775,7 @@ describe("diagnostics channels (§6.5)", () => {
       store.get = async () => {
         throw readError;
       };
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         await expectRejection(() =>
           cache.get({
@@ -1758,7 +1804,7 @@ describe("diagnostics channels (§6.5)", () => {
   describe("produce channel (§6.5.3)", () => {
     it("durationMs measures invocation time", async () => {
       const { name, cache } = makeHarness("produce-duration");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => {
         await delay(60);
         return { content: "slow", directives: freshFor100 };
@@ -1780,9 +1826,67 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("wrapBulkProducer via bulkProducerByIdType: ONE invocation (and one produce message) per window whose requests[] spans types, while each sub-producer's batch stays type-pure", async () => {
+    describe("producer duration boundaries", suiteOptions, () => {
+      it("separates queue and invocation time from every logical known-set slot", async (t) => {
+        const clock = { now: 0 };
+        t.mock.method(performance, "now", () => clock.now);
+        const cache = cacheOver(undefined, { name: "producer-duration" });
+        await cache.store([
+          { id: "hit", content: "cached", directives: freshFor100 },
+        ]);
+        const scheduled = Promise.withResolvers<() => void>();
+        const producerGate = Promise.withResolvers<void>();
+        const client = wrapProducer({
+          cache,
+          producerBatching: { batchScheduleFn: scheduled.resolve },
+          produceMany: async (requests) => {
+            await producerGate.promise;
+            return requests.map(({ id }) => ({
+              content: id,
+              directives: freshFor100,
+            }));
+          },
+        });
+        const capture = captureChannels(cache.name, { measurements: true });
+        try {
+          const result = client.getMany([
+            { id: "hit" },
+            { id: "a" },
+            { id: "b" },
+          ]);
+          const dispatch = await scheduled.promise;
+          await nextTurn();
+          assert.equal(capture.fetch.length, 0);
+          clock.now = 5;
+          dispatch();
+          clock.now = 12;
+          producerGate.resolve();
+          assert.equal((await result).length, 3);
+          assert.equal(capture.produce.length, 1);
+          const operation = capture.produce[0]!;
+          assert.equal(operation.operation, "produceMany");
+          assert.equal(operation.automatic, true);
+          assert.equal(operation.requestCount, 2);
+          assert.equal(operation.failedRequestCount, 0);
+          assert.equal(operation.operationFailed, false);
+          assert.equal(operation.collapsedCallerCount, 1);
+          assert.equal(operation.queueWaitTotalMs, 10);
+          assert.equal(operation.durationMs, 7);
+          assert.deepEqual(
+            capture.fetch.map(({ durationMs }) => durationMs),
+            [12, 12, 12],
+          );
+          await client.close();
+        } finally {
+          capture.stop();
+          await cache.close();
+        }
+      });
+    });
+
+    it("produceMany via bulkProducerByIdType: ONE invocation (and one produce message) per window whose requests[] spans types, while each sub-producer's batch stays type-pure", async () => {
       const { name, cache } = makeHarness("produce-bulk");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const siteBulk = mock.fn(
         async (reqs: readonly { readonly id: string }[]) =>
           reqs.map((req) => ({
@@ -1881,9 +1985,9 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("wrapBulkProducer: per-request Error elements are returned in place; their fetch settles as producer-error", async () => {
+    it("produceMany: per-request Error elements are returned in place; their fetch settles as producer-error", async () => {
       const { name, cache } = makeHarness("produce-bulk-errors");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const perRequestError = new Error("this one failed");
       const siteBulk = mock.fn(
         async (reqs: readonly { readonly id: string }[]) =>
@@ -1947,9 +2051,9 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("wrapBulkProducer: a short result array fails the whole invocation: contract errors reject without slot outcomes or writes", async () => {
+    it("produceMany: a short result array fails the whole invocation: contract errors reject without slot outcomes or writes", async () => {
       const { name, cache } = makeHarness("produce-bulk-short");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       // A buggy producer that returns one result for three requests. An
       // under-return poisons the positional (result, request) pairing -- a
       // dropped MIDDLE element would pair later results with the wrong
@@ -2001,9 +2105,9 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("wrapBulkProducer: a wholesale producer rejection settles every element's fetch as producer-error and returns positional Errors", async () => {
+    it("produceMany: a wholesale producer rejection settles every element's fetch as producer-error and returns positional Errors", async () => {
       const { name, cache } = makeHarness("produce-bulk-wholesale");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const wholesaleError = new Error("entire batch failed");
       const siteBulk = mock.fn(async () => {
         throw wholesaleError;
@@ -2047,7 +2151,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("hashed-input wrappers publish the same channel stream, attributed with minted ids: miss emits read/produce/store-entry/fetch; hit emits read/fetch only", async () => {
       const { name, cache } = makeHarness("produce-computing-channels");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       // One resource type, so no hashed-input producer is needed: the two functions
       // are the whole contract.
       const compute = wrapHashedInputProducer({
@@ -2115,12 +2219,78 @@ describe("diagnostics channels (§6.5)", () => {
         await cache.close();
       }
     });
+
+    describe("producer failed request counts", () => {
+      for (const mode of [
+        "scalar-success",
+        "scalar-failure",
+        "partial",
+        "rejection",
+        "contract",
+      ] as const) {
+        it(`counts failed slots for ${mode}`, async () => {
+          const { name, cache } = makeHarness(`failed-count-${mode}`);
+          const capture = captureChannels(name, { measurements: true });
+          const scalar = mode.startsWith("scalar");
+          const client = scalar
+            ? wrapProducer({
+                cache,
+                produce: async () => {
+                  if (mode === "scalar-failure")
+                    throw new Error("scalar failed");
+                  return { content: "ok", directives: freshFor100 };
+                },
+              })
+            : wrapProducer({
+                cache,
+                produceMany: async (requests) => {
+                  if (mode === "rejection") throw new Error("batch failed");
+                  if (mode === "contract") return [];
+                  return requests.map((_, index) =>
+                    index === 0
+                      ? new Error("slot failed")
+                      : { content: "ok", directives: freshFor100 },
+                  );
+                },
+              });
+          try {
+            const pending = client.getMany(
+              scalar
+                ? [{ id: "site:a" }]
+                : [{ id: "site:a" }, { id: "site:b" }],
+            );
+            if (mode === "contract")
+              await assert.rejects(pending, /results for/);
+            else await pending;
+            assert.equal(capture.produce.length, 1);
+            assert.equal(
+              capture.produce[0]?.failedRequestCount,
+              mode === "scalar-success"
+                ? 0
+                : mode === "rejection" || mode === "contract"
+                  ? 2
+                  : 1,
+            );
+            assert.equal(
+              capture.produce[0]?.outcome,
+              mode === "scalar-success" || mode === "partial"
+                ? "success"
+                : "error",
+            );
+          } finally {
+            capture.stop();
+            await client.close();
+            await cache.close();
+          }
+        });
+      }
+    });
   });
 
   describe("store-entry channel (§6.5.4)", () => {
     it("publishes one fully-attributed message per stored entry, carrying vary, validators, and the store-reported relationship", async () => {
       const { name, cache } = makeHarness("store-entry-basic");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const vary = { someParam: "someValue" };
       try {
         await cache.store([
@@ -2187,7 +2357,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("relationshipToExistingStoredData is undefined when not comparable (empty validators)", async () => {
       const { name, cache } = makeHarness("store-entry-uncomparable");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         await cache.store([
           {
@@ -2228,7 +2398,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("in-call same-variant duplicates still emit one message each; the losing duplicate's relationship is undefined", async () => {
       const { name, cache } = makeHarness("store-entry-duplicates");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       try {
         await cache.store([
           {
@@ -2259,7 +2429,7 @@ describe("diagnostics channels (§6.5)", () => {
 
     it("supplemental entries are attributed to THEIR OWN resource type, not the producing flow's", async () => {
       const { name, cache } = makeHarness("store-entry-supplemental");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const producer = mock.fn(async () => ({
         content: "site-content",
         validators: { contentHash: "h-site" },
@@ -2327,13 +2497,15 @@ describe("diagnostics channels (§6.5)", () => {
       const name = uniqueCacheName("golden-e2e");
       const store = new MemoryStore();
       const cache = new Cache({
-        // These tests inject or count individual store.get calls.
-
         store: store,
         name,
         resourceTypes: registry,
       });
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
+      // §7 documents the cache-level channels only, so the positional
+      // assertions below skip read-store messages.
+      const documentedMessages = () =>
+        capture.all.filter((m) => m.channel !== "read-store");
 
       const siteId = "site:X" as const;
       const bizIds = ["biz:B1", "biz:B2"] as const;
@@ -2486,7 +2658,7 @@ describe("diagnostics channels (§6.5)", () => {
         // the read. (The relative order of the fetch settlements vs the
         // store-entry publishes is NOT asserted: the doc leaves open whether
         // callers settle before the fire-and-forget store completes.)
-        const channelOrder = capture.all.map((m) => m.channel);
+        const channelOrder = documentedMessages().map((m) => m.channel);
         expect(channelOrder.indexOf("read")).to.equal(0);
         expect(channelOrder.indexOf("produce")).to.be.greaterThan(
           channelOrder.indexOf("read"),
@@ -2499,11 +2671,11 @@ describe("diagnostics channels (§6.5)", () => {
         );
 
         // ---- t=1: business B1's slice, served from cache ----
-        const t1Start = capture.all.length;
+        const t1Start = documentedMessages().length;
         const sliceRes = await getVisits.get({ id: "biz:B1" });
         expect(sliceRes.content).to.equal("slice-biz:B1");
         expect(bizProducer.mock.callCount()).to.equal(0);
-        const t1Messages = capture.all.slice(t1Start);
+        const t1Messages = documentedMessages().slice(t1Start);
         expect(t1Messages).to.have.lengthOf(2);
         expect(t1Messages[0]).to.deep.equal({
           channel: "read",
@@ -2532,13 +2704,13 @@ describe("diagnostics channels (§6.5)", () => {
 
         // ---- t=2 (> TTL, inside SWR window): stale serve + revalidation ----
         await delay(150); // site entry (freshUntilAge 0.1) is now stale
-        const t2Start = capture.all.length;
+        const t2Start = documentedMessages().length;
         // No consumer directives: the producer's generous whileRevalidate
         // window (100s) selects the SWR path regardless of exactly how stale
         // the entry has become by now.
         const swrRes = await getVisits.get({ id: siteId });
         expect(swrRes.content).to.equal("site-visits-v1");
-        const t2Read = capture.all[t2Start];
+        const t2Read = documentedMessages()[t2Start];
         expect(t2Read).to.deep.equal({
           channel: "read",
           message: {
@@ -2607,7 +2779,7 @@ describe("diagnostics channels (§6.5)", () => {
         // ---- producer outage; foreground caller inside the if-error window ----
         phase.producerHealthy = false;
         await delay(150); // the revalidated entry (freshUntilAge 0.1) is stale again
-        const t3Start = capture.all.length;
+        const t3Start = documentedMessages().length;
         const ifErrorRes = await getVisits.get({
           id: siteId,
           // Consumer directives put this request outside the SWR window but
@@ -2621,7 +2793,7 @@ describe("diagnostics channels (§6.5)", () => {
           },
         });
         expect(ifErrorRes.content).to.equal("site-visits-v1");
-        expect(capture.all[t3Start]).to.deep.equal({
+        expect(documentedMessages()[t3Start]).to.deep.equal({
           channel: "read",
           message: {
             cache: name,
@@ -2650,7 +2822,7 @@ describe("diagnostics channels (§6.5)", () => {
         });
 
         // ---- outage, caller OUTSIDE the if-error window: the error surfaces ----
-        const t4Start = capture.all.length;
+        const t4Start = documentedMessages().length;
         const thrown = await expectRejection(() =>
           getVisits.get({
             id: siteId,
@@ -2664,7 +2836,7 @@ describe("diagnostics channels (§6.5)", () => {
           }),
         );
         expect(thrown).to.equal(outageError);
-        expect(capture.all[t4Start]).to.deep.equal({
+        expect(documentedMessages()[t4Start]).to.deep.equal({
           channel: "read",
           message: {
             cache: name,
@@ -2705,7 +2877,7 @@ describe("diagnostics channels (§6.5)", () => {
             message.requests.forEach((r) => {
               expect(["site_day", "business_slice"]).to.include(r.resourceType);
             });
-          } else {
+          } else if (channel !== "read-store") {
             expect(["site_day", "business_slice"]).to.include(
               message.resourceType,
             );
@@ -2717,124 +2889,5 @@ describe("diagnostics channels (§6.5)", () => {
         await cache.close();
       }
     });
-  });
-});
-
-describe("producer failed request counts", () => {
-  for (const mode of [
-    "scalar-success",
-    "scalar-failure",
-    "partial",
-    "rejection",
-    "contract",
-  ] as const) {
-    it(`counts failed slots for ${mode}`, async () => {
-      const { name, cache } = makeHarness(`failed-count-${mode}`);
-      const capture = captureChannels(name);
-      const scalar = mode.startsWith("scalar");
-      const client = scalar
-        ? wrapProducer({
-            cache,
-            produce: async () => {
-              if (mode === "scalar-failure") throw new Error("scalar failed");
-              return { content: "ok", directives: freshFor100 };
-            },
-          })
-        : wrapProducer({
-            cache,
-            produceMany: async (requests) => {
-              if (mode === "rejection") throw new Error("batch failed");
-              if (mode === "contract") return [];
-              return requests.map((_, index) =>
-                index === 0
-                  ? new Error("slot failed")
-                  : { content: "ok", directives: freshFor100 },
-              );
-            },
-          });
-      try {
-        const pending = client.getMany(
-          scalar ? [{ id: "site:a" }] : [{ id: "site:a" }, { id: "site:b" }],
-        );
-        if (mode === "contract") await assert.rejects(pending, /results for/);
-        else await pending;
-        assert.equal(capture.produce.length, 1);
-        assert.equal(
-          capture.produce[0]?.failedRequestCount,
-          mode === "scalar-success"
-            ? 0
-            : mode === "rejection" || mode === "contract"
-              ? 2
-              : 1,
-        );
-        assert.equal(
-          capture.produce[0]?.outcome,
-          mode === "scalar-success" || mode === "partial" ? "success" : "error",
-        );
-      } finally {
-        capture.stop();
-        await client.close();
-        await cache.close();
-      }
-    });
-  }
-});
-
-describe("Bulk cancellation diagnostics", { timeout: 5_000 }, () => {
-  function makeCache() {
-    const registry = {
-      resources: resourceType<number>()({
-        matches: (id): id is string => id.startsWith("resource:"),
-      }),
-    };
-    const store = new MemoryStore<SpecOf<typeof registry>>();
-    const cache = new Cache({
-      name: uniqueCacheName("bulk-cancellation"),
-      resourceTypes: registry,
-      store,
-    });
-    return { cache, store };
-  }
-
-  it("a pre-aborted mixed batch publishes every aborted fetch before any read starts", async () => {
-    const { cache, store } = makeCache();
-    const { cacheFetchChannel } = await import("./diagnostics.js");
-    const fetches: { resourceId: string; disposition: string }[] = [];
-    const onFetch = (message: CacheFetchMessage) => {
-      if (message.cache === cache.name) fetches.push(message);
-    };
-    cacheFetchChannel.subscribe(onFetch);
-    const read = mock.method(store, "get");
-    const producer = mock.fn(async () => []);
-    const wrapped = wrapProducer({ cache, produceMany: producer });
-    const reason = new Error("already aborted");
-    try {
-      await assert.rejects(
-        wrapped.getMany(
-          [
-            { id: "resource:bypass", directives: { maxAge: 0 } },
-            { id: "resource:read" },
-          ],
-          { signal: AbortSignal.abort(reason) },
-        ),
-        (error) => error === reason,
-      );
-      assert.deepEqual(
-        fetches.map(({ resourceId, disposition }) => ({
-          resourceId,
-          disposition,
-        })),
-        [
-          { resourceId: "resource:bypass", disposition: "aborted" },
-          { resourceId: "resource:read", disposition: "aborted" },
-        ],
-      );
-      assert.equal(read.mock.callCount(), 0);
-      assert.equal(producer.mock.callCount(), 0);
-    } finally {
-      cacheFetchChannel.unsubscribe(onFetch);
-      await wrapped.close();
-      await cache.close();
-    }
   });
 });

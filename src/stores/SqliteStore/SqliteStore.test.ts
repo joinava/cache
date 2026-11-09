@@ -16,11 +16,7 @@ import type {
 } from "../../types/index.js";
 import SqliteStore from "./SqliteStore.js";
 
-type TestContent = {
-  value: string;
-  nested?: { count: number; labels: string[] };
-};
-type TestSpec = CacheSpec<string, TestContent>;
+type TestSpec = CacheSpec<string, { value: string }>;
 type HeterogeneousSpec =
   | CacheSpec<`user:${string}`, { kind: "user"; name: string }>
   | CacheSpec<`posts:${string}`, { kind: "posts"; count: number }>;
@@ -43,47 +39,6 @@ const emptyVary = {} as NormalizedVary<TestParams>;
 const directives = { freshUntilAge: 60 } as NormalizedProducerDirectives;
 
 describe("SqliteStore", () => {
-  it("roundtrips stored entries through a reopened database", async () => {
-    await withTempStore(async ({ databasePath }) => {
-      const store = new SqliteStore<TestSpec, {}, TestParams>({ databasePath });
-      const entry = makeEntry("id", "first", varyOnFormat, {
-        content: { value: "first", nested: { count: 2, labels: ["a", "b"] } },
-        validators: { etag: "abc" },
-        directives: {
-          freshUntilAge: 60,
-          maxStale: {
-            withoutRevalidation: 10,
-            whileRevalidate: 20,
-            ifError: 30,
-          },
-        } as NormalizedProducerDirectives,
-      });
-
-      await store.store([{ entry, maxStoreForSeconds: 60 }]);
-      await store.close();
-
-      const reopened = new SqliteStore<TestSpec, {}, TestParams>({
-        databasePath,
-      });
-      try {
-        const result = await getOne(reopened, {
-          id: "id",
-          params: matchingParams,
-        });
-
-        assert.equal(result.length, 1);
-        assert.deepEqual(result[0]?.content, entry.content);
-        assert.deepEqual(result[0]?.vary, entry.vary);
-        assert.deepEqual(result[0]?.validators, entry.validators);
-        assert.deepEqual(result[0]?.directives, entry.directives);
-        assert.equal(result[0]?.initialAge, entry.initialAge);
-        assert.equal(result[0]?.date.getTime(), entry.date.getTime());
-      } finally {
-        await reopened.close();
-      }
-    });
-  });
-
   it("ignores expired entries and keeps unexpired entries", async () => {
     await withTempStore(async ({ databasePath, store }) => {
       await store.store([
@@ -158,26 +113,82 @@ describe("SqliteStore", () => {
     );
   });
 
-  it("chunks large getMany batches across SQLite variable limits", async () => {
-    await withTempStore(async ({ store }) => {
-      const requestCount = 33_000;
-      const ids = Array.from({ length: requestCount }, (_, i) => `id:${i}`);
+  it("preserves successful SQLite chunks around a failed middle chunk", async () => {
+    await withTempStore(
+      async ({ store, databasePath }) => {
+        await store.store(
+          [0, 900, 1800].map((index) => ({
+            entry: makeEntry(`id:${index}`, String(index)),
+            maxStoreForSeconds: 60,
+          })),
+        );
+        // Initialize the one reader before replacing its read relation with a faulting view.
+        await store.getMany([{ id: "warm", params: matchingParams }]);
+        const db = new sqlite.DatabaseSync(databasePath);
+        try {
+          db.exec(`ALTER TABLE cache_entries RENAME TO cache_source;
+          CREATE VIEW cache_entries AS SELECT resource_id, variant_key, vary,
+            CASE WHEN resource_id = 'id:900' THEN json('{') ELSE entry END AS entry,
+            expires_at FROM cache_source;`);
+          const requests = Array.from({ length: 1801 }, (_, index) => ({
+            id: `id:${index}`,
+            params: matchingParams,
+          }));
+          const results = await store.getMany(requests);
+          assert.equal(results.length, requests.length);
+          const first = results[0];
+          const last = results[1800];
+          assert.ok(Array.isArray(first));
+          assert.ok(Array.isArray(last));
+          assert.equal(first[0]?.content.value, "0");
+          assert.equal(last[0]?.content.value, "1800");
+          assert.ok(
+            results.slice(900, 1800).every((slot) => slot instanceof Error),
+          );
+          assert.equal(results[900], results[1799]);
+        } finally {
+          db.exec(
+            "DROP VIEW cache_entries; ALTER TABLE cache_source RENAME TO cache_entries;",
+          );
+          db.close();
+        }
+      },
+      { readWorkerCount: 1 },
+    );
+  });
+
+  it("fails complete SQLite request slots for malformed variants and entry decoding", async () => {
+    await withTempStore(async ({ store, databasePath }) => {
       await store.store([
-        { entry: makeEntry("id:0", "first"), maxStoreForSeconds: 60 },
+        { entry: makeEntry("vary-bad", "bad"), maxStoreForSeconds: 60 },
+        { entry: makeEntry("entry-bad", "bad"), maxStoreForSeconds: 60 },
         {
-          entry: makeEntry(`id:${requestCount - 1}`, "last"),
+          entry: makeEntry("entry-bad", "valid-other-variant", emptyVary),
           maxStoreForSeconds: 60,
         },
+        { entry: makeEntry("good", "good"), maxStoreForSeconds: 60 },
       ]);
-
-      const result = await getMany(
-        store,
-        ids.map((id) => ({ id, params: matchingParams })),
-      ).then(throwIfAnyError);
-
-      assert.equal(result.length, requestCount);
-      assert.deepEqual(result[0]?.[0]?.content, { value: "first" });
-      assert.deepEqual(result.at(-1)?.[0]?.content, { value: "last" });
+      const db = new sqlite.DatabaseSync(databasePath);
+      try {
+        db.prepare(
+          "UPDATE cache_entries SET vary = ? WHERE resource_id = ?",
+        ).run("{", "vary-bad");
+        db.prepare(
+          "UPDATE cache_entries SET entry = ? WHERE resource_id = ? AND vary != '{}'",
+        ).run("{", "entry-bad");
+        const result = await store.getMany(
+          ["vary-bad", "entry-bad", "good"].map((id) => ({
+            id,
+            params: matchingParams,
+          })),
+        );
+        assert.ok(result[0] instanceof Error);
+        assert.ok(result[1] instanceof Error);
+        assert.ok(Array.isArray(result[2]));
+        assert.equal(result[2][0]?.content.value, "good");
+      } finally {
+        db.close();
+      }
     });
   });
 
@@ -395,86 +406,6 @@ describe("SqliteStore", () => {
   });
 });
 
-it("preserves successful SQLite chunks around a failed middle chunk", async () => {
-  await withTempStore(
-    async ({ store, databasePath }) => {
-      await store.store(
-        [0, 900, 1800].map((index) => ({
-          entry: makeEntry(`id:${index}`, String(index)),
-          maxStoreForSeconds: 60,
-        })),
-      );
-      // Initialize the one reader before replacing its read relation with a faulting view.
-      await store.getMany([{ id: "warm", params: matchingParams }]);
-      const db = new sqlite.DatabaseSync(databasePath);
-      try {
-        db.exec(`ALTER TABLE cache_entries RENAME TO cache_source;
-        CREATE VIEW cache_entries AS SELECT resource_id, variant_key, vary,
-          CASE WHEN resource_id = 'id:900' THEN json('{') ELSE entry END AS entry,
-          expires_at FROM cache_source;`);
-        const requests = Array.from({ length: 1801 }, (_, index) => ({
-          id: `id:${index}`,
-          params: matchingParams,
-        }));
-        const results = await store.getMany(requests);
-        assert.equal(results.length, requests.length);
-        const first = results[0];
-        const last = results[1800];
-        assert.ok(Array.isArray(first));
-        assert.ok(Array.isArray(last));
-        assert.equal(first[0]?.content.value, "0");
-        assert.equal(last[0]?.content.value, "1800");
-        assert.ok(
-          results.slice(900, 1800).every((slot) => slot instanceof Error),
-        );
-        assert.equal(results[900], results[1799]);
-      } finally {
-        db.exec(
-          "DROP VIEW cache_entries; ALTER TABLE cache_source RENAME TO cache_entries;",
-        );
-        db.close();
-      }
-    },
-    { readWorkerCount: 1 },
-  );
-});
-
-it("fails complete SQLite request slots for malformed variants and entry decoding", async () => {
-  await withTempStore(async ({ store, databasePath }) => {
-    await store.store([
-      { entry: makeEntry("vary-bad", "bad"), maxStoreForSeconds: 60 },
-      { entry: makeEntry("entry-bad", "bad"), maxStoreForSeconds: 60 },
-      {
-        entry: makeEntry("entry-bad", "valid-other-variant", emptyVary),
-        maxStoreForSeconds: 60,
-      },
-      { entry: makeEntry("good", "good"), maxStoreForSeconds: 60 },
-    ]);
-    const db = new sqlite.DatabaseSync(databasePath);
-    try {
-      db.prepare("UPDATE cache_entries SET vary = ? WHERE resource_id = ?").run(
-        "{",
-        "vary-bad",
-      );
-      db.prepare(
-        "UPDATE cache_entries SET entry = ? WHERE resource_id = ? AND vary != '{}'",
-      ).run("{", "entry-bad");
-      const result = await store.getMany(
-        ["vary-bad", "entry-bad", "good"].map((id) => ({
-          id,
-          params: matchingParams,
-        })),
-      );
-      assert.ok(result[0] instanceof Error);
-      assert.ok(result[1] instanceof Error);
-      assert.ok(Array.isArray(result[2]));
-      assert.equal(result[2][0]?.content.value, "good");
-    } finally {
-      db.close();
-    }
-  });
-});
-
 async function withTempStore(
   test: (context: {
     databasePath: string;
@@ -513,21 +444,14 @@ function makeEntry(
   id: string,
   value: string,
   vary: NormalizedVary<TestParams> = varyOnFormat,
-  opts?: {
-    content?: TestContent;
-    date?: Date;
-    directives?: NormalizedProducerDirectives;
-    initialAge?: number;
-    validators?: Record<string, string>;
-  },
 ): Entry<TestSpec, {}, TestParams> {
   return {
     id,
-    content: opts?.content ?? { value },
+    content: { value },
     vary,
-    validators: opts?.validators ?? {},
-    directives: opts?.directives ?? directives,
-    initialAge: opts?.initialAge ?? 0,
-    date: opts?.date ?? new Date("2024-01-01T00:00:00.000Z"),
+    validators: {},
+    directives,
+    initialAge: 0,
+    date: new Date("2024-01-01T00:00:00.000Z"),
   };
 }

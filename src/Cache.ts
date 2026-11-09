@@ -252,12 +252,13 @@ export default class Cache<
 > {
   readonly #logger: Bind1<Logger, "cache">;
   readonly #dataStore: Store<StoreSupportedTypes, Validators, Params>;
-  /** Set iff the cache was built with batching enabled. */
+  /** Set iff the Store has getMany. A get-only Store reads each request directly. */
   readonly #readBatcher:
     | StoreReadBatcher<StoreSupportedTypes, Validators, Params>
     | undefined;
   #closed = false;
   #closePromise: Promise<void> | undefined;
+  /** Store calls in flight. close() waits for them before it closes the Store. */
   readonly #operations = new Set<Promise<unknown>>();
   readonly #onGetAfterClose: "throw" | "act-empty";
   readonly #onStoreAfterClose: "throw" | "no-op";

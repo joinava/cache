@@ -541,6 +541,9 @@ export default function wrapProducer<
   const pendingResources = new PendingResources<SpecOf<RT>, Validators, Params>(
     normalizeVaryBound,
   );
+  // In-flight work that close() drains, in this order: accepted calls, their
+  // per-slot pipelines, the producer scheduler, then cache writes. Writes are
+  // separate because they outlive the call that started them.
   const writes = new Set<Promise<void>>();
   const calls = new Set<Promise<unknown>>();
   const pipelines = new Set<Promise<unknown>>();

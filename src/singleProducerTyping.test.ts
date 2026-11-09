@@ -130,7 +130,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
       }
     });
 
-    it("wrapBulkProducer: a bare bulk producer accepts request elements of every registry type", async () => {
+    it("produceMany: a bare bulk producer accepts request elements of every registry type", async () => {
       const cache = makeCache("sp-typing-bare-bulk");
       try {
         const getBulk = wrapProducer({
@@ -205,7 +205,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
           void wrapProducer({cache, produce: { story: storyOnlyProducer }});
 
           // prettier-ignore
-          // @ts-expect-error likewise for wrapBulkProducer / bulkProducerByIdType
+          // @ts-expect-error likewise for produceMany / bulkProducerByIdType
           void wrapProducer({cache, produceMany: { story: storyOnlyBulkProducer }});
         }
       } finally {

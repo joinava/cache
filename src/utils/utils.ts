@@ -207,6 +207,7 @@ export async function readStoreObserved<
     if (
       !Array.isArray(results) ||
       results.length !== requests.length ||
+      // Array.from turns holes into undefined; some() would skip them.
       Array.from(results).some(
         (slot) => !(slot instanceof Error) && !Array.isArray(slot),
       )

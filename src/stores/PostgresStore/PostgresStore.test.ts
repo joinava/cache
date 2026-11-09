@@ -1,8 +1,7 @@
 import { throwIfAnyError } from "../../utils/utils.js";
 import { getMany, getOne } from "../../../test/fixtures.js";
 import assert from "node:assert/strict";
-import { describe, it, mock } from "node:test";
-import { randomUUID } from "node:crypto";
+import { describe, it } from "node:test";
 import pg from "pg";
 import fc from "fast-check";
 import {
@@ -28,19 +27,23 @@ import PostgresStore, {
 } from "./PostgresStore.js";
 
 type StringSpec = CacheSpec<string, string>;
+type Spec = CacheSpec<string, { value: number }>;
+type Params = PostgresStoreSupportedParams;
+type Input = StoreEntryInput<Spec, AnyValidators, Params>;
+type Statement = { sql: string; parameters: readonly unknown[] };
+type QueryMock = ReturnType<typeof postgresStoreFixture>["queryMock"];
 
-const noParams =
-  {} as unknown as NormalizedParams<PostgresStoreSupportedParams>;
+const noParams = {} as NormalizedParams<Params>;
+const emptyVary = {} as NormalizedVary<Params>;
+const directives = { freshUntilAge: 60 } as NormalizedProducerDirectives;
 
-function makeEntry(
-  id: string,
-): Entry<StringSpec, AnyValidators, PostgresStoreSupportedParams> {
+function makeEntry(id: string): Entry<StringSpec, AnyValidators, Params> {
   return {
     id,
     content: id,
-    vary: {} as unknown as NormalizedVary<PostgresStoreSupportedParams>,
+    vary: emptyVary,
     validators: {},
-    directives: { freshUntilAge: 60 } as NormalizedProducerDirectives,
+    directives,
     initialAge: 0,
     date: new Date("2024-01-01T00:00:00.000Z"),
   };
@@ -76,12 +79,6 @@ async function getManyStatements(ids: readonly string[]) {
   }
 }
 
-type Spec = CacheSpec<string, { value: number }>;
-type Params = PostgresStoreSupportedParams;
-type Input = StoreEntryInput<Spec, AnyValidators, Params>;
-type Statement = { sql: string; parameters: readonly unknown[] };
-const emptyVary = {} as NormalizedVary<Params>;
-const directives = { freshUntilAge: 60 } as NormalizedProducerDirectives;
 function input(id: string, value: number, date = new Date(1_000)): Input {
   const entry: Entry<Spec, AnyValidators, Params> = {
     id,
@@ -94,42 +91,42 @@ function input(id: string, value: number, date = new Date(1_000)): Input {
   };
   return { entry, maxStoreForSeconds: 60 };
 }
-async function fixture() {
-  const schema = `cache_bulk_${randomUUID().replaceAll("-", "")}`;
-  const qualified = `"${schema}"."entries"`;
-  const pool = new pg.Pool({
-    host: process.env["DATABASE_HOST"],
-    port: Number(process.env["DATABASE_PORT"]),
-    user: process.env["DATABASE_USER"],
-    password: process.env["DATABASE_PASSWORD"],
-    database: process.env["DATABASE_NAME"],
-    statement_timeout: 15_000,
-  });
-  const store = new PostgresStore<Spec, AnyValidators, Params>(pool, {
-    schemaName: schema,
-    tableName: "entries",
-  });
-  await getOne(store, {
-    id: "initialize",
-    params: {} as NormalizedParams<Params>,
-  });
+
+/**
+ * Creates a Postgres store for `{ value: number }` content, with its schema and
+ * table already created.
+ */
+async function initializedStoreFixture() {
+  const fixture = postgresStoreFixture({ statementTimeoutMs: 15_000 });
+  // The shared fixture types content as JSON. These tests read `content.value`.
+  const store = fixture.postgresStore as unknown as PostgresStore<
+    Spec,
+    AnyValidators,
+    Params
+  >;
+  // Forces lazy schema and table creation, so later statement counts exclude DDL.
+  await getOne(store, { id: "initialize", params: noParams });
   return {
+    ...fixture,
     store,
-    pool,
-    qualified,
-    cleanup: async () => {
-      await pool.query(`drop schema "${schema}" cascade`);
-      await pool.end();
-    },
+    qualified: `"${fixture.schemaName}"."${fixture.tableName}"`,
   };
 }
+
+/**
+ * Records every statement that the fixture's pool clients send. The optional
+ * `beforeQuery` hook can delay a statement until its promise settles. Every
+ * pool client uses the fixture's query mock, so this also records statements
+ * from clients that the pool creates later. Callers must call `restore()`.
+ */
 function observeQueries(
+  queryMock: QueryMock,
   beforeQuery?: (statement: Statement) => Promise<void> | undefined,
 ) {
   const statements: Statement[] = [];
   // oxlint-disable-next-line typescript-eslint/unbound-method -- Reflect.apply below restores each actual client as the receiver.
   const original = pg.Client.prototype.query;
-  const query = mock.method(pg.Client.prototype, "query", function (
+  queryMock.mock.mockImplementation(function (
     this: pg.Client,
     ...args: unknown[]
   ) {
@@ -143,15 +140,8 @@ function observeQueries(
       ? Reflect.apply(original, this, args)
       : pending.then(() => Reflect.apply(original, this, args));
   } as typeof pg.Client.prototype.query);
-  return { statements, restore: () => query.mock.restore() };
+  return { statements, restore: () => queryMock.mock.restore() };
 }
-const postgresConfigured = [
-  "DATABASE_HOST",
-  "DATABASE_PORT",
-  "DATABASE_USER",
-  "DATABASE_PASSWORD",
-  "DATABASE_NAME",
-].every((key) => process.env[key] !== undefined);
 
 describe(
   "PostgresStore.getMany",
@@ -386,21 +376,21 @@ describe(
               content: "json",
               vary: {
                 format: "json",
-              } as unknown as NormalizedVary<PostgresStoreSupportedParams>,
+              } as unknown as NormalizedVary<Params>,
             },
             {
               ...makeEntry("a"),
               content: "absent",
               vary: {
                 format: null,
-              } as unknown as NormalizedVary<PostgresStoreSupportedParams>,
+              } as unknown as NormalizedVary<Params>,
             },
             {
               ...makeEntry("a"),
               content: "html",
               vary: {
                 format: "html",
-              } as unknown as NormalizedVary<PostgresStoreSupportedParams>,
+              } as unknown as NormalizedVary<Params>,
             },
           ].map((entry) => ({ entry, maxStoreForSeconds: 60 })),
         );
@@ -410,7 +400,7 @@ describe(
             id: "a",
             params: {
               format: "json",
-            } as unknown as NormalizedParams<PostgresStoreSupportedParams>,
+            } as unknown as NormalizedParams<Params>,
           },
           { id: "missing", params: noParams },
           { id: "a", params: noParams },
@@ -418,7 +408,7 @@ describe(
             id: "a",
             params: {
               format: "json",
-            } as unknown as NormalizedParams<PostgresStoreSupportedParams>,
+            } as unknown as NormalizedParams<Params>,
           },
         ]).then(throwIfAnyError);
         assert.deepEqual(
@@ -443,7 +433,7 @@ describe(
                 id: "a",
                 params: {
                   format,
-                } as unknown as NormalizedParams<PostgresStoreSupportedParams>,
+                } as unknown as NormalizedParams<Params>,
               },
             ]).then(throwIfAnyError),
           );
@@ -465,14 +455,14 @@ describe(
               content: "absent",
               vary: {
                 format: null,
-              } as unknown as NormalizedVary<PostgresStoreSupportedParams>,
+              } as unknown as NormalizedVary<Params>,
             },
             {
               ...makeEntry("empty-vary"),
               content: "json",
               vary: {
                 format: "json",
-              } as unknown as NormalizedVary<PostgresStoreSupportedParams>,
+              } as unknown as NormalizedVary<Params>,
             },
           ].map((entry) => ({ entry, maxStoreForSeconds: 60 })),
         );
@@ -486,8 +476,7 @@ describe(
           { unrelated: "present" },
         ].map((params) => ({
           id: "empty-vary",
-          params:
-            params as unknown as NormalizedParams<PostgresStoreSupportedParams>,
+          params: params as unknown as NormalizedParams<Params>,
         }));
         const expected = [
           ["absent", "any"],
@@ -576,11 +565,13 @@ describe(
 
 describe(
   "PostgresStore bulk persistence",
-  postgresConfigured ? {} : { skip: "Postgres is not configured" },
+  postgresEnvironmentIsConfigured()
+    ? {}
+    : { skip: "Postgres environment variables are not configured" },
   () => {
     it("keeps the one-statement fast path for a small write", async () => {
-      const f = await fixture();
-      const observed = observeQueries();
+      const f = await initializedStoreFixture();
+      const observed = observeQueries(f.queryMock);
       try {
         assert.deepEqual(await f.store.store([input("one", 1)]), [
           { relationshipToExistingStoredData: "is-new" },
@@ -597,8 +588,8 @@ describe(
       "stores 23000 unique slots beyond the former bind limit with ordered duplicate metadata",
       { timeout: 30_000 },
       async () => {
-        const f = await fixture();
-        const observed = observeQueries();
+        const f = await initializedStoreFixture();
+        const observed = observeQueries(f.queryMock);
         const entries = Array.from({ length: 23_000 }, (_, index) =>
           input(`id:${String(index).padStart(5, "0")}`, 1),
         );
@@ -637,13 +628,13 @@ describe(
               statement.sql.includes("'validators'"),
           );
           assert.equal(metadata.length, 0);
-          const rows = await f.pool.query<{ count: number }>(
+          const rows = await f.postgres.query<{ count: number }>(
             `select count(*)::int as count from ${f.qualified}`,
           );
           assert.equal(rows.rows[0]!.count, 23_000);
           const winner = await getOne(f.store, {
             id: "id:01000",
-            params: {} as NormalizedParams<Params>,
+            params: noParams,
           });
           assert.equal(winner[0]!.content.value, 2);
           const repeated = await f.store.store(entries.toReversed());
@@ -662,7 +653,7 @@ describe(
     );
 
     it("compares only each batch's slots when one id has variants across batches", async () => {
-      const f = await fixture();
+      const f = await initializedStoreFixture();
       const entries = Array.from({ length: 1_001 }, (_, index) => {
         const value = input("shared", 1);
         return {
@@ -700,12 +691,12 @@ describe(
     });
 
     it("rolls every batch back if a later batch fails", async () => {
-      const f = await fixture();
+      const f = await initializedStoreFixture();
       await f.store.store([input("id:00000", 1)]);
-      await f.pool.query(
+      await f.postgres.query(
         `alter table ${f.qualified} add constraint reject_last check (resource_id <> 'zz:reject')`,
       );
-      const observed = observeQueries();
+      const observed = observeQueries(f.queryMock);
       try {
         const entries = Array.from({ length: 1_500 }, (_, index) =>
           input(`id:${String(index).padStart(5, "0")}`, 2),
@@ -730,7 +721,7 @@ describe(
             /^rollback/i.test(statement.sql),
           ),
         );
-        const rows = await f.pool.query<{
+        const rows = await f.postgres.query<{
           resource_id: string;
           entry: { content: { value: number } };
         }>(`select resource_id, entry from ${f.qualified}`);
@@ -744,7 +735,7 @@ describe(
     });
 
     it("compares each batch against its own pre-write metadata snapshot", async () => {
-      const f = await fixture();
+      const f = await initializedStoreFixture();
       const keys = Array.from(
         { length: 2_001 },
         (_, index) => `id:${String(index).padStart(5, "0")}`,
@@ -752,11 +743,11 @@ describe(
       await f.store.store(keys.map((id) => input(id, 1)));
       const lateId = keys[1_500]!;
       const progress = { writes: 0, interfered: false };
-      const observed = observeQueries((statement) => {
+      const observed = observeQueries(f.queryMock, (statement) => {
         if (/^with "old"/i.test(statement.sql)) {
           progress.writes += 1;
           if (progress.writes === 2) {
-            return f.pool
+            return f.postgres
               .query(
                 `update ${f.qualified} set entry = $1::jsonb where resource_id = $2`,
                 [JSON.stringify(input(lateId, 9).entry), lateId],
@@ -781,7 +772,7 @@ describe(
         });
         const stored = await getOne(f.store, {
           id: lateId,
-          params: {} as NormalizedParams<Params>,
+          params: noParams,
         });
         assert.equal(stored[0]!.content.value, 1);
       } finally {
@@ -794,7 +785,7 @@ describe(
       "uses the legacy global UTF-16 lock order across concurrent old and batched writers",
       { timeout: 30_000 },
       async () => {
-        const f = await fixture();
+        const f = await initializedStoreFixture();
         const keys = [
           ...Array.from(
             { length: 2_001 },
@@ -815,7 +806,7 @@ describe(
         const legacySql = `insert into ${f.qualified} (resource_id, vary, entry) values ${sortedKeys.map((_id, index) => `($${3 * index + 1}, $${3 * index + 2}, $${3 * index + 3})`).join(",")} on conflict (resource_id, vary) do update set entry = excluded.entry`;
         const bothReady = Promise.withResolvers<void>();
         const state = { firstWrites: 0 };
-        const observed = observeQueries((statement) => {
+        const observed = observeQueries(f.queryMock, (statement) => {
           if (
             (/^with "old"/i.test(statement.sql) ||
               /^insert into /i.test(statement.sql)) &&
@@ -831,7 +822,7 @@ describe(
         try {
           await Promise.all([
             f.store.store(keys.toReversed().map((id) => input(id, 2))),
-            f.pool.query(legacySql, legacyParameters),
+            f.postgres.query(legacySql, legacyParameters),
           ]);
           const newWrites = observed.statements.filter(
             (statement) =>
@@ -853,7 +844,7 @@ describe(
             ),
             sortedKeys,
           );
-          const values = await f.pool.query<{ value: number }>(
+          const values = await f.postgres.query<{ value: number }>(
             `select distinct (entry->'content'->>'value')::int as value from ${f.qualified}`,
           );
           assert.equal(values.rows.length, 1);
@@ -868,7 +859,6 @@ describe(
   },
 );
 
-const concurrentEmptyVary = {} as NormalizedVary<{}>;
 describe(
   "Postgres concurrent writes",
   postgresEnvironmentIsConfigured()
@@ -891,7 +881,7 @@ describe(
       const write = (
         data: {
           id: string;
-          vary: NormalizedVary<{}>;
+          vary: NormalizedVary<Params>;
           content: { i: number; padding: string };
           directives: { freshUntilAge: number };
         }[],
@@ -918,7 +908,7 @@ describe(
           async ({ runId, slotCount }) => {
             const data = Array.from({ length: slotCount }, (_unused, i) => ({
               id: `${runId}:${String(i)}`,
-              vary: concurrentEmptyVary,
+              vary: emptyVary,
               // A non-trivial payload keeps each row's processing from being
               // instantaneous, widening the window in which the concurrent
               // statements actually interleave.

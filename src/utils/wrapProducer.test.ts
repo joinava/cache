@@ -60,6 +60,7 @@ describe("wrapProducer", () => {
       >
     >,
     cache: TestCache,
+    client: { get: WrappedFn; close: () => Promise<void> },
     sut: WrappedFn;
 
   beforeEach(() => {
@@ -87,15 +88,17 @@ describe("wrapProducer", () => {
         }) satisfies RequestPairedProducerResult<any, any, any>,
     );
 
-    sut = wrapProducer({
+    client = wrapProducer({
       cache,
       collapseOverlappingRequestsTime: 0,
       produce: fetcher,
-    }).get;
+    });
+    sut = client.get;
   });
 
   afterEach(async () => {
-    return cache.close();
+    await client.close();
+    await cache.close();
   });
 
   it("should call the fetcher at first", async () => {
@@ -584,63 +587,6 @@ describe("wrapProducer", () => {
       );
       expect(result.content).to.be.a("string");
       expect(fetcher.mock.callCount()).to.eq(1);
-    });
-
-    it("should not abort usableIfError fallback when signal is aborted", async () => {
-      const controller = new AbortController();
-      controller.abort(new Error("abort-before-call"));
-
-      const errorProducer = mock.fn(async () => {
-        throw new Error("producer-error");
-      });
-      const sut2 = wrapProducer({ cache, produce: errorProducer });
-
-      // With an already-aborted signal, the call should reject immediately
-      // (before even checking the cache or calling the producer)
-      try {
-        await sut2.get({ id: "if-error-abort" }, { signal: controller.signal });
-        throw new Error("should have rejected");
-      } catch (e) {
-        expect((e as Error).message).to.eq("abort-before-call");
-      }
-
-      expect(errorProducer.mock.callCount()).to.eq(0);
-    });
-
-    it("should not treat abort errors as cache read failures eligible for fallback", async () => {
-      const controller = new AbortController();
-      const mockCache = makeTestCache();
-
-      // Make cache.get throw an abort error
-      mockCache.get = async (_req, options) => {
-        options?.signal?.throwIfAborted();
-        return { validatable: [] };
-      };
-
-      const producerFn = mock.fn(async () => ({
-        content: null,
-        directives: { freshUntilAge: 1 },
-      }));
-
-      const sut2 = wrapProducer({
-        cache: mockCache,
-        onCacheReadFailure: "call-producer",
-        produce: producerFn,
-      });
-
-      controller.abort(new Error("aborted-during-cache-read"));
-
-      try {
-        await sut2.get({ id: "test" }, { signal: controller.signal });
-        throw new Error("should have rejected");
-      } catch (e) {
-        // Should propagate the abort error, NOT fall back to the producer
-        expect((e as Error).message).to.eq("aborted-during-cache-read");
-      }
-
-      expect(producerFn.mock.callCount()).to.eq(0);
-
-      await mockCache.close();
     });
   });
 

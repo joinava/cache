@@ -325,7 +325,7 @@ describe("coverage typing (§6.1, §6.3, §6.4, §10)", () => {
       }
     });
 
-    it("wrapBulkProducer: request elements are bounded per element by the covered types", async () => {
+    it("produceMany: request elements are bounded per element by the covered types", async () => {
       const cache = new Cache({
         store: new MemoryStore(),
         name: uniqueCacheName("typing-bulk"),

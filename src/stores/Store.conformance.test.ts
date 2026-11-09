@@ -132,6 +132,10 @@ function defineStoreConformance(
     defineCommonStoreBehavior(storeName, createFixture);
   });
 
+  describe("Change detection", () => {
+    defineChangeDetectionConformance(createFixture);
+  });
+
   it("does not mutate entries passed to store", async () => {
     await withStore(createFixture, async (store) => {
       const entry = makeEntry("id", "value", varyOnFormat, {
@@ -221,29 +225,6 @@ function defineCommonStoreBehavior(
       },
     );
   };
-
-  commonBehavior(
-    "replaces an existing variant on later store calls",
-    [],
-    async (store) => {
-      await store.store([
-        { entry: makeEntry("id", "first"), maxStoreForSeconds: 60 },
-      ]);
-      await store.store([
-        {
-          entry: makeEntry("id", "replacement", varyOnFormat, {
-            date: new Date("2023-01-01T00:00:00.000Z"),
-          }),
-          maxStoreForSeconds: 60,
-        },
-      ]);
-
-      const result = await getOne(store, { id: "id", params: matchingParams });
-
-      assert.equal(result.length, 1);
-      assert.deepEqual(result[0]?.content, { value: "replacement" });
-    },
-  );
 
   commonBehavior(
     "keeps one complete entry after concurrent writes to one variant",
@@ -399,38 +380,6 @@ function defineCommonStoreBehavior(
   );
 
   commonBehavior(
-    "roundtrips stored entry data without mutating input",
-    [],
-    async (store) => {
-      const entry = makeEntry("id", "first", varyOnFormat, {
-        content: { value: "first", nested: { count: 2, labels: ["a", "b"] } },
-        validators: { etag: "abc" },
-        directives: {
-          freshUntilAge: 60,
-          maxStale: {
-            withoutRevalidation: 10,
-            whileRevalidate: 20,
-            ifError: 30,
-          },
-        } as NormalizedProducerDirectives,
-      });
-      const originalEntry = snapshotEntry(entry);
-
-      await store.store([{ entry, maxStoreForSeconds: 60 }]);
-      const result = await getOne(store, { id: "id", params: matchingParams });
-
-      assert.deepEqual(snapshotEntry(entry), originalEntry);
-      assert.equal(result.length, 1);
-      assert.deepEqual(result[0]?.content, entry.content);
-      assert.deepEqual(result[0]?.vary, entry.vary);
-      assert.deepEqual(result[0]?.validators, entry.validators);
-      assert.deepEqual(result[0]?.directives, entry.directives);
-      assert.equal(result[0]?.initialAge, entry.initialAge);
-      assert.equal(result[0]?.date.getTime(), entry.date.getTime());
-    },
-  );
-
-  commonBehavior(
     "roundtrips any storable normalized entry identically",
     [],
     async (store) => {
@@ -560,24 +509,6 @@ function defineCommonStoreBehavior(
       );
       assert.equal(result[0]?.directives.maxStale?.whileRevalidate, Infinity);
       assert.equal(result[0]?.directives.maxStale?.ifError, Infinity);
-    },
-  );
-
-  commonBehavior(
-    "only returns entries matching the requested id",
-    [],
-    async (store) => {
-      await store.store([
-        { entry: makeEntry("id", "wanted"), maxStoreForSeconds: 60 },
-        { entry: makeEntry("other", "unwanted"), maxStoreForSeconds: 60 },
-      ]);
-
-      const result = await getOne(store, { id: "id", params: matchingParams });
-
-      assert.deepEqual(
-        result.map(({ id, content }) => [id, content.value]),
-        [["id", "wanted"]],
-      );
     },
   );
 
@@ -1145,22 +1076,6 @@ function defineCommonStoreBehavior(
   );
 
   commonBehavior(
-    "reports is-new for a slot that held no live entry",
-    [],
-    async (store) => {
-      const results = await store.store([
-        {
-          entry: makeEntry("fresh", "a", varyOnFormat, {
-            validators: { etag: "x" },
-          }),
-          maxStoreForSeconds: 60,
-        },
-      ]);
-      assert.equal(relationshipsOf(results)[0], "is-new");
-    },
-  );
-
-  commonBehavior(
     "reports is-new for a brand-new variant of an already-stored resource id",
     [],
     async (store) => {
@@ -1469,13 +1384,6 @@ function makeEntry(
   };
 }
 
-function snapshotEntry(entry: Entry<TestSpec, AnyValidators, TestParams>) {
-  return {
-    ...entry,
-    date: entry.date.toISOString(),
-  };
-}
-
 // Convenience so tests can read the reported relationship out of the parallel
 // result array without repeating the optional-chain everywhere.
 function relationshipsOf(
@@ -1484,64 +1392,10 @@ function relationshipsOf(
   return results.map((r) => r?.relationshipToExistingStoredData);
 }
 
-describe("Store change-detection conformance", () => {
-  describe("MemoryStore", () => {
-    defineChangeDetectionConformance(async () => {
-      const store = new MemoryStore<TestSpec, AnyValidators, TestParams>();
-      return { store, cleanup: async () => store.close() };
-    });
-  });
-
-  describe("SqliteStore", () => {
-    defineChangeDetectionConformance(async () => {
-      const directory = await mkdtemp(join(tmpdir(), "cache-sqlite-cd-"));
-      const store = new SqliteStore<TestSpec, AnyValidators, TestParams>({
-        databasePath: join(directory, "cache.sqlite"),
-        readWorkerCount: 2,
-      });
-      return {
-        store,
-        cleanup: async () => {
-          await store.close();
-          await rm(directory, { recursive: true, force: true });
-        },
-      };
-    });
-  });
-
-  describe(
-    "PostgresStore",
-    postgresEnvironmentIsConfigured()
-      ? {}
-      : { skip: "Postgres environment variables are not configured" },
-    () => {
-      defineChangeDetectionConformance(async () => {
-        const fixture = postgresStoreFixture();
-        return {
-          store: fixture.postgresStore as unknown as TestStore,
-          cleanup: async () => fixture.cleanup(),
-        };
-      });
-    },
-  );
-});
-
 function defineChangeDetectionConformance(
   createFixture: () => Promise<StoreFixture>,
 ) {
   // -- Empty validators => field omitted, regardless of what's stored --------
-
-  it("omits the relationship when incoming validators are empty (fresh slot)", async () => {
-    await withStore(createFixture, async (store) => {
-      const results = await store.store([
-        {
-          entry: makeEntry("id", "a", varyOnFormat, { validators: {} }),
-          maxStoreForSeconds: 60,
-        },
-      ]);
-      assert.equal(relationshipsOf(results)[0], undefined);
-    });
-  });
 
   it("omits the relationship for empty validators even when the slot already holds data", async () => {
     await withStore(createFixture, async (store) => {
@@ -1767,7 +1621,7 @@ function makeOracle() {
 // NOT excluded (exercised inside the property): empty-validators entries (the
 // omit rule), is-new on fresh slots, and per-(id,vary) slot granularity.
 
-describe("Common behavior generator coverage", () => {
+describe("Change-detection property generator coverage", () => {
   // Generator self-audit. This is store-independent -- it only exercises the
   // shared arbitrary + oracle -- so it lives at the top level rather than
   // per-store. It proves the property-test generator actually produces every

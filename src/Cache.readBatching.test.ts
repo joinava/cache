@@ -4,9 +4,13 @@ import { describe, it, mock } from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
 
 import {
-  bulkMemoryStore,
+  cacheOver,
+  lookup,
   postgresEnvironmentIsConfigured,
   postgresStoreFixture,
+  spiedStore,
+  suiteOptions,
+  type Spec,
 } from "../test/fixtures.js";
 import {
   ACCEPT_ANY_REGISTRY,
@@ -19,24 +23,11 @@ import Cache, { singleTypeCacheOptions } from "./Cache.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 import wrapProducer from "./utils/wrapProducer.js";
 
-import {
-  spiedStore,
-  batchedCacheOver,
-  lookup,
-  suiteOptions,
-  type Spec,
-} from "../test/readBatchingHelpers.js";
-
 describe("Cache read batching", suiteOptions, () => {
   it("serves concurrent gets from one getMany call, with each request's own result", async () => {
     const { store, getManyRequestCounts } = spiedStore();
-    const batched = batchedCacheOver(store);
-    const unbatched = new Cache({
-      store,
-      name: uniqueCacheName("unbatched"),
-      resourceTypes: ACCEPT_ANY_REGISTRY,
-    });
-    await batched.store([
+    const cache = cacheOver(store);
+    await cache.store([
       { id: "plain", content: "plain", directives: freshFor100 },
       {
         id: "by-format",
@@ -56,10 +47,10 @@ describe("Cache read batching", suiteOptions, () => {
       ...Array.from({ length: 6 }, (_, i) => lookup(`missing:${String(i)}`)),
     ];
 
-    const capture = captureChannels(batched.name);
+    const capture = captureChannels(cache.name);
     try {
       const batchedResults = await Promise.all(
-        requests.map(async (req) => batched.get(req)),
+        requests.map(async (req) => cache.get(req)),
       );
 
       assert.deepEqual(getManyRequestCounts(), [10]);
@@ -77,13 +68,13 @@ describe("Cache read batching", suiteOptions, () => {
         ]),
       );
 
-      // The same lookups without readBatching: one store.get each, and the same
-      // results.
-      const unbatchedResults = await Promise.all(
-        requests.map(async (req) => unbatched.get(req, { autoBatch: false })),
+      // The same lookups with `autoBatch: false` on each call: one
+      // single-request getMany call each, and the same results.
+      const directResults = await Promise.all(
+        requests.map(async (req) => cache.get(req, { autoBatch: false })),
       );
       assert.deepEqual(getManyRequestCounts(), [10, ...Array(10).fill(1)]);
-      assert.deepEqual(batchedResults, unbatchedResults);
+      assert.deepEqual(batchedResults, directResults);
     } finally {
       capture.stop();
     }
@@ -91,7 +82,7 @@ describe("Cache read batching", suiteOptions, () => {
 
   it("gathers every get of one event-loop turn, including gets after microtask hops", async () => {
     const { store, getManyRequestCounts } = spiedStore();
-    const cache = batchedCacheOver(store);
+    const cache = cacheOver(store);
 
     const first = cache.get(lookup("a"));
     // Promise continuations run in the same turn, so a get that a few awaits
@@ -108,7 +99,7 @@ describe("Cache read batching", suiteOptions, () => {
 
   it("dispatches before the next setImmediate, and a later get starts the next batch", async () => {
     const { store, getManyRequestCounts } = spiedStore();
-    const cache = batchedCacheOver(store);
+    const cache = cacheOver(store);
 
     const first = cache.get(lookup("a"));
     // DataLoader dispatches after Promise continuations and before the
@@ -123,7 +114,7 @@ describe("Cache read batching", suiteOptions, () => {
 
   it("splits a flush of 1,200 requests into getMany calls of at most 20", async () => {
     const { store, getManyRequestCounts } = spiedStore();
-    const cache = batchedCacheOver(store);
+    const cache = cacheOver(store);
     const ids = Array.from({ length: 1200 }, (_, i) => `id:${String(i)}`);
     await cache.store(
       ids.map((id) => ({ id, content: id, directives: freshFor100 })),
@@ -133,7 +124,7 @@ describe("Cache read batching", suiteOptions, () => {
       ids.map(async (id) => cache.get(lookup(id))),
     );
 
-    // README.md and the batchReads docs state the default 20 cap.
+    // The default `readBatching.maxBatchSize` is 20 (README.md, `CacheOptions.readBatching`).
     assert.deepEqual(getManyRequestCounts(), Array(60).fill(20));
     assert.deepEqual(
       results.map((it) => it.usable?.content),
@@ -143,7 +134,14 @@ describe("Cache read batching", suiteOptions, () => {
 
   it("rejects only the request whose signal aborts while it waits, and drops it from the query", async () => {
     const { store, getManyRequestCounts } = spiedStore();
-    const cache = batchedCacheOver(store);
+    const cache = cacheOver(store);
+    await cache.store(
+      ["a", "b", "c"].map((id) => ({
+        id,
+        content: id,
+        directives: freshFor100,
+      })),
+    );
     const controller = new AbortController();
     const reason = new Error("caller gave up");
 
@@ -157,9 +155,9 @@ describe("Cache read batching", suiteOptions, () => {
       controller.abort(reason);
       const [a, b, c] = await Promise.allSettled(pending);
 
-      assert.equal(a?.status, "fulfilled");
+      assert.equal(a?.status === "fulfilled" && a.value.usable?.content, "a");
       assert.deepEqual(b, { status: "rejected", reason });
-      assert.equal(c?.status, "fulfilled");
+      assert.equal(c?.status === "fulfilled" && c.value.usable?.content, "c");
       assert.deepEqual(getManyRequestCounts(), [2]);
       assert.deepEqual(
         capture.read
@@ -177,7 +175,7 @@ describe("Cache read batching", suiteOptions, () => {
     const { store, getManyRequestCounts } = spiedStore({
       beforeGetMany: async () => query.promise,
     });
-    const cache = batchedCacheOver(store);
+    const cache = cacheOver(store);
     const controller = new AbortController();
     const reason = new Error("caller gave up");
 
@@ -212,7 +210,7 @@ describe("Cache read batching", suiteOptions, () => {
         throw failure;
       },
     });
-    const cache = batchedCacheOver(store);
+    const cache = cacheOver(store);
     const ids = Array.from({ length: 10 }, (_, i) => `id:${String(i)}`);
 
     const capture = captureChannels(cache.name);
@@ -249,10 +247,8 @@ describe("Cache read batching", suiteOptions, () => {
         observed.push(context.getStore());
       },
     });
-    const cache = new Cache({
-      store,
-      name: uniqueCacheName("context"),
-      resourceTypes: ACCEPT_ANY_REGISTRY,
+    const cache = cacheOver(store, {
+      name: "context",
       readBatching: {
         maxBatchSize: 1,
         batchScheduleFn: (dispatch) => {
@@ -272,35 +268,6 @@ describe("Cache read batching", suiteOptions, () => {
     assert.deepEqual(getManyRequestCounts(), [1, 1]);
   });
 
-  it("keeps result positions when the middle read aborts before dispatch", async () => {
-    const { store } = spiedStore();
-    const cache = batchedCacheOver(store);
-    await cache.store(
-      ["a", "b", "c"].map((id) => ({
-        id,
-        content: id,
-        directives: freshFor100,
-      })),
-    );
-    const controller = new AbortController();
-    const pending = [
-      cache.get(lookup("a")),
-      cache.get(lookup("b"), { signal: controller.signal }),
-      cache.get(lookup("c")),
-    ];
-    controller.abort();
-    const results = await Promise.allSettled(pending);
-    assert.equal(
-      results[0]?.status === "fulfilled" && results[0].value.usable?.content,
-      "a",
-    );
-    assert.equal(results[1]?.status, "rejected");
-    assert.equal(
-      results[2]?.status === "fulfilled" && results[2].value.usable?.content,
-      "c",
-    );
-  });
-
   it("starts queued reads before close() closes the store", async () => {
     const events: string[] = [];
     const { store } = spiedStore({
@@ -313,7 +280,7 @@ describe("Cache read batching", suiteOptions, () => {
       events.push("close");
       return close();
     });
-    const cache = batchedCacheOver(store);
+    const cache = cacheOver(store);
     await cache.store([{ id: "a", content: "a", directives: freshFor100 }]);
 
     // Both reads are queued, not yet flushed, when close() starts.
@@ -326,45 +293,11 @@ describe("Cache read batching", suiteOptions, () => {
     assert.equal(b?.usable, undefined);
   });
 
-  it("drains an accepted read before releasing the Store", async () => {
-    const gate = Promise.withResolvers<void>();
-    const started = Promise.withResolvers<void>();
-    const { store } = spiedStore({
-      beforeGetMany: async () => {
-        started.resolve();
-        await gate.promise;
-      },
-    });
-    const cleanup = mock.method(store, "close");
-    const cache = batchedCacheOver(store);
-    const read = cache.get(lookup("a"));
-    const closing = cache.close();
-    await started.promise;
-    assert.equal(cleanup.mock.callCount(), 0);
-    assert.equal(cache.close(), closing);
-    gate.resolve();
-    await Promise.all([read, closing]);
-    assert.equal(cleanup.mock.callCount(), 1);
-  });
-
-  it("rejects a get that arrives after close() starts", async () => {
-    const { store, getManyRequestCounts } = spiedStore();
-    const cache = batchedCacheOver(store);
-
-    const closing = cache.close();
-    await assert.rejects(cache.get(lookup("a")), /Store has been closed/);
-    await closing;
-
-    assert.deepEqual(getManyRequestCounts(), []);
-  });
-
-  it("passes custom scheduling and batch size to DataLoader without caching reads", async () => {
+  it("honors readBatching.batchScheduleFn and maxBatchSize, and never serves a read from a previous batch", async () => {
     const { store, getManyRequestCounts } = spiedStore();
     const callbacks: (() => void)[] = [];
-    const cache = new Cache({
-      store,
-      name: uniqueCacheName("custom-batching"),
-      resourceTypes: ACCEPT_ANY_REGISTRY,
+    const cache = cacheOver(store, {
+      name: "custom-batching",
       readBatching: {
         maxBatchSize: 2,
         batchScheduleFn: (dispatch) => {
@@ -396,26 +329,26 @@ describe("Cache read batching", suiteOptions, () => {
     assert.deepEqual(getManyRequestCounts(), [2, 1, 1, 1]);
   });
 
-  it("is forwarded by singleTypeCacheOptions", async () => {
+  it("singleTypeCacheOptions forwards readBatching.maxBatchSize", async () => {
     const { store, getManyRequestCounts } = spiedStore();
     const cache = new Cache(
       singleTypeCacheOptions<string>()({
         store,
         name: uniqueCacheName("batch-reads-single-type"),
-        readBatching: {},
+        readBatching: { maxBatchSize: 2 },
       }),
     );
 
     await Promise.all(["a", "b", "c"].map(async (id) => cache.get(lookup(id))));
 
-    assert.deepEqual(getManyRequestCounts(), [3]);
+    assert.deepEqual(getManyRequestCounts(), [2, 1]);
   });
 });
 
 describe("wrapProducer over a read-batching cache", suiteOptions, () => {
   it("reads the cache for 10 concurrent wrapped calls with one store read", async () => {
     const { store, getManyRequestCounts } = spiedStore();
-    const cache = batchedCacheOver(store);
+    const cache = cacheOver(store);
     const ids = Array.from({ length: 10 }, (_, i) => `id:${String(i)}`);
     // Half the ids are cached; the other half miss and reach the producer.
     await cache.store(
@@ -485,14 +418,12 @@ describe(
   },
 );
 
-describe("v4 read participation", () => {
+describe("autoBatch: false (direct Store reads)", suiteOptions, () => {
   it("dispatches a direct known set without waiting for the automatic queue", async (t) => {
     const { store, getManyRequestCounts } = spiedStore();
     const scheduled: (() => void)[] = [];
-    const cache = new Cache({
-      store,
+    const cache = cacheOver(store, {
       name: "direct-known-set",
-      resourceTypes: ACCEPT_ANY_REGISTRY,
       readBatching: { batchScheduleFn: (run) => scheduled.push(run) },
     });
     t.after(async () => await cache.close());
@@ -506,10 +437,8 @@ describe("v4 read participation", () => {
 
   it("applies readBatching.maxBatchSize only to automatic accumulation", async (t) => {
     const { store, getManyRequestCounts } = spiedStore();
-    const cache = new Cache({
-      store,
-      name: uniqueCacheName("direct-limit"),
-      resourceTypes: ACCEPT_ANY_REGISTRY,
+    const cache = cacheOver(store, {
+      name: "direct-limit",
       readBatching: { maxBatchSize: 2 },
     });
     t.after(async () => await cache.close());
@@ -537,10 +466,8 @@ describe("v4 read participation", () => {
     const store = new MemoryStore<Spec>();
     const read = t.mock.method(store, "get");
     const schedule = t.mock.fn();
-    const cache = new Cache({
-      store,
+    const cache = cacheOver(store, {
       name: "single-prompt",
-      resourceTypes: ACCEPT_ANY_REGISTRY,
       readBatching: { batchScheduleFn: schedule },
     });
     t.after(async () => await cache.close());
@@ -559,13 +486,14 @@ describe("v4 read participation", () => {
       },
     });
     const cleanup = t.mock.method(store, "close");
-    const cache = batchedCacheOver(store);
+    const cache = cacheOver(store);
     const controller = new AbortController();
     const read = cache.get(lookup("a"), { signal: controller.signal });
     await started.promise;
     controller.abort();
     await assert.rejects(read);
     const closing = cache.close();
+    assert.equal(cache.close(), closing);
     assert.equal(cleanup.mock.callCount(), 0);
     release.resolve();
     await closing;
@@ -574,34 +502,41 @@ describe("v4 read participation", () => {
   });
 
   it("keeps per-slot successes and rejects malformed output", async (t) => {
-    const store = bulkMemoryStore<Spec>();
-    const cache = batchedCacheOver(store);
+    const failure = new TypeError("custom operational failure");
+    const { store } = spiedStore({ slotErrors: { failed: failure } });
+    const cache = cacheOver(store);
     t.after(async () => await cache.close());
     await cache.store([
       { id: "hit", content: "value", directives: freshFor100 },
     ]);
-    const original = store.getMany.bind(store);
-    const failure = new TypeError("custom operational failure");
-    t.mock.method(
-      store,
-      "getMany",
-      async (requests: Parameters<typeof original>[0]) => {
-        const results = await original(requests);
-        return results.map((value, index) =>
-          requests[index]?.id === "failed" ? failure : value,
-        );
-      },
+    const capture = captureChannels(cache.name);
+    try {
+      const results = await cache.getMany([
+        lookup("hit"),
+        lookup("failed"),
+        lookup("miss"),
+        lookup("hit"),
+      ]);
+      assert.ok(!(results[0] instanceof Error));
+      assert.equal(results[0].usable?.content, "value");
+      assert.equal(results[1], failure);
+      assert.ok(!(results[2] instanceof Error));
+      assert.equal(results[2].usable, undefined);
+      assert.ok(!(results[3] instanceof Error));
+      assert.equal(results[3].usable?.content, "value");
+      // Only the failed slot reports a read failure.
+      assert.equal(
+        capture.read.filter(({ found }) => found === "read-failed").length,
+        1,
+      );
+    } finally {
+      capture.stop();
+    }
+    // A get rejects with its own slot's Error.
+    await assert.rejects(
+      cache.get(lookup("failed")),
+      (error) => error === failure,
     );
-    const results = await cache.getMany([
-      lookup("hit"),
-      lookup("failed"),
-      lookup("miss"),
-    ]);
-    assert.ok(!(results[0] instanceof Error));
-    assert.equal(results[0].usable?.content, "value");
-    assert.equal(results[1], failure);
-    assert.ok(!(results[2] instanceof Error));
-    assert.equal(results[2].usable, undefined);
     t.mock.method(store, "getMany", async () => []);
     await assert.rejects(
       cache.getMany([lookup("hit")]),
@@ -611,7 +546,7 @@ describe("v4 read participation", () => {
 
   it("rejects explicit true for JavaScript callers", async (t) => {
     const { store } = spiedStore();
-    const cache = batchedCacheOver(store);
+    const cache = cacheOver(store);
     t.after(async () => await cache.close());
     await assert.rejects(
       Reflect.apply(cache.get.bind(cache), cache, [

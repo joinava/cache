@@ -147,15 +147,23 @@ export function createProducerScheduler<Request, Result>(options: {
     trigger: CollapsedInvocation["trigger"];
     createdAt: number;
     enqueuedAt: number;
+    /** The task waited in the automatic queue, so it reports queue wait. */
     accumulated: boolean;
+    /** Distinct callers, reported as the collapsed caller count. */
     callers: Set<object>;
+    /**
+     * Live foreground attachments. When this reaches 0, a task that is still
+     * queued and has no background request is cancelled.
+     */
     participants: number;
     background: boolean;
     state: "queued" | "running" | "settled";
     result: ReturnType<typeof Promise.withResolvers<Result>>;
     release: (() => void) | undefined;
   };
+  /** Tasks a new request can join, by key, until they settle. */
   const pending = new Map<string | symbol, Task>();
+  /** Tasks not yet dispatched. */
   const queued = new Set<Task>();
   const running = new Set<Promise<unknown>>();
   const maxBatchSize = options.maxBatchSize ?? 20;

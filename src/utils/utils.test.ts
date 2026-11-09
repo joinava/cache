@@ -1,4 +1,9 @@
-import { bulkMemoryStore, getMany, getOne } from "../../test/fixtures.js";
+import {
+  bulkMemoryStore,
+  getMany,
+  getOne,
+  lookup,
+} from "../../test/fixtures.js";
 import Cache, { singleTypeCacheOptions } from "../Cache.js";
 import MemoryStore from "../stores/MemoryStore/MemoryStore.js";
 import type { CacheSpec } from "../types/00_CacheSpec.js";
@@ -13,6 +18,13 @@ import {
   naiveGetMany,
   raceWithSignal,
 } from "./utils.js";
+
+// Normalized empty params, for raw Store requests.
+const emptyParams = normalizeParams(
+  (name) => name,
+  (_name, value) => value,
+  {},
+);
 
 describe("raceWithSignal", () => {
   it("should return the promise result when signal is undefined", async () => {
@@ -226,12 +238,7 @@ describe("raw Store adapters", () => {
     t.mock.method(store, "getMany", async () => {
       throw failure;
     });
-    const params = normalizeParams(
-      (name) => name,
-      (_name, value) => value,
-      {},
-    );
-    const request = { id: "a", params };
+    const request = { id: "a", params: emptyParams };
     const result = await getMany(store, [request, request]);
     assert.equal(result[0], failure);
     assert.equal(result[1], failure);
@@ -245,14 +252,9 @@ describe("raw Store adapters", () => {
     t.mock.method(store, "getMany", async () => {
       throw cause;
     });
-    const params = normalizeParams(
-      (name) => name,
-      (_name, value) => value,
-      {},
-    );
     const results = await getMany(store, [
-      { id: "a", params },
-      { id: "b", params },
+      { id: "a", params: emptyParams },
+      { id: "b", params: emptyParams },
     ]);
     assert.ok(results[0] instanceof Error);
     assert.equal(results[0], results[1]);
@@ -263,13 +265,8 @@ describe("raw Store adapters", () => {
     const store = bulkMemoryStore();
     t.after(async () => await store.close());
     t.mock.method(store, "getMany", async () => []);
-    const params = normalizeParams(
-      (name) => name,
-      (_name, value) => value,
-      {},
-    );
     await assert.rejects(
-      getMany(store, [{ id: "a", params }]),
+      getMany(store, [{ id: "a", params: emptyParams }]),
       CacheContractError,
     );
   });
@@ -307,8 +304,10 @@ describe("raw Store adapters", () => {
       CacheContractError,
     );
   });
+});
 
-  it("throwIfAnyError reports the first request-order error", () => {
+describe("throwIfAnyError", () => {
+  it("reports the first request-order error", () => {
     const first = new Error("first");
     const second = new Error("second");
     assert.throws(
@@ -330,19 +329,11 @@ describe("adapter lifecycle and positional contracts", () => {
     const cache = new Cache(
       singleTypeCacheOptions<unknown>()({ name: "sparse-bulk", store }),
     );
-    const params = normalizeParams(
-      (name) => name,
-      (_name, value) => value,
-      {},
-    );
     await assert.rejects(
-      getMany(store, [{ id: "a", params }]),
+      getMany(store, [{ id: "a", params: emptyParams }]),
       CacheContractError,
     );
-    await assert.rejects(
-      cache.get({ id: "a", params: {}, directives: {} }),
-      CacheContractError,
-    );
+    await assert.rejects(cache.get(lookup("a")), CacheContractError);
     await cache.close();
   });
 
@@ -373,10 +364,7 @@ describe("adapter lifecycle and positional contracts", () => {
     const cache = new Cache(
       singleTypeCacheOptions<string>()({ name: "single-drain", store }),
     );
-    const read = cache.getMany([
-      { id: "invalid", params: {}, directives: {} },
-      { id: "held", params: {}, directives: {} },
-    ]);
+    const read = cache.getMany([lookup("invalid"), lookup("held")]);
     const rejected = assert.rejects(read, CacheContractError);
     await started.promise;
     const close = cache.close();
@@ -387,19 +375,4 @@ describe("adapter lifecycle and positional contracts", () => {
     await close;
     assert.equal(closedWhileActive, false);
   });
-});
-
-it("throwIfAnyError lets callers reject a partial cache result", async (t) => {
-  const request = (id: string) => ({ id, params: {}, directives: {} });
-  const store = bulkMemoryStore();
-  const cache = new Cache(
-    singleTypeCacheOptions<string>()({ name: "explicit-partial-store", store }),
-  );
-  t.after(async () => await cache.close());
-  const failure = new Error("one resource unavailable");
-  t.mock.method(store, "getMany", async () => [[], failure]);
-  await assert.rejects(
-    cache.getMany([request("hit"), request("failed")]).then(throwIfAnyError),
-    (error) => error === failure,
-  );
 });

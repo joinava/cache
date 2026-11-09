@@ -30,22 +30,20 @@ import {
 const makeHarness = (label: string) => {
   const name = uniqueCacheName(label);
   const store = new MemoryStore();
+  // MemoryStore has only get(), so get() calls are every Store read.
   const getSpy = mock.method(store, "get");
-  const getManySpy = getSpy;
   const cache = new Cache({
-    // These tests inject or count individual store.get calls.
-
     store: store,
     name,
     resourceTypes: TWO_TYPE_REGISTRY,
   });
-  return { name, store, getSpy, getManySpy, cache };
+  return { name, store, getSpy, cache };
 };
 
 describe("bypass requests skip the cache read (§6.3)", () => {
   it("a maxAge: 0 request performs NO store read, emits NO read message, reaches the producer, and its result IS stored", async () => {
-    const { name, getSpy, getManySpy, cache } = makeHarness("bypass-basic");
-    const capture = captureChannels(name, { measurements: false });
+    const { name, getSpy, cache } = makeHarness("bypass-basic");
+    const capture = captureChannels(name);
     const producer = mock.fn(async () => ({
       content: "from-producer",
       directives: freshFor100,
@@ -64,7 +62,6 @@ describe("bypass requests skip the cache read (§6.3)", () => {
 
       // No store read of any shape, and nothing on the read channel.
       expect(getSpy.mock.callCount()).to.equal(0);
-      expect(getManySpy.mock.callCount()).to.equal(0);
       expect(capture.read).to.deep.equal([]);
 
       expect(capture.fetch).to.have.lengthOf(1);
@@ -123,7 +120,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
     await cache.store([
       { id: "site:a", content: "cached-content", directives: freshFor100 },
     ]);
-    const capture = captureChannels(name, { measurements: false });
+    const capture = captureChannels(name);
     const producer = mock.fn(async () => ({
       content: "regenerated-content",
       directives: freshFor100,
@@ -171,7 +168,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
         date: new Date(Date.now() + 60_000),
       },
     ]);
-    const capture = captureChannels(name, { measurements: false });
+    const capture = captureChannels(name);
     const producer = mock.fn(async () => ({
       content: "from-producer",
       directives: freshFor100,
@@ -204,7 +201,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
 
   it("bypass requests collapse ONLY with identical-directive peers: a concurrent plain request never rides the bypass invocation", async () => {
     const { name, cache } = makeHarness("bypass-no-cross-collapse");
-    const capture = captureChannels(name, { measurements: false });
+    const capture = captureChannels(name);
     // Gated rather than delayed: the gate holds the bypass invocation open
     // (its result unstored) for as long as the plain request's read takes,
     // so this can't flake under suite load the way a fixed pending window
@@ -295,9 +292,9 @@ describe("bypass requests skip the cache read (§6.3)", () => {
     }
   });
 
-  it("wrapBulkProducer: bypass elements skip the read (no read messages) while plain elements in the same call read and cache normally", async () => {
-    const { name, getSpy, getManySpy, cache } = makeHarness("bypass-bulk");
-    const capture = captureChannels(name, { measurements: false });
+  it("produceMany: bypass elements skip the read (no read messages) while plain elements in the same call read and cache normally", async () => {
+    const { name, getSpy, cache } = makeHarness("bypass-bulk");
+    const capture = captureChannels(name);
     const bulkProducer = mock.fn(
       async (reqs: readonly { readonly id: string }[]) =>
         reqs.map((req) => ({
@@ -378,13 +375,11 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       ).to.deep.equal(["site:bypass-a"]);
 
       // And a PURE-bypass bulk call performs no store read of any shape.
-      const readsBefore = getSpy.mock.callCount() + getManySpy.mock.callCount();
+      const readsBefore = getSpy.mock.callCount();
       await getBulk.getMany([
         { id: "site:bypass-a", directives: { maxAge: 0 } },
       ]);
-      expect(getSpy.mock.callCount() + getManySpy.mock.callCount()).to.equal(
-        readsBefore,
-      );
+      expect(getSpy.mock.callCount()).to.equal(readsBefore);
     } finally {
       capture.stop();
       await cache.close();
@@ -393,7 +388,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
 
   it("two identical concurrent bypass requests DO collapse onto one invocation", async () => {
     const { name, getSpy, cache } = makeHarness("bypass-peer-collapse");
-    const capture = captureChannels(name, { measurements: false });
+    const capture = captureChannels(name);
     const producer = mock.fn(async () => {
       await delay(80);
       return { content: "produced-once", directives: freshFor100 };

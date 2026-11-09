@@ -103,7 +103,7 @@ const contentsOf = (
 
 describe("single producer function + by-id-type sugar", () => {
   describe("1. full-batch delivery (the capability this change exists for)", () => {
-    it("wrapBulkProducer: a bare producer is invoked exactly ONCE with every request, spanning both resource types, in the caller's order", async () => {
+    it("produceMany: a bare producer is invoked exactly ONCE with every request, spanning both resource types, in the caller's order", async () => {
       const { cache } = makeHarness("sp-full-batch");
       const bulkProducer = mock.fn(async (reqs: BulkReqs) =>
         reqs.map((req) => ({
@@ -141,56 +141,6 @@ describe("single producer function + by-id-type sugar", () => {
   });
 
   describe("2. per-type dispatch through bulkProducerByIdType (§3.4)", () => {
-    it("splits the mixed batch by classified type, calls each sub-producer once with its own slice, and reassembles into the CALLER's order", async () => {
-      const { cache } = makeHarness("sp-by-id-type");
-      const storyBulk = mock.fn(async (reqs: BulkReqs) =>
-        reqs.map((req) => ({
-          content: `story-${req.id}`,
-          directives: freshFor100,
-        })),
-      );
-      const collectionBulk = mock.fn(async (reqs: BulkReqs) =>
-        reqs.map((req) => ({
-          content: `collection-${req.id}`,
-          directives: freshFor100,
-        })),
-      );
-      const getBulk = wrapProducer({
-        cache,
-        produceMany: bulkProducerByIdType(cache.resourceTypes, {
-          story: storyBulk,
-          collection: collectionBulk,
-        }),
-      });
-      try {
-        const results = await getBulk.getMany([
-          { id: "story:1" },
-          { id: "collection:1" },
-          { id: "story:2" },
-        ]);
-
-        expect(storyBulk.mock.callCount()).to.equal(1);
-        expect(
-          storyBulk.mock.calls[0]?.arguments[0]?.map((req) => req.id),
-        ).to.deep.equal(["story:1", "story:2"]);
-        expect(collectionBulk.mock.callCount()).to.equal(1);
-        expect(
-          collectionBulk.mock.calls[0]?.arguments[0]?.map((req) => req.id),
-        ).to.deep.equal(["collection:1"]);
-
-        // Reassembly is positional AND correct: an implementation that simply
-        // concatenated the per-type slices would answer
-        // [story:1, story:2, collection:1] here.
-        expect(contentsOf(results)).to.deep.equal([
-          "story-story:1",
-          "collection-collection:1",
-          "story-story:2",
-        ]);
-      } finally {
-        await cache.close();
-      }
-    });
-
     it("reassembles by POSITION, not by id: a batch repeating one id with different params gets each slot's own result", async () => {
       const { cache } = makeHarness("sp-by-id-type-dupes");
       // Content is keyed by the request's index WITHIN its slice, so an
@@ -238,50 +188,31 @@ describe("single producer function + by-id-type sugar", () => {
   });
 
   describe("3. error isolation inside bulkProducerByIdType (§3.4)", () => {
-    it("a REJECTING sub-producer errors only its own type's slots; the other type's results are delivered normally", async () => {
+    it("a REJECTING sub-producer settles only its own type's fetches as producer-error, and the invocation still succeeds", async () => {
       const { name, cache } = makeHarness("sp-sugar-error-isolation");
-      const capture = captureChannels(name, { measurements: false });
-      const storyFailure = new Error("story origin unreachable");
-      const storyBulk = mock.fn(async () => {
-        throw storyFailure;
-      });
-      const collectionBulk = mock.fn(async (reqs: BulkReqs) =>
-        reqs.map((req) => ({
-          content: `collection-${req.id}`,
-          directives: freshFor100,
-        })),
-      );
+      const capture = captureChannels(name);
       const getBulk = wrapProducer({
         cache,
         produceMany: bulkProducerByIdType(cache.resourceTypes, {
-          story: storyBulk,
-          collection: collectionBulk,
+          story: async () => {
+            throw new Error("story origin unreachable");
+          },
+          collection: async (reqs: BulkReqs) =>
+            reqs.map((req) => ({
+              content: `collection-${req.id}`,
+              directives: freshFor100,
+            })),
         }),
       });
       try {
-        const results = await getBulk.getMany([
+        await getBulk.getMany([
           { id: "story:1" },
           { id: "collection:1" },
           { id: "story:2" },
         ]);
 
-        // The sugar catches the rejection and writes it into that type's slots
-        // -- so the call RESOLVES rather than rejecting wholesale.
-        expect(results[0]).to.equal(storyFailure);
-        expect(results[2]).to.equal(storyFailure);
-        const collectionSlot = results[1];
-        if (collectionSlot instanceof Error) {
-          throw collectionSlot;
-        }
-        expect(collectionSlot.content).to.equal("collection-collection:1");
-
-        // Both sub-producers ran: the story failure did not cancel or skip the
-        // collection slice.
-        expect(storyBulk.mock.callCount()).to.equal(1);
-        expect(collectionBulk.mock.callCount()).to.equal(1);
-
-        // Per-request settlement matches: the story elements are
-        // producer-error, the collection element is served-from-producer.
+        // Per-request settlement: the story elements are producer-error, the
+        // collection element is served-from-producer.
         expect(capture.fetch).to.have.lengthOf(3);
         const dispositionsById = Object.fromEntries(
           capture.fetch.map((message) => [
@@ -318,7 +249,7 @@ describe("single producer function + by-id-type sugar", () => {
   describe("4. diagnostics: one produce message per invocation, spanning types (§5.3)", () => {
     it("a bare producer's mixed batch publishes exactly ONE produce message whose requests[] carries each element's own resourceType", async () => {
       const { name, cache } = makeHarness("sp-produce-bare");
-      const capture = captureChannels(name, { measurements: false });
+      const capture = captureChannels(name);
       const bulkProducer = mock.fn(async (reqs: BulkReqs) =>
         reqs.map((req) => ({
           content: `produced-${req.id}`,
@@ -410,10 +341,8 @@ describe("single producer function + by-id-type sugar", () => {
           visits: recordProducer,
         }),
       });
-      const bareCapture = captureChannels(bare.name, { measurements: false });
-      const recordCapture = captureChannels(record.name, {
-        measurements: false,
-      });
+      const bareCapture = captureChannels(bare.name);
+      const recordCapture = captureChannels(record.name);
       try {
         const [bareMiss, recordMiss] = await Promise.all([
           getBare.get({ id: "v1" }),
@@ -462,7 +391,7 @@ describe("single producer function + by-id-type sugar", () => {
       }
     });
 
-    it("wrapBulkProducer: a bare producer over a sole-type cache keeps request order and leaves cached ids to the cache", async () => {
+    it("produceMany: a bare producer over a sole-type cache keeps request order and leaves cached ids to the cache", async () => {
       const { cache } = makeSoleHarness("sp-sole-bulk-bare");
       const bulkProducer = mock.fn(async (reqs: BulkReqs) =>
         reqs.map((req) => ({

@@ -3,7 +3,7 @@ import { it } from "node:test";
 import { createProducerScheduler } from "./collapsedTaskCreator.js";
 
 it(
-  "skips tasks cancelled synchronously by an earlier producer slice",
+  "skips a queued task that an earlier chunk's producer cancels synchronously",
   { timeout: 5_000 },
   async () => {
     const scheduled = Promise.withResolvers<() => void>();
@@ -45,7 +45,7 @@ it(
 );
 
 it(
-  "does not redispatch tasks flushed synchronously by an earlier producer slice",
+  "does not redispatch tasks that an earlier chunk's producer flushes synchronously",
   { timeout: 5_000 },
   async () => {
     const scheduled = Promise.withResolvers<() => void>();
