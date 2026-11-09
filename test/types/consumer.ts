@@ -7,7 +7,6 @@ import {
   wrapProducer,
   Cache,
   MemoryStore,
-  naiveGetMany,
   throwIfAnyError,
   resourceType,
   type SpecOf,
@@ -55,7 +54,9 @@ const methods = {
 const both: Store<SpecOf<typeof registry>, {}, {}> = {
   ...methods,
   get: memory.get.bind(memory),
-  getMany: async (requests) => await naiveGetMany(memory, requests),
+  getMany: async () => {
+    throw new Error("unused");
+  },
 };
 // @ts-expect-error A Store must declare one read primitive.
 const neither: Store<SpecOf<typeof registry>, {}, {}> = methods;

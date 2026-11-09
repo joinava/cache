@@ -41,7 +41,7 @@ export {
 export * from "./types/index.js";
 export { default as collapsedTaskCreator } from "./utils/collapsedTaskCreator.js";
 export { restoreInfinityInDirectives } from "./utils/normalization.js";
-export { naiveGetMany, throwIfAnyError } from "./utils/utils.js";
+export { throwIfAnyError } from "./utils/utils.js";
 export type { JsonOf, JSONWithUndefined } from "type-party";
 export { jsonParse, jsonStringify } from "type-party/runtime/json.js";
 export {

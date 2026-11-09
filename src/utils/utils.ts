@@ -262,12 +262,12 @@ export function throwIfAnyError<const Results extends readonly unknown[]>(
 }
 
 /**
- * A naive implementation of the `getMany` method that uses the store's `get`
- * method to fulfill all requests with limited parallelism.
+ * Reads many requests from a single-read Store with limited parallelism.
  *
- * This implementation is provided as a default fallback for stores that don't
- * implement their own optimized `getMany` method. It calls `store.get` for each
- * request with up to 10 concurrent operations to improve performance.
+ * The package does not export this function. Applications read through a
+ * Cache, which uses the same single-read path. Tests use it to wrap a
+ * MemoryStore as a bulk Store, and to control the concurrency limit. It calls
+ * `store.get` for each request with up to 10 concurrent operations by default.
  * Each failed read becomes an Error in its request slot while other reads
  * continue. Existing Error objects keep their identity. Non-Error rejections
  * are wrapped with their original cause. Request order and duplicate slots
@@ -285,12 +285,11 @@ export async function naiveGetMany<
   Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
-  const Reqs extends readonly {
-    readonly id: Spec["id"];
-    readonly params: Readonly<NormalizedParams<Params>>;
-  }[],
+  const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
 >(
-  store: SingleStoreReader<Spec, Validators, Params>,
+  // Store's non-generic methods let TypeScript infer Spec. The generic get
+  // method alone does not, so Spec would widen to CacheSpec.
+  store: Store<Spec, Validators, Params> & { getMany?: never },
   requests: Reqs,
   maxConcurrency = 10,
   options?: { signal?: AbortSignal },
