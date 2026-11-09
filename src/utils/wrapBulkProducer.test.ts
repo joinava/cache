@@ -865,55 +865,45 @@ describe("wrapBulkProducer", () => {
       }
     });
 
-    it("should reject if signal fires before the cache read completes (i.e., before producer is called)", async () => {
-      const { cache } = makeTestStoreAndCache();
-
-      let cacheGetManyResolve: (v: any) => void;
-      const originalGetMany = cache.getMany.bind(cache);
-      cache.getMany = () =>
-        new Promise((resolve) => {
-          cacheGetManyResolve = resolve;
-        });
-
-      try {
+    it(
+      "an abort during a pending cache read prevents producer execution",
+      { timeout: 5_000 },
+      async () => {
+        const { cache } = makeTestStoreAndCache();
+        const requests = [{ id: "abort-during-read" }];
+        const started = Promise.withResolvers<void>();
+        const finish = Promise.withResolvers<void>();
         const controller = new AbortController();
-        const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
-          reqs.map((r) => ({
-            content: `c-${r.id}`,
-            directives: { freshUntilAge: 1 },
-          })),
-        );
-
-        const wrappedBulk = wrapProducer({
-          cache,
-          collapseOverlappingRequestsTime: 0,
-          produceMany: producer,
+        const reason = new Error("abort during cache read");
+        const read = mock.method(cache, "getMany", async () => {
+          started.resolve();
+          await finish.promise;
+          // The Cache completes normally despite cancellation. The wrapper must
+          // still prevent production after this pending read settles.
+          return [{ validatable: [] }];
         });
-
-        const resultPromise = wrappedBulk.getMany(
-          [{ id: "abort-during-read" }],
-          {
+        const producer = mock.fn(async () => []);
+        const wrapped = wrapProducer({ cache, produceMany: producer });
+        try {
+          const pending = wrapped.getMany(requests, {
             signal: controller.signal,
-          },
-        );
-
-        await delay(5);
-        controller.abort(new Error("cancelled-during-read"));
-
-        // Resolve the cache read after the abort — the throwIfAborted checkpoint
-        // should fire.
-        cacheGetManyResolve!([{ validatable: [] }]);
-
-        await assert.rejects(async () => resultPromise, {
-          message: "cancelled-during-read",
-        });
-
-        assert.equal(producer.mock.callCount(), 0);
-      } finally {
-        cache.getMany = originalGetMany;
-        await cache.close();
-      }
-    });
+            autoBatch: { store: false },
+          });
+          const rejected = assert.rejects(pending, (error) => error === reason);
+          await started.promise;
+          controller.abort(reason);
+          finish.resolve();
+          await rejected;
+          await wrapped.close();
+          assert.equal(read.mock.callCount(), 1);
+          assert.equal(producer.mock.callCount(), 0);
+        } finally {
+          finish.resolve();
+          await wrapped.close();
+          await cache.close();
+        }
+      },
+    );
 
     it("should reject when signal is aborted mid-producer, but still store the producer's result", async () => {
       const { cache } = makeTestStoreAndCache();
@@ -1102,4 +1092,82 @@ describe("wrapBulkProducer", () => {
       `Data mismatch: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
     );
   }
+});
+
+describe("Large bulk producer calls", { timeout: 20_000 }, () => {
+  const batchSize = 10_000;
+  function makeCache() {
+    const registry = {
+      resources: resourceType<number>()({
+        matches: (id): id is string => id.startsWith("resource:"),
+      }),
+    };
+    const store = new MemoryStore<SpecOf<typeof registry>>();
+    const cache = new Cache({
+      name: "large-bulk-producer",
+      resourceTypes: registry,
+      store,
+    });
+    return { cache, store };
+  }
+  const requests = Array.from({ length: batchSize }, (_, i) => ({
+    id: `resource:${i}`,
+  }));
+
+  it("preserves the full producer cohort and result order for a 10k cold batch", async () => {
+    const { cache } = makeCache();
+    const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
+      reqs.map((req) => ({
+        content: Number(req.id.slice("resource:".length)),
+        directives: { freshUntilAge: 60 },
+      })),
+    );
+    const wrapped = wrapProducer({
+      cache,
+      collapseOverlappingRequestsTime: 0,
+      produceMany: producer,
+      producerBatching: { maxBatchSize: 20 },
+    });
+    try {
+      const result = await wrapped.getMany(requests);
+      assert.equal(producer.mock.callCount(), batchSize / 20);
+      assert.ok(
+        producer.mock.calls.every(
+          ({ arguments: [requests] }) => requests.length === 20,
+        ),
+      );
+      assert.deepEqual(
+        result.map((entry) => (entry instanceof Error ? entry : entry.content)),
+        requests.map((_, i) => i),
+      );
+    } finally {
+      await wrapped.close();
+      await cache.close();
+    }
+  });
+  it("preserves ordered cache hits for a 10k warm batch", async () => {
+    const { cache } = makeCache();
+    const producer = mock.fn(async () => {
+      throw new Error("warm batch must not produce");
+    });
+    const wrapped = wrapProducer({ cache, produceMany: producer });
+    try {
+      await cache.store(
+        requests.map((req, i) => ({
+          id: req.id,
+          content: i,
+          directives: { freshUntilAge: 60 },
+        })),
+      );
+      const result = await wrapped.getMany(requests);
+      assert.equal(producer.mock.callCount(), 0);
+      assert.deepEqual(
+        result.map((entry) => (entry instanceof Error ? entry : entry.content)),
+        requests.map((_, i) => i),
+      );
+    } finally {
+      await wrapped.close();
+      await cache.close();
+    }
+  });
 });

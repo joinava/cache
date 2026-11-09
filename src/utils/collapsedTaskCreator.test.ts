@@ -80,3 +80,35 @@ it(
     );
   },
 );
+
+it(
+  "defaults producer batches to at most 20 requests",
+  { timeout: 5_000 },
+  async () => {
+    const scheduled = Promise.withResolvers<() => void>();
+    const calls: number[][] = [];
+    const scheduler = createProducerScheduler<number, number>({
+      bulk: true,
+      collapseTasksMs: 0,
+      key: (request) => String(request),
+      batchScheduleFn: (dispatch) => scheduled.resolve(dispatch),
+      dispatch: async (requests) => {
+        const values = requests.map(({ request }) => request);
+        calls.push(values);
+        return await Promise.resolve(values);
+      },
+    });
+    const requests = Array.from({ length: 21 }, (_, index) => index);
+    const attached = scheduler.attach(
+      requests.map((request) => ({ request, trigger: "miss", caller: {} })),
+      true,
+    );
+    (await scheduled.promise)();
+    await scheduler.drain();
+    assert.deepEqual(calls, [requests.slice(0, 20), requests.slice(20)]);
+    assert.deepEqual(
+      await Promise.all(attached.map(({ promise }) => promise)),
+      requests,
+    );
+  },
+);

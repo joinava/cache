@@ -32,6 +32,7 @@ import {
   resourceType,
   wrapProducer,
   wrapHashedInputProducer,
+  type SpecOf,
   type CacheFetchMessage,
   type CacheProduceMessage,
   type CacheReadMessage,
@@ -2777,4 +2778,63 @@ describe("producer failed request counts", () => {
       }
     });
   }
+});
+
+describe("Bulk cancellation diagnostics", { timeout: 5_000 }, () => {
+  function makeCache() {
+    const registry = {
+      resources: resourceType<number>()({
+        matches: (id): id is string => id.startsWith("resource:"),
+      }),
+    };
+    const store = new MemoryStore<SpecOf<typeof registry>>();
+    const cache = new Cache({
+      name: uniqueCacheName("bulk-cancellation"),
+      resourceTypes: registry,
+      store,
+    });
+    return { cache, store };
+  }
+
+  it("a pre-aborted mixed batch publishes every aborted fetch before any read starts", async () => {
+    const { cache, store } = makeCache();
+    const { cacheFetchChannel } = await import("./diagnostics.js");
+    const fetches: { resourceId: string; disposition: string }[] = [];
+    const onFetch = (message: CacheFetchMessage) => {
+      if (message.cache === cache.name) fetches.push(message);
+    };
+    cacheFetchChannel.subscribe(onFetch);
+    const read = mock.method(store, "get");
+    const producer = mock.fn(async () => []);
+    const wrapped = wrapProducer({ cache, produceMany: producer });
+    const reason = new Error("already aborted");
+    try {
+      await assert.rejects(
+        wrapped.getMany(
+          [
+            { id: "resource:bypass", directives: { maxAge: 0 } },
+            { id: "resource:read" },
+          ],
+          { signal: AbortSignal.abort(reason) },
+        ),
+        (error) => error === reason,
+      );
+      assert.deepEqual(
+        fetches.map(({ resourceId, disposition }) => ({
+          resourceId,
+          disposition,
+        })),
+        [
+          { resourceId: "resource:bypass", disposition: "aborted" },
+          { resourceId: "resource:read", disposition: "aborted" },
+        ],
+      );
+      assert.equal(read.mock.callCount(), 0);
+      assert.equal(producer.mock.callCount(), 0);
+    } finally {
+      cacheFetchChannel.unsubscribe(onFetch);
+      await wrapped.close();
+      await cache.close();
+    }
+  });
 });

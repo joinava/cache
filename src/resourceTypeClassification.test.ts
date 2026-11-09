@@ -845,3 +845,64 @@ describe("a one-entry registry with a real guard rejects nonconforming ids", () 
     }
   });
 });
+
+describe("Bulk classification before side effects", { timeout: 10_000 }, () => {
+  const batchSize = 10_000;
+  function makeCache() {
+    const registry = {
+      resources: resourceType<number>()({
+        matches: (id): id is string => id.startsWith("resource:"),
+      }),
+    };
+    const store = new MemoryStore<SpecOf<typeof registry>>();
+    const cache = new Cache({
+      name: uniqueCacheName("bulk-classification"),
+      resourceTypes: registry,
+      store,
+    });
+    return { cache, store };
+  }
+  const requests = Array.from({ length: batchSize }, (_, i) => ({
+    id: `resource:${i}`,
+  }));
+
+  it("classifies an invalid final ID before any cache or producer side effect", async () => {
+    const { cache, store } = makeCache();
+    const read = mock.method(store, "get");
+    const write = mock.method(store, "store");
+    const producer = mock.fn(async () => []);
+    const wrapped = wrapProducer({ cache, produceMany: producer });
+    try {
+      await assert.rejects(wrapped.getMany([...requests, { id: "invalid" }]));
+      assert.equal(read.mock.callCount(), 0);
+      assert.equal(write.mock.callCount(), 0);
+      assert.equal(producer.mock.callCount(), 0);
+    } finally {
+      await wrapped.close();
+      await cache.close();
+    }
+  });
+  it("an invalid final bulk store ID prevents writes and events", async () => {
+    const { cache, store } = makeCache();
+    const write = mock.method(store, "store");
+    let events = 0;
+    const { cacheStoreEntryChannel } = await import("./diagnostics.js");
+    const onStore = (message: { cache: string }) => {
+      if (message.cache === cache.name) events += 1;
+    };
+    cacheStoreEntryChannel.subscribe(onStore);
+    try {
+      const inputs = [...requests, { id: "invalid" }].map((req) => ({
+        id: req.id,
+        content: 1,
+        directives: { freshUntilAge: 60 },
+      }));
+      await assert.rejects(cache.store(inputs));
+      assert.equal(write.mock.callCount(), 0);
+      assert.equal(events, 0);
+    } finally {
+      cacheStoreEntryChannel.unsubscribe(onStore);
+      await cache.close();
+    }
+  });
+});
