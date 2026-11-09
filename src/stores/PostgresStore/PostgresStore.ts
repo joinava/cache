@@ -286,21 +286,23 @@ export default class PostgresStore<
       if (queryRequests.length === 0) return encodingFailures;
 
       const values = sql.join(queryRequests.map(({ value }) => value));
-      let rows: RequestRow[];
-      try {
-        const batch =
-          await sql<RequestRow>`select r.request_index, t.resource_id, t.entry
-          from ${sql.id(this.tableNameData.schemaName, this.tableNameData.tableName)} as t
-          inner join (values ${values}) as r(request_index, resource_id, params)
-            on t.resource_id = r.resource_id
-          where ${varyMatchesParamsSql(sql.ref("t.vary"), sql.ref("r.params"))}
-        `.execute(this.db);
-        rows = batch.rows;
-      } catch (failure) {
-        signal?.throwIfAborted();
-        const error = asError(failure);
-        return encoded.map((value) => (value instanceof Error ? value : error));
-      }
+      const rows = await (async () => {
+        try {
+          const batch =
+            await sql<RequestRow>`select r.request_index, t.resource_id, t.entry
+            from ${sql.id(this.tableNameData.schemaName, this.tableNameData.tableName)} as t
+            inner join (values ${values}) as r(request_index, resource_id, params)
+              on t.resource_id = r.resource_id
+            where ${varyMatchesParamsSql(sql.ref("t.vary"), sql.ref("r.params"))}
+          `.execute(this.db);
+          return batch.rows;
+        } catch (failure) {
+          signal?.throwIfAborted();
+          return asError(failure);
+        }
+      })();
+      if (rows instanceof Error)
+        return encoded.map((value) => (value instanceof Error ? value : rows));
       signal?.throwIfAborted();
 
       // Every returned row must belong to a slot included in this query.

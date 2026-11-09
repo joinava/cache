@@ -131,7 +131,8 @@ export type ChannelCapture = {
  * counts.
  *
  * By default, each message drops its timing fields and the produce and
- * read-store batching fields. Outcome tests deep-equal messages, and those
+ * read-store batching fields. It keeps `failedRequestCount` on produce
+ * messages, because that count does not depend on timing. Outcome tests deep-equal messages, and those
  * fields depend on timing or batch boundaries. Pass `{ measurements: true }`
  * to keep them, as the timing and batching tests do.
  */
@@ -172,7 +173,6 @@ export function captureChannels(
             "operation",
             "automatic",
             "requestCount",
-            "failedRequestCount",
             "operationFailed",
             "queueWaitTotalMs",
           ].forEach((key) => Reflect.deleteProperty(message, key));
@@ -368,6 +368,7 @@ export function expectProduceMessage(
     requests: readonly { resourceType: string; resourceId: string }[];
     collapsedCallerCount: number;
     outcome: "success" | "error";
+    failedRequestCount?: number;
     minDurationMs?: number;
   },
 ): void {
@@ -384,5 +385,8 @@ export function expectProduceMessage(
     trigger: expected.trigger,
     collapsedCallerCount: expected.collapsedCallerCount,
     outcome: expected.outcome,
+    failedRequestCount:
+      expected.failedRequestCount ??
+      (expected.outcome === "error" ? expected.requests.length : 0),
   });
 }

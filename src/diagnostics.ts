@@ -354,12 +354,29 @@ export const CACHE_PRODUCE_CHANNEL_NAME = "@zingage/cache:produce";
  */
 export type CacheProduceMessage = {
   cache: string;
+  /** Which producer capability ran: `produce` or `produceMany`. */
   operation?: "produce" | "produceMany";
+  /**
+   * True when the producer scheduler dispatched this invocation from its
+   * automatic queue, including the flush that `close()` starts. False when it
+   * ran directly: a single `produce` call, or a call with
+   * `autoBatch: { producer: false }`.
+   */
   automatic?: boolean;
+  /** Requests in this invocation. */
   requestCount?: number;
   /** Failed result slots, or every request when the invocation rejects. */
   failedRequestCount: number;
+  /**
+   * True when the whole invocation failed: the producer rejected, threw, or
+   * broke its result contract. False when it returned a result array, even
+   * one with Error slots.
+   */
   operationFailed?: boolean;
+  /**
+   * Time the requests waited in the automatic queue, summed over requests.
+   * Zero for direct invocations.
+   */
   queueWaitTotalMs?: number;
   /**
    * Why the producer was contacted. Compatible requests keep their initiating
@@ -467,21 +484,51 @@ export function publishCacheStoreEntry(message: CacheStoreEntryMessage): void {
 }
 
 /**
- * One physical Store read by a `Cache`, including direct calls and automatic batches.
- * Queue wait is summed across dispatched requests. Cancelled queued slots are excluded.
- * Error slots report failure while successful slots still contribute entries.
- * Direct Store rejection after caller cancellation reports cancelled with no failed slots.
- * Cancellation after automatic dispatch preserves the eventual Store outcome.
+ * One physical Store read by a `Cache`: an automatic batch, a direct
+ * `autoBatch: false` call, or one `get` call to a Store that has no `getMany`.
+ * Empty calls and entirely cancelled automatic batches emit nothing. Requests
+ * cancelled before dispatch do not count. No resource IDs, payloads, or error
+ * values are included.
  */
 export type CacheReadStoreMessage = {
+  /** Cache instance name (constructor `options.name`). */
   cache: string;
+  /** The Store method the Cache called. */
   operation: "get" | "getMany";
+  /**
+   * True when the Cache's read batcher dispatched this read after it
+   * accumulated requests from one or more callers. False when the read ran
+   * directly: an `autoBatch: false` call, or a Store that has no `getMany`.
+   */
   automatic: boolean;
+  /**
+   * `failure` when any slot holds an Error or the whole call failed.
+   * `cancelled` when a direct Store call rejects after its caller cancels.
+   * Cancellation after automatic dispatch keeps the Store's eventual outcome.
+   */
   outcome: "success" | "failure" | "cancelled";
+  /** Dispatched request slots, including duplicate requests. */
   requestCount: number;
+  /**
+   * Error slots, or every dispatched request when the whole call fails.
+   * Zero for a cancelled direct call.
+   */
   failedRequestCount: number;
+  /**
+   * Entries returned in successful slots, even when another slot fails.
+   * Zero when the whole call fails.
+   */
   entryCount: number;
+  /**
+   * Time spent in the Store call and the Cache's result-shape check, without
+   * Cache classification. Not database execution time or a query count: a
+   * Store can run several queries or use no database.
+   */
   durationMs: number;
+  /**
+   * Time the dispatched requests waited in the automatic queue, summed over
+   * requests. Divide by `requestCount` for the mean. Zero for direct reads.
+   */
   queueWaitTotalMs: number;
 };
 export const CACHE_READ_STORE_CHANNEL_NAME = "@zingage/cache:read-store";
