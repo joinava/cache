@@ -11,6 +11,9 @@ importers:
 
   .:
     dependencies:
+      '@zingage/scheduling':
+        specifier: ^1.0.0
+        version: 1.0.0
       dataloader:
         specifier: ^2.2.3
         version: 2.2.3
@@ -388,6 +391,9 @@ packages:
 
   '@types/pg@8.16.0':
     resolution: {integrity: sha512-RmhMd/wD+CF8Dfo+cVIy3RR5cl8CyfXQ0tGgW6XBL8L4LM/UTEbNXYRbLwU6w+CgrKBNbrQWt4FUtTfaU5jSYQ==}
+
+  '@zingage/scheduling@1.0.0':
+    resolution: {integrity: sha512-fF+YquXkxzs9A1XTSuJ8wSAcZopC/NfwuX8vGgj+1DxOKz4CQPg7WdkJUZsS66KpikmIlrQt3LJV0RV7psuJEw==}
 
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
@@ -897,6 +903,8 @@ snapshots:
       '@types/node': 25.0.8
       pg-protocol: 1.11.0
       pg-types: 2.2.0
+
+  '@zingage/scheduling@1.0.0': {}
 
   assertion-error@2.0.1: {}
 
