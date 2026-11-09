@@ -179,8 +179,8 @@ export function createProducerScheduler<Request, Result>(options: {
   };
   const dispatch = (selected: readonly Task[], automatic: boolean) => {
     const tasks = selected.filter((task) => task.state === "queued");
-    // Only automatic accumulation is limited by maxBatchSize. A direct call
-    // reaches a bulk producer as one invocation, whatever its size.
+    // Single producers take one request per call. Automatic accumulation
+    // splits at maxBatchSize. A direct call is never split.
     const batchSize = !options.bulk ? 1 : automatic ? maxBatchSize : Infinity;
     for (let offset = 0; offset < tasks.length; offset += batchSize) {
       // Producer code can synchronously cancel or flush later queued tasks.
@@ -240,6 +240,12 @@ export function createProducerScheduler<Request, Result>(options: {
   };
 
   return {
+    /**
+     * Attaches requests to pending or new tasks. For a bulk producer with
+     * `automatic: false`, one call dispatches all of its queued tasks,
+     * including shared tasks it joined, as one producer invocation. A direct
+     * caller must pass all of its requests in one call to get one invocation.
+     */
     attach(
       requests: readonly {
         request: Request;

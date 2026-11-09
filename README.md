@@ -208,7 +208,7 @@ const results = await stories.getMany(requests, {
 ```
 
 Declare exactly one top-level capability: `produce` or `produceMany`. Single producers dispatch promptly.
-Bulk producers accumulate ready requests by default. `producerBatching` controls this separate scheduler, with the same default limit and scheduling convention as Store reads.
+Bulk producers accumulate ready requests by default. `producerBatching` controls this separate scheduler, with the same default limit, which applies only to accumulated work, and scheduling convention as Store reads.
 Per-call `{ autoBatch: { store: false, producer: false } }` disables accumulation independently at each stage.
 
 Automatic production starts as each independent Store invocation settles. Direct bulk production first classifies the known set. It then sends the call's misses, bypass requests, and stale-while-revalidate refreshes to the producer as one invocation. The batch limit does not split it.

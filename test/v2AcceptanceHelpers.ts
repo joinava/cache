@@ -40,6 +40,17 @@ export const ACCEPT_ANY_REGISTRY = {
  */
 export const freshFor100 = { freshUntilAge: 100 };
 
+/** A stored entry that is stale, but usable while a refresh runs. */
+export const staleWhileRevalidating = (id: string, content: string) => ({
+  id,
+  content,
+  date: new Date(Date.now() - 10_000),
+  directives: {
+    freshUntilAge: 1,
+    maxStale: { withoutRevalidation: 0, whileRevalidate: 100, ifError: 0 },
+  },
+});
+
 /**
  * Asserts its type argument is `true` at COMPILE time; the runtime body is
  * empty. `expectType<IsEqual<A, B>>()` (type-fest's `IsEqual`, which is the

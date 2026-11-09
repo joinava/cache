@@ -705,6 +705,18 @@ export default function wrapProducer<
     },
   });
 
+  /** A refresh outlives its caller, so nobody awaits its failure. Log it instead. */
+  const logRefreshFailure = (refresh: { promise: Promise<unknown> }) => {
+    void refresh.promise.catch((error: unknown) =>
+      logger(
+        "wrap-producer",
+        "warn",
+        "error asynchronously requesting refreshed content from producer",
+        error,
+      ),
+    );
+  };
+
   const run = async (
     requests: readonly PartialReadonlyConsumerRequest<
       Params,
@@ -831,16 +843,6 @@ export default function wrapProducer<
       | undefined
     )[] = items.map(() => undefined);
     type Attachment = ReturnType<typeof scheduler.attach>[number];
-    const logBackgroundRefreshFailure = (background: Attachment) => {
-      void background.promise.catch((error: unknown) =>
-        logger(
-          "wrap-producer",
-          "warn",
-          "error asynchronously requesting refreshed content from producer",
-          error,
-        ),
-      );
-    };
     const attach = (
       item: (typeof items)[number],
       lookup: Lookup,
@@ -856,10 +858,12 @@ export default function wrapProducer<
       caller,
       ...(background ? {} : { signal }),
     });
-    // A direct bulk call sends its misses and its stale-while-revalidate
-    // refreshes to the producer together, as one invocation. Refreshes keep
-    // their obligation when the caller cancels, so they ignore cancellation
-    // and failed sibling lookups.
+    // A direct bulk call sends its misses, bypass requests, and
+    // stale-while-revalidate refreshes to the producer together, as one
+    // invocation. allSettled waits for every lookup, so one failed lookup does
+    // not drop the others from the cohort. The map holds only foreground
+    // attachments. Each foreground slot reads its own entry, and refreshes are
+    // logged here because no slot awaits them.
     const directAttachments =
       bulk !== undefined && batching?.producer === false
         ? Promise.allSettled(lookups).then((settled) => {
@@ -871,10 +875,13 @@ export default function wrapProducer<
                 lookup.value.usable
               )
                 return [];
-              const background = Boolean(lookup.value.usableWhileRevalidate);
-              return !background && signal?.aborted
-                ? []
-                : [{ item, lookup: lookup.value, background }];
+              const background =
+                lookup.value.usableWhileRevalidate !== undefined;
+              // After a cancel, leave out foreground requests: attach() would
+              // throw on their aborted signal and drop the whole cohort,
+              // refreshes included. With no cancel, this filter does nothing.
+              if (!background && signal?.aborted) return [];
+              return [{ item, lookup: lookup.value, background }];
             });
             const attachments = scheduler.attach(
               cohort.map(({ item, lookup, background }) =>
@@ -882,15 +889,18 @@ export default function wrapProducer<
               ),
               false,
             );
-            cohort.forEach(({ background }, index) => {
-              if (background) logBackgroundRefreshFailure(attachments[index]!);
-            });
             return new Map(
-              cohort.map(({ item }, index) => [item, attachments[index]!]),
+              cohort.flatMap(({ item, background }, index) => {
+                const attachment = attachments[index]!;
+                if (!background) return [[item, attachment] as const];
+                logRefreshFailure(attachment);
+                return [];
+              }),
             );
           })
         : undefined;
-    // Observe an early rejected barrier while independent slot handlers settle.
+    // The barrier rejects only if attach() throws, for example from a user key
+    // function. A call whose slots are all refreshes never awaits it.
     void directAttachments?.catch(() => {});
     const slotPipelines = items.map(
       async (item, index): Promise<ResultEntry | Error> => {
@@ -923,13 +933,14 @@ export default function wrapProducer<
           }
           if (lookup.usableWhileRevalidate) {
             // The refresh obligation survives both the stale return and later joiner cancellation.
-            // A direct bulk call refreshes through its single producer invocation.
+            // The direct path attaches this refresh through directAttachments,
+            // so skip it here.
             if (directAttachments === undefined) {
-              const [background] = scheduler.attach(
+              const [refresh] = scheduler.attach(
                 [attach(item, lookup, true)],
-                batching?.producer !== false,
+                true,
               );
-              logBackgroundRefreshFailure(background!);
+              logRefreshFailure(refresh!);
             }
             observeEntry(lookup.usableWhileRevalidate);
             publish({
@@ -938,16 +949,15 @@ export default function wrapProducer<
             });
             return lookup.usableWhileRevalidate;
           }
+          // The cohort leaves out foreground requests after a cancel, so check
+          // the signal before reading this slot's entry.
           const attachment: Attachment =
             directAttachments !== undefined
               ? await directAttachments.then((attachments) => {
                   signal?.throwIfAborted();
                   return attachments.get(item)!;
                 })
-              : scheduler.attach(
-                  [attach(item, lookup, false)],
-                  batching?.producer !== false,
-                )[0]!;
+              : scheduler.attach([attach(item, lookup, false)], true)[0]!;
           rode = attachment.rode;
           try {
             const produced = await raceWithSignal(attachment.promise, signal);

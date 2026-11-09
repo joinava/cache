@@ -11,14 +11,20 @@ export type Spec = CacheSpec<string, string>;
  * `getMany` call before the store reads, so a test can hold a batch's query
  * open.
  */
-export function spiedStore(options?: { beforeGetMany?: () => Promise<void> }) {
+export function spiedStore(options?: {
+  beforeGetMany?: (
+    requests: Parameters<
+      ReturnType<typeof bulkMemoryStore<Spec>>["getMany"]
+    >[0],
+  ) => Promise<void>;
+}) {
   const store = bulkMemoryStore<Spec>();
   const getMany = store.getMany.bind(store);
   const getManySpy = mock.method(
     store,
     "getMany",
     async (...args: Parameters<typeof getMany>) => {
-      await options?.beforeGetMany?.();
+      await options?.beforeGetMany?.(args[0]);
       return getMany(...args);
     },
   );

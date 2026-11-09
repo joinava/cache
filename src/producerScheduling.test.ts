@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { describe, it, mock } from "node:test";
+import { describe, it, mock, type TestContext } from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
 
 import { bulkMemoryStore } from "../test/fixtures.js";
 import {
   ACCEPT_ANY_REGISTRY,
   freshFor100,
+  staleWhileRevalidating,
 } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
@@ -13,6 +14,7 @@ import wrapProducer from "./utils/wrapProducer.js";
 
 import {
   lookup,
+  spiedStore,
   suiteOptions,
   type Spec,
 } from "../test/readBatchingHelpers.js";
@@ -302,35 +304,74 @@ describe("normalized producer compatibility", suiteOptions, () => {
 // promises that: the call's production reaches the producer as one
 // invocation, whatever the producerBatching limit.
 describe("v4 direct producer dispatch", suiteOptions, () => {
+  const makeCache = (
+    name: string,
+    store: ReturnType<typeof bulkMemoryStore<Spec>> = bulkMemoryStore<Spec>(),
+    readBatching?: { maxBatchSize: number },
+  ) =>
+    new Cache({
+      store,
+      name,
+      resourceTypes: ACCEPT_ANY_REGISTRY,
+      ...(readBatching && { readBatching }),
+    });
+
+  // A cache and a client whose producer records the ids of each call. Both
+  // close after the test, also when an assertion fails.
+  const recordingClient = async (
+    t: TestContext,
+    options: {
+      name: string;
+      store?: ReturnType<typeof bulkMemoryStore<Spec>>;
+      readBatching?: { maxBatchSize: number };
+      producerBatching?: { maxBatchSize: number };
+      seed?: Parameters<ReturnType<typeof makeCache>["store"]>[0];
+      content?: (id: string) => string;
+      onProduce?: () => Promise<void>;
+    },
+  ) => {
+    const cache = makeCache(options.name, options.store, options.readBatching);
+    if (options.seed) await cache.store(options.seed);
+    const calls: string[][] = [];
+    const client = wrapProducer({
+      cache,
+      ...(options.producerBatching && {
+        producerBatching: options.producerBatching,
+      }),
+      produceMany: async (requests) => {
+        calls.push(requests.map(({ id }) => id));
+        await options.onProduce?.();
+        return requests.map(({ id }) => ({
+          content: options.content?.(id) ?? id,
+          directives: freshFor100,
+        }));
+      },
+    });
+    t.after(async () => {
+      await client.close();
+      await cache.close();
+    });
+    return { cache, client, calls };
+  };
+
+  const contents = (results: readonly ({ content: string } | Error)[]) =>
+    results.map((entry) => (entry instanceof Error ? entry : entry.content));
+
   const callerIds = (caller: string) =>
     Array.from({ length: 24 }, (_, index) => `${caller}:${String(index)}`);
 
-  const runTwoConcurrentCallers = async (
-    direct: boolean,
-  ): Promise<readonly (readonly string[])[]> => {
-    const cache = new Cache({
-      store: bulkMemoryStore<Spec>(),
+  const runTwoConcurrentCallers = async (t: TestContext, direct: boolean) => {
+    const { client, calls } = await recordingClient(t, {
       name: `producer-direct-${String(direct)}`,
-      resourceTypes: ACCEPT_ANY_REGISTRY,
-    });
-    // Seed hits so that each caller's producer call holds only its misses.
-    await cache.store(
-      ["a:0", "a:7", "b:3"].map((id) => ({
+      store: bulkMemoryStore<Spec>(),
+      // Seed hits so that each caller's producer call holds only its misses.
+      seed: ["a:0", "a:7", "b:3"].map((id) => ({
         id,
         content: id,
         directives: freshFor100,
       })),
-    );
-    const calls: string[][] = [];
-    const client = wrapProducer({
-      cache,
-      produceMany: async (requests) => {
-        calls.push(requests.map(({ id }) => id));
+      onProduce: async () => {
         await nextTurn();
-        return requests.map(({ id }) => ({
-          content: id,
-          directives: freshFor100,
-        }));
       },
     });
     const options = direct ? { autoBatch: { producer: false as const } } : {};
@@ -343,24 +384,13 @@ describe("v4 direct producer dispatch", suiteOptions, () => {
           ),
       ),
     );
-    for (const [caller, results] of [
-      ["a", a!],
-      ["b", b!],
-    ] as const) {
-      assert.deepEqual(
-        results.map((entry) =>
-          entry instanceof Error ? entry : entry.content,
-        ),
-        callerIds(caller),
-      );
-    }
-    await client.close();
-    await cache.close();
+    assert.deepEqual(contents(a!), callerIds("a"));
+    assert.deepEqual(contents(b!), callerIds("b"));
     return calls;
   };
 
-  it("gives each direct caller one producer call with only its own misses, above the batch limit", async () => {
-    const calls = await runTwoConcurrentCallers(true);
+  it("gives each direct caller one producer call with only its own misses, above the batch limit", async (t) => {
+    const calls = await runTwoConcurrentCallers(t, true);
     const sorted = [...calls].sort((x, y) => x[0]!.localeCompare(y[0]!));
     assert.deepEqual(sorted, [
       callerIds("a").filter((id) => id !== "a:0" && id !== "a:7"),
@@ -368,8 +398,8 @@ describe("v4 direct producer dispatch", suiteOptions, () => {
     ]);
   });
 
-  it("merges or splits the same callers under automatic accumulation", async () => {
-    const calls = await runTwoConcurrentCallers(false);
+  it("merges or splits the same callers under automatic accumulation", async (t) => {
+    const calls = await runTwoConcurrentCallers(t, false);
     const mixesCallers = calls.some(
       (ids) => new Set(ids.map((id) => id.split(":")[0])).size > 1,
     );
@@ -379,23 +409,10 @@ describe("v4 direct producer dispatch", suiteOptions, () => {
     );
   });
 
-  it("applies producerBatching.maxBatchSize only to automatic accumulation", async () => {
-    const cache = new Cache({
-      store: new MemoryStore<Spec>(),
+  it("applies producerBatching.maxBatchSize only to automatic accumulation", async (t) => {
+    const { client, calls } = await recordingClient(t, {
       name: "producer-direct-limit",
-      resourceTypes: ACCEPT_ANY_REGISTRY,
-    });
-    const calls: string[][] = [];
-    const client = wrapProducer({
-      cache,
       producerBatching: { maxBatchSize: 2 },
-      produceMany: async (requests) => {
-        calls.push(requests.map(({ id }) => id));
-        return requests.map(({ id }) => ({
-          content: id,
-          directives: freshFor100,
-        }));
-      },
     });
     const ids = (prefix: string) =>
       ["1", "2", "3", "4", "5"].map((index) => ({ id: `${prefix}${index}` }));
@@ -407,44 +424,20 @@ describe("v4 direct producer dispatch", suiteOptions, () => {
       ["automatic-3", "automatic-4"],
       ["automatic-5"],
     ]);
-    await client.close();
-    await cache.close();
   });
 
-  it("sends a direct call's misses and stale refreshes in one producer call", async () => {
-    const cache = new Cache({
-      store: new MemoryStore<Spec>(),
-      name: "producer-direct-revalidation",
-      resourceTypes: ACCEPT_ANY_REGISTRY,
-    });
-    // Stale, but usable while a refresh runs.
-    await cache.store(
-      ["stale-1", "stale-2"].map((id) => ({
-        id,
-        content: `old ${id}`,
-        date: new Date(Date.now() - 10_000),
-        directives: {
-          freshUntilAge: 1,
-          maxStale: {
-            withoutRevalidation: 0,
-            whileRevalidate: 100,
-            ifError: 0,
-          },
-        },
-      })),
-    );
-    const calls: string[][] = [];
+  it("sends a direct call's misses and stale refreshes in one producer call", async (t) => {
     const refreshed = Promise.withResolvers<void>();
-    const client = wrapProducer({
-      cache,
+    const { client, calls } = await recordingClient(t, {
+      name: "producer-direct-revalidation",
+      // A limit of 1 proves the direct cohort is not split.
       producerBatching: { maxBatchSize: 1 },
-      produceMany: async (requests) => {
-        calls.push(requests.map(({ id }) => id));
+      seed: ["stale-1", "stale-2"].map((id) =>
+        staleWhileRevalidating(id, `old ${id}`),
+      ),
+      content: (id) => `new ${id}`,
+      onProduce: async () => {
         refreshed.resolve();
-        return requests.map(({ id }) => ({
-          content: `new ${id}`,
-          directives: freshFor100,
-        }));
       },
     });
     const results = await client.getMany(
@@ -452,60 +445,30 @@ describe("v4 direct producer dispatch", suiteOptions, () => {
       { autoBatch: { producer: false } },
     );
     await refreshed.promise;
-    assert.deepEqual(
-      results.map((entry) => (entry instanceof Error ? entry : entry.content)),
-      ["old stale-1", "new miss-1", "old stale-2", "new miss-2"],
-    );
+    assert.deepEqual(contents(results), [
+      "old stale-1",
+      "new miss-1",
+      "old stale-2",
+      "new miss-2",
+    ]);
     assert.deepEqual(calls, [["stale-1", "miss-1", "stale-2", "miss-2"]]);
-    await client.close();
-    await cache.close();
   });
 
-  it("still refreshes a direct call's stale entries when the caller cancels", async () => {
-    const store = bulkMemoryStore<Spec>();
-    const cache = new Cache({
-      store,
-      name: "producer-direct-cancelled-revalidation",
-      resourceTypes: ACCEPT_ANY_REGISTRY,
-      // Separate Store reads, so the stale entry classifies before the cancel.
-      readBatching: { maxBatchSize: 1 },
-    });
-    await cache.store([
-      {
-        id: "stale",
-        content: "old",
-        date: new Date(Date.now() - 10_000),
-        directives: {
-          freshUntilAge: 1,
-          maxStale: {
-            withoutRevalidation: 0,
-            whileRevalidate: 100,
-            ifError: 0,
-          },
-        },
-      },
-    ]);
+  it("still refreshes a direct call's stale entries when the caller cancels", async (t) => {
     // Hold the miss's Store read open until the caller has cancelled.
     const releaseRead = Promise.withResolvers<void>();
-    const original = store.getMany.bind(store);
-    mock.method(
+    const { store } = spiedStore({
+      beforeGetMany: async (requests) => {
+        if (requests.some(({ id }) => id === "miss")) await releaseRead.promise;
+      },
+    });
+    const { cache, client, calls } = await recordingClient(t, {
+      name: "producer-direct-cancelled-revalidation",
       store,
-      "getMany",
-      async (...args: Parameters<typeof original>) => {
-        if (args[0].some(({ id }) => id === "miss")) await releaseRead.promise;
-        return original(...args);
-      },
-    );
-    const calls: string[][] = [];
-    const client = wrapProducer({
-      cache,
-      produceMany: async (requests) => {
-        calls.push(requests.map(({ id }) => id));
-        return requests.map(({ id }) => ({
-          content: `new ${id}`,
-          directives: freshFor100,
-        }));
-      },
+      // Separate Store reads, so the stale entry classifies before the cancel.
+      readBatching: { maxBatchSize: 1 },
+      seed: [staleWhileRevalidating("stale", "old")],
+      content: (id) => `new ${id}`,
     });
     const controller = new AbortController();
     const pending = client.getMany([{ id: "stale" }, { id: "miss" }], {
@@ -522,6 +485,5 @@ describe("v4 direct producer dispatch", suiteOptions, () => {
       (await cache.get(lookup("stale"))).usable?.content,
       "new stale",
     );
-    await cache.close();
   });
 });
