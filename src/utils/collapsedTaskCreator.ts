@@ -179,14 +179,13 @@ export function createProducerScheduler<Request, Result>(options: {
   };
   const dispatch = (selected: readonly Task[], automatic: boolean) => {
     const tasks = selected.filter((task) => task.state === "queued");
-    for (
-      let offset = 0;
-      offset < tasks.length;
-      offset += options.bulk ? maxBatchSize : 1
-    ) {
+    // Only automatic accumulation is limited by maxBatchSize. A direct call
+    // reaches a bulk producer as one invocation, whatever its size.
+    const batchSize = !options.bulk ? 1 : automatic ? maxBatchSize : Infinity;
+    for (let offset = 0; offset < tasks.length; offset += batchSize) {
       // Producer code can synchronously cancel or flush later queued tasks.
       const batch = tasks
-        .slice(offset, offset + (options.bulk ? maxBatchSize : 1))
+        .slice(offset, offset + batchSize)
         .filter((task) => task.state === "queued");
       if (batch.length === 0) continue;
       const now = performance.now();

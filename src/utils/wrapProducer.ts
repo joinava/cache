@@ -142,7 +142,10 @@ export type WrapProducerOptions<
    * A custom logger to use (optional).
    */
   logger?: Logger;
-  /** Bulk accumulation settings; default limit 20. Does not change participation. */
+  /**
+   * Bulk accumulation settings; default limit 20. The limit applies only to
+   * accumulated work. Does not change participation.
+   */
   producerBatching?: ReadBatchOptions;
 };
 
@@ -442,7 +445,9 @@ export function throwUnreachableAbort(signal: AbortSignal | undefined): never {
  *
  * Single producers dispatch promptly. Bulk producers accumulate ready work by
  * default, separately from Store accumulation. autoBatch.producer: false waits
- * for classification of the known set, then dispatches its foreground cohort.
+ * for classification of the known set. It then sends the call's misses,
+ * bypass requests, and stale refreshes to the producer as one invocation,
+ * whatever the producerBatching limit.
  * A direct caller can also dispatch compatible queued work immediately.
  *
  * Sharing covers pending requests within collapseOverlappingRequestsTime.
@@ -826,6 +831,16 @@ export default function wrapProducer<
       | undefined
     )[] = items.map(() => undefined);
     type Attachment = ReturnType<typeof scheduler.attach>[number];
+    const logBackgroundRefreshFailure = (background: Attachment) => {
+      void background.promise.catch((error: unknown) =>
+        logger(
+          "wrap-producer",
+          "warn",
+          "error asynchronously requesting refreshed content from producer",
+          error,
+        ),
+      );
+    };
     const attach = (
       item: (typeof items)[number],
       lookup: Lookup,
@@ -841,24 +856,37 @@ export default function wrapProducer<
       caller,
       ...(background ? {} : { signal }),
     });
+    // A direct bulk call sends its misses and its stale-while-revalidate
+    // refreshes to the producer together, as one invocation. Refreshes keep
+    // their obligation when the caller cancels, so they ignore cancellation
+    // and failed sibling lookups.
     const directAttachments =
       bulk !== undefined && batching?.producer === false
-        ? Promise.all(lookups).then((results) => {
-            signal?.throwIfAborted();
-            const foreground = items.flatMap((item, index) => {
-              const lookup = results[index]!;
-              return lookup instanceof Error ||
-                lookup.usable ||
-                lookup.usableWhileRevalidate
+        ? Promise.allSettled(lookups).then((settled) => {
+            const cohort = items.flatMap((item, index) => {
+              const lookup = settled[index]!;
+              if (
+                lookup.status === "rejected" ||
+                lookup.value instanceof Error ||
+                lookup.value.usable
+              )
+                return [];
+              const background = Boolean(lookup.value.usableWhileRevalidate);
+              return !background && signal?.aborted
                 ? []
-                : [{ item, lookup }];
+                : [{ item, lookup: lookup.value, background }];
             });
             const attachments = scheduler.attach(
-              foreground.map(({ item, lookup }) => attach(item, lookup, false)),
+              cohort.map(({ item, lookup, background }) =>
+                attach(item, lookup, background),
+              ),
               false,
             );
+            cohort.forEach(({ background }, index) => {
+              if (background) logBackgroundRefreshFailure(attachments[index]!);
+            });
             return new Map(
-              foreground.map(({ item }, index) => [item, attachments[index]!]),
+              cohort.map(({ item }, index) => [item, attachments[index]!]),
             );
           })
         : undefined;
@@ -895,18 +923,14 @@ export default function wrapProducer<
           }
           if (lookup.usableWhileRevalidate) {
             // The refresh obligation survives both the stale return and later joiner cancellation.
-            const [background] = scheduler.attach(
-              [attach(item, lookup, true)],
-              batching?.producer !== false,
-            );
-            void background!.promise.catch((error: unknown) =>
-              logger(
-                "wrap-producer",
-                "warn",
-                "error asynchronously requesting refreshed content from producer",
-                error,
-              ),
-            );
+            // A direct bulk call refreshes through its single producer invocation.
+            if (directAttachments === undefined) {
+              const [background] = scheduler.attach(
+                [attach(item, lookup, true)],
+                batching?.producer !== false,
+              );
+              logBackgroundRefreshFailure(background!);
+            }
             observeEntry(lookup.usableWhileRevalidate);
             publish({
               disposition: "served-stale-while-revalidating",
@@ -916,7 +940,10 @@ export default function wrapProducer<
           }
           const attachment: Attachment =
             directAttachments !== undefined
-              ? (await directAttachments).get(item)!
+              ? await directAttachments.then((attachments) => {
+                  signal?.throwIfAborted();
+                  return attachments.get(item)!;
+                })
               : scheduler.attach(
                   [attach(item, lookup, false)],
                   batching?.producer !== false,

@@ -61,7 +61,7 @@ import {
   defaultLoggersByComponent,
 } from "./utils/utils.js";
 
-/** Omission selects capability-driven accumulation; false dispatches promptly. */
+/** Omission selects capability-driven accumulation; false sends the set as one Store call. */
 export type ReadOptions = { signal?: AbortSignal; autoBatch?: false };
 
 /**
@@ -209,8 +209,9 @@ export type CacheOptions<
   normalizeParamName?: NormalizeParamName<Params>;
   normalizeParamValue?: NormalizeParamValue<Params>;
   /**
-   * Configure accumulation for bulk-capable Stores. The default limit is 20.
-   * Single-only Stores dispatch promptly. Per-call autoBatch disables accumulation.
+   * Configure accumulation for bulk-capable Stores. The default limit is 20 and
+   * applies only to accumulated reads. Single-only Stores dispatch promptly.
+   * Per-call autoBatch: false sends the call's set as one Store call.
    */
   readBatching?: ReadBatchOptions;
 };
@@ -421,7 +422,7 @@ export default class Cache<
    * aborted read emits `found: "aborted"`.
    *
    * A bulk-capable Store accumulates reads by default. Set `autoBatch: false`
-   * on this call to dispatch immediately.
+   * on this call to dispatch immediately, as one Store call.
    * If Store.getMany returns an Error in this request's slot, only this caller
    * rejects. Other callers in the automatic batch retain their hits or misses.
    * A rejected store promise rejects every non-cancelled caller in the batch.

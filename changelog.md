@@ -11,7 +11,8 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
 - Bulk Cache reads return positional results containing successes or `Error`
   values. Handle each slot or use `throwIfAnyError` to reject partial failure.
 - Replace `batchReads` with `readBatching`. Both Cache read methods now support
-  `{ autoBatch: false }` to bypass automatic accumulation.
+  `{ autoBatch: false }` to bypass automatic accumulation. A direct call reaches
+  the Store as one call, whatever the batch limit.
 - `wrapProducer` and `wrapHashedInputProducer` return clients with `get`,
   `getMany`, and `close`, replacing callable wrappers. Declare exactly one
   top-level capability, `produce` or `produceMany`, in the options object.
@@ -34,7 +35,9 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
 - Separate Store-read and producer queues automatically batch bulk-capable
   operations, with a default maximum batch size of 20. Single-only
   capabilities dispatch promptly. Wrapper calls can disable Store and
-  producer accumulation independently with `autoBatch` options.
+  producer accumulation independently with `autoBatch` options. The batch
+  limit applies only to accumulated work: a direct call reaches the Store or
+  producer as one invocation.
 - Compatible pending requests share producer work across calls. Producers
   receive original parameters; normalized parameters determine compatibility.
 - Postgres and SQLite preserve successful request slots when another request

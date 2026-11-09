@@ -11,7 +11,11 @@ import Cache from "./Cache.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 import wrapProducer from "./utils/wrapProducer.js";
 
-import { suiteOptions, type Spec } from "../test/readBatchingHelpers.js";
+import {
+  lookup,
+  suiteOptions,
+  type Spec,
+} from "../test/readBatchingHelpers.js";
 
 describe("v4 producer scheduling", suiteOptions, () => {
   it("shares overlapping requests and directly dispatches a queued peer without dispatching unrelated work", async () => {
@@ -294,19 +298,19 @@ describe("normalized producer compatibility", suiteOptions, () => {
 
 // A producer can depend on seeing exactly one caller's misses in one
 // invocation. One example is a vendor read that must run per tenant. Another
-// is a closure that carries per-call context. The default scheduler both
-// merges callers and splits at 20, so those producers need a supported
-// opt-out. This suite fixes that opt-out and shows that the defaults differ.
-describe("v4 producer one-call-per-invocation opt-out", suiteOptions, () => {
+// is a closure that carries per-call context. `autoBatch: { producer: false }`
+// promises that: the call's production reaches the producer as one
+// invocation, whatever the producerBatching limit.
+describe("v4 direct producer dispatch", suiteOptions, () => {
   const callerIds = (caller: string) =>
     Array.from({ length: 24 }, (_, index) => `${caller}:${String(index)}`);
 
   const runTwoConcurrentCallers = async (
-    optOut: boolean,
+    direct: boolean,
   ): Promise<readonly (readonly string[])[]> => {
     const cache = new Cache({
       store: bulkMemoryStore<Spec>(),
-      name: `producer-opt-out-${String(optOut)}`,
+      name: `producer-direct-${String(direct)}`,
       resourceTypes: ACCEPT_ANY_REGISTRY,
     });
     // Seed hits so that each caller's producer call holds only its misses.
@@ -320,7 +324,6 @@ describe("v4 producer one-call-per-invocation opt-out", suiteOptions, () => {
     const calls: string[][] = [];
     const client = wrapProducer({
       cache,
-      ...(optOut ? { producerBatching: { maxBatchSize: Infinity } } : {}),
       produceMany: async (requests) => {
         calls.push(requests.map(({ id }) => id));
         await nextTurn();
@@ -330,7 +333,7 @@ describe("v4 producer one-call-per-invocation opt-out", suiteOptions, () => {
         }));
       },
     });
-    const options = optOut ? { autoBatch: { producer: false as const } } : {};
+    const options = direct ? { autoBatch: { producer: false as const } } : {};
     const [a, b] = await Promise.all(
       ["a", "b"].map(
         async (caller) =>
@@ -356,7 +359,7 @@ describe("v4 producer one-call-per-invocation opt-out", suiteOptions, () => {
     return calls;
   };
 
-  it("gives each direct caller one producer call with only its own misses", async () => {
+  it("gives each direct caller one producer call with only its own misses, above the batch limit", async () => {
     const calls = await runTwoConcurrentCallers(true);
     const sorted = [...calls].sort((x, y) => x[0]!.localeCompare(y[0]!));
     assert.deepEqual(sorted, [
@@ -365,7 +368,7 @@ describe("v4 producer one-call-per-invocation opt-out", suiteOptions, () => {
     ]);
   });
 
-  it("merges or splits the same callers without the opt-out", async () => {
+  it("merges or splits the same callers under automatic accumulation", async () => {
     const calls = await runTwoConcurrentCallers(false);
     const mixesCallers = calls.some(
       (ids) => new Set(ids.map((id) => id.split(":")[0])).size > 1,
@@ -374,5 +377,151 @@ describe("v4 producer one-call-per-invocation opt-out", suiteOptions, () => {
       mixesCallers || calls.length > 2,
       `expected merged or split calls, got ${JSON.stringify(calls)}`,
     );
+  });
+
+  it("applies producerBatching.maxBatchSize only to automatic accumulation", async () => {
+    const cache = new Cache({
+      store: new MemoryStore<Spec>(),
+      name: "producer-direct-limit",
+      resourceTypes: ACCEPT_ANY_REGISTRY,
+    });
+    const calls: string[][] = [];
+    const client = wrapProducer({
+      cache,
+      producerBatching: { maxBatchSize: 2 },
+      produceMany: async (requests) => {
+        calls.push(requests.map(({ id }) => id));
+        return requests.map(({ id }) => ({
+          content: id,
+          directives: freshFor100,
+        }));
+      },
+    });
+    const ids = (prefix: string) =>
+      ["1", "2", "3", "4", "5"].map((index) => ({ id: `${prefix}${index}` }));
+    await client.getMany(ids("direct-"), { autoBatch: { producer: false } });
+    await client.getMany(ids("automatic-"));
+    assert.deepEqual(calls, [
+      ["direct-1", "direct-2", "direct-3", "direct-4", "direct-5"],
+      ["automatic-1", "automatic-2"],
+      ["automatic-3", "automatic-4"],
+      ["automatic-5"],
+    ]);
+    await client.close();
+    await cache.close();
+  });
+
+  it("sends a direct call's misses and stale refreshes in one producer call", async () => {
+    const cache = new Cache({
+      store: new MemoryStore<Spec>(),
+      name: "producer-direct-revalidation",
+      resourceTypes: ACCEPT_ANY_REGISTRY,
+    });
+    // Stale, but usable while a refresh runs.
+    await cache.store(
+      ["stale-1", "stale-2"].map((id) => ({
+        id,
+        content: `old ${id}`,
+        date: new Date(Date.now() - 10_000),
+        directives: {
+          freshUntilAge: 1,
+          maxStale: {
+            withoutRevalidation: 0,
+            whileRevalidate: 100,
+            ifError: 0,
+          },
+        },
+      })),
+    );
+    const calls: string[][] = [];
+    const refreshed = Promise.withResolvers<void>();
+    const client = wrapProducer({
+      cache,
+      producerBatching: { maxBatchSize: 1 },
+      produceMany: async (requests) => {
+        calls.push(requests.map(({ id }) => id));
+        refreshed.resolve();
+        return requests.map(({ id }) => ({
+          content: `new ${id}`,
+          directives: freshFor100,
+        }));
+      },
+    });
+    const results = await client.getMany(
+      ["stale-1", "miss-1", "stale-2", "miss-2"].map((id) => ({ id })),
+      { autoBatch: { producer: false } },
+    );
+    await refreshed.promise;
+    assert.deepEqual(
+      results.map((entry) => (entry instanceof Error ? entry : entry.content)),
+      ["old stale-1", "new miss-1", "old stale-2", "new miss-2"],
+    );
+    assert.deepEqual(calls, [["stale-1", "miss-1", "stale-2", "miss-2"]]);
+    await client.close();
+    await cache.close();
+  });
+
+  it("still refreshes a direct call's stale entries when the caller cancels", async () => {
+    const store = bulkMemoryStore<Spec>();
+    const cache = new Cache({
+      store,
+      name: "producer-direct-cancelled-revalidation",
+      resourceTypes: ACCEPT_ANY_REGISTRY,
+      // Separate Store reads, so the stale entry classifies before the cancel.
+      readBatching: { maxBatchSize: 1 },
+    });
+    await cache.store([
+      {
+        id: "stale",
+        content: "old",
+        date: new Date(Date.now() - 10_000),
+        directives: {
+          freshUntilAge: 1,
+          maxStale: {
+            withoutRevalidation: 0,
+            whileRevalidate: 100,
+            ifError: 0,
+          },
+        },
+      },
+    ]);
+    // Hold the miss's Store read open until the caller has cancelled.
+    const releaseRead = Promise.withResolvers<void>();
+    const original = store.getMany.bind(store);
+    mock.method(
+      store,
+      "getMany",
+      async (...args: Parameters<typeof original>) => {
+        if (args[0].some(({ id }) => id === "miss")) await releaseRead.promise;
+        return original(...args);
+      },
+    );
+    const calls: string[][] = [];
+    const client = wrapProducer({
+      cache,
+      produceMany: async (requests) => {
+        calls.push(requests.map(({ id }) => id));
+        return requests.map(({ id }) => ({
+          content: `new ${id}`,
+          directives: freshFor100,
+        }));
+      },
+    });
+    const controller = new AbortController();
+    const pending = client.getMany([{ id: "stale" }, { id: "miss" }], {
+      signal: controller.signal,
+      autoBatch: { producer: false },
+    });
+    await nextTurn();
+    controller.abort();
+    await assert.rejects(pending, { name: "AbortError" });
+    releaseRead.resolve();
+    await client.close();
+    assert.deepEqual(calls, [["stale"]]);
+    assert.equal(
+      (await cache.get(lookup("stale"))).usable?.content,
+      "new stale",
+    );
+    await cache.close();
   });
 });

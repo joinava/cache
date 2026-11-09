@@ -145,7 +145,7 @@ A Store declares exactly one read primitive. MemoryStore implements `get(request
 The exported `getOne(store, request)` and `getMany(store, requests)` adapters support either capability without accumulating calls.
 
 Both Cache methods accept `{ signal, autoBatch?: false }`. Bulk-capable stores accumulate calls by default; single-only stores dispatch promptly.
-Configure the accumulation scheduler with `readBatching`. The default maximum batch size is 20. Dispatch runs after Promise continuations.
+Configure the accumulation scheduler with `readBatching`. Its maximum batch size, 20 by default, limits only accumulated reads. Dispatch runs after Promise continuations.
 
 ```ts
 const cache = new Cache({
@@ -159,7 +159,7 @@ const complete = throwIfAnyError(partial);
 await cache.getMany(requests, { autoBatch: false });
 ```
 
-`autoBatch: false` dispatches the supplied known set promptly through the Store's bulk primitive. It does not force individual reads.
+`autoBatch: false` sends the supplied known set promptly as one call to the Store's bulk primitive. The batch limit does not split it. It does not force individual reads.
 Only `false` is an explicit override. Constructor settings control scheduling, not participation defaults.
 
 Bulk reads return positional lookup results or Error slots. Empty entry arrays represent successful misses.
@@ -211,7 +211,7 @@ Declare exactly one top-level capability: `produce` or `produceMany`. Single pro
 Bulk producers accumulate ready requests by default. `producerBatching` controls this separate scheduler, with the same default limit and scheduling convention as Store reads.
 Per-call `{ autoBatch: { store: false, producer: false } }` disables accumulation independently at each stage.
 
-Automatic production starts as each independent Store invocation settles. Direct bulk production first classifies the known set, then dispatches its foreground cohort, subject to the batch limit.
+Automatic production starts as each independent Store invocation settles. Direct bulk production first classifies the known set. It then sends the call's misses, bypass requests, and stale-while-revalidate refreshes to the producer as one invocation. The batch limit does not split it.
 Every producer request must remain valid when requests are added, removed, reordered, split, or deduplicated. Producers must perform side-effect-free reads.
 A bulk producer returns one primary result or Error per request. Supplemental resources are stored without adding result slots.
 

@@ -504,6 +504,35 @@ describe("v4 read participation", () => {
     assert.deepEqual(getManyRequestCounts(), [2, 1]);
   });
 
+  it("applies readBatching.maxBatchSize only to automatic accumulation", async (t) => {
+    const { store, getManyRequestCounts } = spiedStore();
+    const cache = new Cache({
+      store,
+      name: uniqueCacheName("direct-limit"),
+      resourceTypes: ACCEPT_ANY_REGISTRY,
+      readBatching: { maxBatchSize: 2 },
+    });
+    t.after(async () => await cache.close());
+    const ids = ["a", "b", "c", "d", "e"].map((id) => lookup(id));
+    await cache.getMany(ids, { autoBatch: false });
+    assert.deepEqual(getManyRequestCounts(), [5]);
+    await cache.getMany(ids);
+    assert.deepEqual(getManyRequestCounts(), [5, 2, 2, 1]);
+    const client = wrapProducer({
+      cache,
+      produceMany: async (requests) =>
+        await Promise.resolve(
+          requests.map(({ id }) => ({ content: id, directives: freshFor100 })),
+        ),
+    });
+    await client.getMany(
+      ["f", "g", "h"].map((id) => ({ id })),
+      { autoBatch: { store: false } },
+    );
+    await client.close();
+    assert.deepEqual(getManyRequestCounts(), [5, 2, 2, 1, 3]);
+  });
+
   it("never accumulates single-only Store reads", async (t) => {
     const store = new MemoryStore<Spec>();
     const read = t.mock.method(store, "get");
