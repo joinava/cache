@@ -122,6 +122,85 @@ describe("Store conformance", () => {
 });
 
 function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
+  it("ignores extra request metadata when reading hits and misses", async () => {
+    await withStore(createFixture, async (store) => {
+      await store.store([
+        { entry: makeEntry("hit", "value"), maxStoreForSeconds: 60 },
+      ]);
+      const observer = () =>
+        assert.fail("request metadata must not be invoked");
+      const results = await getMany(store, [
+        { id: "hit", params: matchingParams, observer },
+        { id: "miss", params: matchingParams, observer },
+      ]).then(throwIfAnyError);
+      const hit = results[0];
+      assert.deepEqual(
+        hit.map(({ content }) => content),
+        [{ value: "value" }],
+      );
+      assert.deepEqual(results[1], []);
+    });
+  });
+
+  it("replaces an existing variant on later store calls", async () => {
+    await withStore(createFixture, async (store) => {
+      await store.store([
+        { entry: makeEntry("id", "first"), maxStoreForSeconds: 60 },
+      ]);
+      await store.store([
+        {
+          entry: makeEntry("id", "replacement", varyOnFormat, {
+            date: new Date("2023-01-01T00:00:00.000Z"),
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      const result = await getOne(store, { id: "id", params: matchingParams });
+
+      assert.equal(result.length, 1);
+      assert.deepEqual(result[0]?.content, { value: "replacement" });
+    });
+  });
+
+  it("keeps one complete entry after concurrent writes to one variant", async () => {
+    await withStore(createFixture, async (store) => {
+      const writes = Array.from({ length: 20 }, (_, i) =>
+        store.store([
+          {
+            entry: makeEntry("id", `value:${i}`, varyOnFormat),
+            maxStoreForSeconds: 60,
+          },
+        ]),
+      );
+
+      await Promise.all(writes);
+
+      const result = await getOne(store, { id: "id", params: matchingParams });
+
+      assert.equal(result.length, 1);
+      assert.match(result[0]?.content.value ?? "", /^value:\d+$/);
+    });
+  });
+
+  it("rejects pre-aborted reads with the caller's reason", async () => {
+    await withStore(createFixture, async (store) => {
+      // Finish lazy initialization before testing cancellation and cleanup.
+      await getOne(store, { id: "initialize", params: matchingParams });
+      const controller = new AbortController();
+      const reason = new Error("read cancelled before dispatch");
+      controller.abort(reason);
+      const request = { id: "id", params: matchingParams };
+      const options = { signal: controller.signal };
+      await assert.rejects(
+        store.get !== undefined
+          ? store.get(request, options)
+          : store.getMany([request], options),
+        (error) => error === reason,
+      );
+    });
+  });
+
   it("returns empty results for misses and empty getMany requests", async () => {
     await withStore(createFixture, async (store) => {
       await store.store([]);
@@ -1389,15 +1468,22 @@ function defineChangeDetectionConformance(
         },
       ]);
 
-      // A single call with two entries for the SAME slot. The FIRST entry has
+      // A single call has three entries for the SAME slot. The MIDDLE entry has
       // the newest birth date, so it must win under the contract's uniform
       // newest-birth-date dedup rule -- a last-write-wins implementation would
-      // persist (and report for) the second entry instead. Crucially the
+      // persist (and report for) the last entry instead. Crucially the
       // winner's validators equal the *pre-call* stored value A, so the winner
       // must report "unchanged", proving the comparison is against the
       // pre-call snapshot and NOT against the other in-call entry B (which
       // would give "changed").
       const results = await store.store([
+        {
+          entry: makeEntry("id", "oldest", varyOnFormat, {
+            validators: validatorsB,
+            date: new Date("2024-01-01T00:00:00.000Z"),
+          }),
+          maxStoreForSeconds: 60,
+        },
         {
           entry: makeEntry("id", "winner", varyOnFormat, {
             validators: validatorsA,
@@ -1416,18 +1502,22 @@ function defineChangeDetectionConformance(
         },
       ]);
 
-      assert.equal(results.length, 2);
+      assert.equal(results.length, 3);
       const rels = relationshipsOf(results);
 
-      // Winner (index 0, newest birth date) reports against the pre-call
+      // Winner (index 1, newest birth date) reports against the pre-call
       // snapshot A; the dropped duplicate persists nothing and is omitted.
-      assert.deepEqual(rels, ["unchanged", undefined]);
+      assert.deepEqual(rels, [undefined, "unchanged", undefined]);
 
-      // The winner is what actually persisted, even though it came FIRST.
+      // The winner is what actually persisted, even though it came in the MIDDLE.
       const stored = await getOne(store, { id: "id", params: matchingParams });
       assert.equal(stored.length, 1);
       assert.deepEqual(stored[0]?.validators, validatorsA);
       assert.equal(stored[0]?.content.value, "winner");
+      assert.equal(
+        stored[0]?.date.getTime(),
+        new Date("2024-05-01T00:00:00.000Z").getTime(),
+      );
     });
   });
 

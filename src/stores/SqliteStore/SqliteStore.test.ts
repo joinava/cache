@@ -42,27 +42,6 @@ const emptyVary = {} as NormalizedVary<TestParams>;
 const directives = { freshUntilAge: 60 } as NormalizedProducerDirectives;
 
 describe("SqliteStore", () => {
-  it("projects request metadata out of worker payloads", async () => {
-    await withTempStore(async ({ store }) => {
-      await store.store([
-        { entry: makeEntry("hit", "value"), maxStoreForSeconds: 60 },
-      ]);
-      const observer = () =>
-        assert.fail("request metadata must not be invoked");
-      const results = await store.getMany([
-        { id: "hit", params: matchingParams, observer },
-        { id: "miss", params: matchingParams, observer },
-      ]);
-      const hit = results[0];
-      if (hit instanceof Error) throw hit;
-      assert.deepEqual(
-        hit.map(({ content }) => content),
-        [{ value: "value" }],
-      );
-      assert.deepEqual(results[1], []);
-    });
-  });
-
   it("roundtrips stored entries through a reopened database", async () => {
     await withTempStore(async ({ databasePath }) => {
       const store = new SqliteStore<TestSpec, {}, TestParams>({ databasePath });
@@ -101,27 +80,6 @@ describe("SqliteStore", () => {
       } finally {
         await reopened.close();
       }
-    });
-  });
-
-  it("replaces an existing variant on later store calls", async () => {
-    await withTempStore(async ({ store }) => {
-      await store.store([
-        { entry: makeEntry("id", "first"), maxStoreForSeconds: 60 },
-      ]);
-      await store.store([
-        {
-          entry: makeEntry("id", "replacement", varyOnFormat, {
-            date: new Date("2023-01-01T00:00:00.000Z"),
-          }),
-          maxStoreForSeconds: 60,
-        },
-      ]);
-
-      const result = await getOne(store, { id: "id", params: matchingParams });
-
-      assert.equal(result.length, 1);
-      assert.deepEqual(result[0]?.content, { value: "replacement" });
     });
   });
 
@@ -295,30 +253,6 @@ describe("SqliteStore", () => {
     }
   });
 
-  it("honors already-aborted signals for get and getMany", async () => {
-    await withTempStore(async ({ store }) => {
-      const controller = new AbortController();
-      controller.abort();
-
-      await assert.rejects(
-        async () =>
-          getOne(
-            store,
-            { id: "id", params: matchingParams },
-            { signal: controller.signal },
-          ),
-        /aborted|AbortError/i,
-      );
-      await assert.rejects(
-        async () =>
-          getMany(store, [{ id: "id", params: matchingParams }] as const, {
-            signal: controller.signal,
-          }).then(throwIfAnyError),
-        /aborted|AbortError/i,
-      );
-    });
-  });
-
   it("does not need writer access to return unexpired reads", async () => {
     await withTempStore(
       async ({ databasePath, store }) => {
@@ -376,26 +310,6 @@ describe("SqliteStore", () => {
         /SqliteStore is closed/,
       );
       await store.close();
-    });
-  });
-
-  it("keeps coherent last-writer-wins state for concurrent writes to one variant", async () => {
-    await withTempStore(async ({ store }) => {
-      const writes = Array.from({ length: 20 }, (_, i) =>
-        store.store([
-          {
-            entry: makeEntry("id", `value:${i}`, varyOnFormat),
-            maxStoreForSeconds: 60,
-          },
-        ]),
-      );
-
-      await Promise.all(writes);
-
-      const result = await getOne(store, { id: "id", params: matchingParams });
-
-      assert.equal(result.length, 1);
-      assert.match(result[0]?.content.value ?? "", /^value:\d+$/);
     });
   });
 

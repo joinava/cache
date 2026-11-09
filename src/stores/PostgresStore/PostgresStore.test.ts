@@ -577,23 +577,6 @@ describe(
   "PostgresStore bulk persistence",
   postgresConfigured ? {} : { skip: "Postgres is not configured" },
   () => {
-    it("keeps the newest birth date among duplicate slots in one write", async (t) => {
-      const { store, cleanup } = await fixture();
-      t.after(cleanup);
-      await store.store([
-        input("duplicate", 1, new Date(1000)),
-        input("duplicate", 3, new Date(3000)),
-        input("duplicate", 2, new Date(2000)),
-      ]);
-      const entries = await getOne(store, {
-        id: "duplicate",
-        params: {} as NormalizedParams<Params>,
-      });
-      assert.equal(entries.length, 1);
-      assert.deepEqual(entries[0]?.content, { value: 3 });
-      assert.equal(entries[0]?.date.getTime(), 3000);
-    });
-
     it("keeps the one-statement fast path for a small write", async () => {
       const f = await fixture();
       const observed = observeQueries();

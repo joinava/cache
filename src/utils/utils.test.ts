@@ -390,3 +390,18 @@ describe("adapter lifecycle and positional contracts", () => {
     assert.equal(closedWhileActive, false);
   });
 });
+
+it("throwIfAnyError lets callers reject a partial cache result", async (t) => {
+  const request = (id: string) => ({ id, params: {}, directives: {} });
+  const store = bulkMemoryStore();
+  const cache = new Cache(
+    singleTypeCacheOptions<string>()({ name: "explicit-partial-store", store }),
+  );
+  t.after(async () => await cache.close());
+  const failure = new Error("one resource unavailable");
+  t.mock.method(store, "getMany", async () => [[], failure]);
+  await assert.rejects(
+    cache.getMany([request("hit"), request("failed")]).then(throwIfAnyError),
+    (error) => error === failure,
+  );
+});

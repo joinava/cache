@@ -1,11 +1,17 @@
 import { throwIfAnyError } from "./utils/utils.js";
+import assert from "node:assert/strict";
+import { cacheReadChannel, type CacheReadMessage } from "./diagnostics.js";
 import { expect } from "chai";
 import { after, before, describe, it } from "node:test";
 import { makeTestWithFixture } from "test-with-fixture";
 
 import { setTimeout as delay } from "timers/promises";
-import { dummyEntryData, postgresStoreFixture } from "../test/fixtures.js";
-import Cache from "./Cache.js";
+import {
+  dummyEntryData,
+  postgresStoreFixture,
+  bulkMemoryStore,
+} from "../test/fixtures.js";
+import Cache, { singleTypeCacheOptions } from "./Cache.js";
 import { resourceType } from "./index.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 import type PostgresStore from "./stores/PostgresStore/PostgresStore.js";
@@ -568,3 +574,58 @@ describe("Cache", { concurrency: true }, () => {
   });
 });
 /* eslint-enable @typescript-eslint/no-explicit-any */
+
+describe("Cache partial reads", () => {
+  const request = (id: string) => ({ id, params: {}, directives: {} });
+  it("automatic batches isolate per-request store failures", async (t) => {
+    const store = bulkMemoryStore();
+    const cache = new Cache(
+      singleTypeCacheOptions<string>()({ name: "partial-store", store }),
+    );
+    t.after(async () => await cache.close());
+    await cache.store([
+      { id: "hit", content: "value", directives: { freshUntilAge: 60 } },
+    ]);
+    const original = store.getMany.bind(store);
+    const failure = new Error("one resource unavailable");
+    t.mock.method(
+      store,
+      "getMany",
+      async (requests: Parameters<typeof original>[0]) => {
+        const results = await original(requests);
+        return results.map((entries, index) =>
+          requests[index]?.id === "failed" ? failure : entries,
+        );
+      },
+    );
+    const messages: CacheReadMessage[] = [];
+    const onRead = (message: CacheReadMessage) => {
+      if (message.cache === cache.name) messages.push(message);
+    };
+    cacheReadChannel.subscribe(onRead);
+    t.after(() => {
+      cacheReadChannel.unsubscribe(onRead);
+    });
+    const [hit, failed, miss, duplicateHit] = await Promise.allSettled([
+      cache.get(request("hit")),
+      cache.get(request("failed")),
+      cache.get(request("miss")),
+      cache.get(request("hit")),
+    ]);
+    assert.equal(hit?.status, "fulfilled");
+    if (hit?.status === "fulfilled")
+      assert.equal(hit.value.usable?.content, "value");
+    assert.equal(failed?.status, "rejected");
+    if (failed?.status === "rejected") assert.equal(failed.reason, failure);
+    assert.equal(miss?.status, "fulfilled");
+    if (miss?.status === "fulfilled")
+      assert.equal(miss.value.usable, undefined);
+    assert.equal(duplicateHit?.status, "fulfilled");
+    if (duplicateHit?.status === "fulfilled")
+      assert.equal(duplicateHit.value.usable?.content, "value");
+    assert.equal(
+      messages.filter((message) => message.found === "read-failed").length,
+      1,
+    );
+  });
+});
