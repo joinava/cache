@@ -291,3 +291,88 @@ describe("normalized producer compatibility", suiteOptions, () => {
     );
   }
 });
+
+// A producer can depend on seeing exactly one caller's misses in one
+// invocation. One example is a vendor read that must run per tenant. Another
+// is a closure that carries per-call context. The default scheduler both
+// merges callers and splits at 20, so those producers need a supported
+// opt-out. This suite fixes that opt-out and shows that the defaults differ.
+describe("v4 producer one-call-per-invocation opt-out", suiteOptions, () => {
+  const callerIds = (caller: string) =>
+    Array.from({ length: 24 }, (_, index) => `${caller}:${String(index)}`);
+
+  const runTwoConcurrentCallers = async (
+    optOut: boolean,
+  ): Promise<readonly (readonly string[])[]> => {
+    const cache = new Cache({
+      store: bulkMemoryStore<Spec>(),
+      name: `producer-opt-out-${String(optOut)}`,
+      resourceTypes: ACCEPT_ANY_REGISTRY,
+    });
+    // Seed hits so that each caller's producer call holds only its misses.
+    await cache.store(
+      ["a:0", "a:7", "b:3"].map((id) => ({
+        id,
+        content: id,
+        directives: freshFor100,
+      })),
+    );
+    const calls: string[][] = [];
+    const client = wrapProducer({
+      cache,
+      ...(optOut ? { producerBatching: { maxBatchSize: Infinity } } : {}),
+      produceMany: async (requests) => {
+        calls.push(requests.map(({ id }) => id));
+        await nextTurn();
+        return requests.map(({ id }) => ({
+          content: id,
+          directives: freshFor100,
+        }));
+      },
+    });
+    const options = optOut ? { autoBatch: { producer: false as const } } : {};
+    const [a, b] = await Promise.all(
+      ["a", "b"].map(
+        async (caller) =>
+          await client.getMany(
+            callerIds(caller).map((id) => ({ id })),
+            options,
+          ),
+      ),
+    );
+    for (const [caller, results] of [
+      ["a", a!],
+      ["b", b!],
+    ] as const) {
+      assert.deepEqual(
+        results.map((entry) =>
+          entry instanceof Error ? entry : entry.content,
+        ),
+        callerIds(caller),
+      );
+    }
+    await client.close();
+    await cache.close();
+    return calls;
+  };
+
+  it("gives each direct caller one producer call with only its own misses", async () => {
+    const calls = await runTwoConcurrentCallers(true);
+    const sorted = [...calls].sort((x, y) => x[0]!.localeCompare(y[0]!));
+    assert.deepEqual(sorted, [
+      callerIds("a").filter((id) => id !== "a:0" && id !== "a:7"),
+      callerIds("b").filter((id) => id !== "b:3"),
+    ]);
+  });
+
+  it("merges or splits the same callers without the opt-out", async () => {
+    const calls = await runTwoConcurrentCallers(false);
+    const mixesCallers = calls.some(
+      (ids) => new Set(ids.map((id) => id.split(":")[0])).size > 1,
+    );
+    assert.ok(
+      mixesCallers || calls.length > 2,
+      `expected merged or split calls, got ${JSON.stringify(calls)}`,
+    );
+  });
+});
