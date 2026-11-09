@@ -1,5 +1,5 @@
 import MemoryStore from "../src/stores/MemoryStore/MemoryStore.js";
-import { naiveGetMany, readStoreObserved } from "../src/utils/utils.js";
+import { readStoreObserved } from "../src/utils/utils.js";
 import pg from "pg";
 import { mock } from "node:test";
 import Cache from "../src/Cache.js";
@@ -261,7 +261,7 @@ export function bulkMemoryStore<
           AnyParams
         >[],
     >(requests: Reqs, options?: { signal?: AbortSignal }) {
-      return await naiveGetMany(memory, requests, 10, options);
+      return await readStoreObserved(memory, requests, options);
     },
     store: memory.store.bind(memory),
     delete: memory.delete.bind(memory),

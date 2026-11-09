@@ -265,39 +265,13 @@ export function throwIfAnyError<const Results extends readonly unknown[]>(
 /**
  * Reads many requests from a single-read Store with limited parallelism.
  *
- * The package does not export this function. Applications read through a
- * Cache, which uses the same single-read path. Tests use it to wrap a
- * MemoryStore as a bulk Store, and to control the concurrency limit. It calls
- * `store.get` for each request with up to 10 concurrent operations by default.
- * Each failed read becomes an Error in its request slot while other reads
- * continue. Existing Error objects keep their identity. Non-Error rejections
- * are wrapped with their original cause. Request order and duplicate slots
- * are preserved. Caller cancellation still rejects the operation rather than
- * becoming a partial read failure.
- *
- * @param store The store instance to use for retrieving entries
- * @param requests Array of requests, each containing an id and params
- * @param maxConcurrency Maximum number of concurrent requests (default: 10)
- * @returns A promise that resolves to a tuple-typed array, where each output
- *  slot holds matching entries or an Error for the corresponding request, with
- *  content narrowed to the spec variants compatible with that request's id.
+ * It calls `store.get` for each request with up to `maxConcurrency`
+ * concurrent operations. Each failed read becomes an Error in its request
+ * slot while other reads continue. Existing Error objects keep their
+ * identity. Non-Error rejections are wrapped with their original cause.
+ * Request order and duplicate slots are preserved. Caller cancellation still
+ * rejects the operation rather than becoming a partial read failure.
  */
-export async function naiveGetMany<
-  Spec extends CacheSpec,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-  const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
->(
-  // Store's non-generic methods let TypeScript infer Spec. The generic get
-  // method alone does not, so Spec would widen to CacheSpec.
-  store: Store<Spec, Validators, Params> & { getMany?: never },
-  requests: Reqs,
-  maxConcurrency = 10,
-  options?: { signal?: AbortSignal },
-): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
-  return await readSingleStore(store, requests, maxConcurrency, options);
-}
-
 async function readSingleStore<
   Spec extends CacheSpec,
   Validators extends AnyValidators,
