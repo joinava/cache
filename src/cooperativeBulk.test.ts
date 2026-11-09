@@ -195,7 +195,7 @@ it("a pre-aborted mixed batch publishes every aborted fetch before any read star
 
 // Hold one real scheduling boundary without depending on elapsed wall time.
 async function pauseNextMemoryWrite() {
-  const { TimeSliceBudget } = await import("./utils/time-slicing.js");
+  const { TimeSliceBudget } = await import("@zingage/scheduling");
   const paused = Promise.withResolvers<void>();
   const resume = Promise.withResolvers<void>();
   const yieldPoint = mock.method(

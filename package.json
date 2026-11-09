@@ -36,6 +36,7 @@
     "test:types": "tsc -p test/types/tsconfig.json"
   },
   "dependencies": {
+    "@zingage/scheduling": "^1.0.0",
     "dataloader": "^2.2.3",
     "debug": "^4.4.1",
     "es-toolkit": "^1.43.0",

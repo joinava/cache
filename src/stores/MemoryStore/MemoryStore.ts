@@ -1,7 +1,4 @@
-import {
-  timeSlicedMap,
-  timeSlicedMapFromEntries,
-} from "../../utils/time-slicing.js";
+import { timeSlicedMap, timeSlicedMapFromEntries } from "@zingage/scheduling";
 import type { CacheSpec, SpecForId } from "../../types/00_CacheSpec.js";
 import type {
   StoreEntryResult,

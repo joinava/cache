@@ -1,6 +1,9 @@
 import { chunk, groupBy, partition } from "es-toolkit";
-import { sortCooperatively } from "../../utils/cooperative.js";
-import { timeSlicedMap, timeSlicedForEach } from "../../utils/time-slicing.js";
+import {
+  timeSlicedSort,
+  timeSlicedMap,
+  timeSlicedForEach,
+} from "@zingage/scheduling";
 import type { ColumnType, PostgresPool, RawBuilder, SqlBool } from "kysely";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import type { Tagged } from "type-fest";
@@ -378,7 +381,7 @@ export default class PostgresStore<
     // concurrent calls whose batches share >= 2 slots in DIFFERENT orders
     // could otherwise deadlock (each holding a row the other is waiting on).
     // With a consistent order, the later call just waits for the earlier one.
-    const rows = await sortCooperatively(
+    const rows = await timeSlicedSort(
       await timeSlicedMap(deduped, ({ it }) => {
         return {
           resource_id: it.entry.id,

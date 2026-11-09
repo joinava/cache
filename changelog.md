@@ -28,6 +28,9 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
 
 ### Features and fixes
 
+- Use the public `@zingage/scheduling` package for cooperative processing and
+  stable sorting. The default processing budget is now 4 ms instead of 8 ms.
+
 - Separate Store-read and producer queues automatically batch bulk-capable
   operations, with a default maximum batch size of 20. Single-only
   capabilities dispatch promptly. Wrapper calls can disable Store and

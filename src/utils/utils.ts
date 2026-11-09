@@ -1,4 +1,4 @@
-import { TimeSliceBudget, timeSlicedForEach } from "./time-slicing.js";
+import { TimeSliceBudget, timeSlicedForEach } from "@zingage/scheduling";
 import { default as debug } from "debug";
 import { maxBy } from "es-toolkit";
 
