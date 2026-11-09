@@ -1,4 +1,5 @@
-import { getOne, throwIfAnyError, getMany } from "../utils/utils.js";
+import { throwIfAnyError } from "../utils/utils.js";
+import { getMany, getOne } from "../../test/fixtures.js";
 import { sortBy, isEqual } from "es-toolkit";
 import { setTimeout as sleep } from "node:timers/promises";
 import { AnyValidatorsArb } from "../../test/arbitraries/02_Validators.js";

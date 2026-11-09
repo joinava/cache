@@ -1,5 +1,5 @@
 import MemoryStore from "../src/stores/MemoryStore/MemoryStore.js";
-import { naiveGetMany } from "../src/utils/utils.js";
+import { naiveGetMany, readStoreObserved } from "../src/utils/utils.js";
 import pg from "pg";
 import { mock } from "node:test";
 
@@ -12,6 +12,8 @@ import {
   type AnyParams,
   type AnyValidators,
   type CacheSpec,
+  type Store,
+  type StoreGetManyRequest,
   type NormalizedVary,
   type ProducerDirectives,
 } from "../src/types/index.js";
@@ -249,4 +251,38 @@ export function bulkMemoryStore<
     close: memory.close.bind(memory),
     [Symbol.asyncDispose]: memory[Symbol.asyncDispose].bind(memory),
   };
+}
+
+/**
+ * Reads a known set straight from a Store, through either read primitive.
+ * Tests use it to check Store behavior below the Cache. The package does not
+ * export it, because applications read through a Cache.
+ */
+export async function getMany<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
+>(
+  store: Store<Spec, Validators, Params>,
+  requests: Reqs,
+  options?: { signal?: AbortSignal },
+) {
+  return await readStoreObserved(store, requests, options);
+}
+
+/** Reads one request straight from a Store. An Error slot rejects the call. */
+export async function getOne<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  Id extends Spec["id"],
+>(
+  store: Store<Spec, Validators, Params>,
+  request: StoreGetManyRequest<Spec, NoInfer<Params>> & { readonly id: Id },
+  options?: { signal?: AbortSignal },
+) {
+  const [result] = await getMany(store, [request] as const, options);
+  if (result instanceof Error) throw result;
+  return result;
 }

@@ -1,4 +1,4 @@
-import { bulkMemoryStore } from "../../test/fixtures.js";
+import { bulkMemoryStore, getMany, getOne } from "../../test/fixtures.js";
 import Cache, { singleTypeCacheOptions } from "../Cache.js";
 import MemoryStore from "../stores/MemoryStore/MemoryStore.js";
 import type { CacheSpec } from "../types/00_CacheSpec.js";
@@ -9,8 +9,6 @@ import { describe, it } from "node:test";
 import { setTimeout as delay } from "timers/promises";
 import {
   CacheContractError,
-  getMany,
-  getOne,
   throwIfAnyError,
   naiveGetMany,
   raceWithSignal,

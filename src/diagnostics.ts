@@ -11,9 +11,8 @@ import type { StoreEntryRelationship } from "./types/06_Store.js";
  * - `@zingage/cache:read` -- what did a cache lookup find? Published by
  *   `Cache.get`/`Cache.getMany` (including direct callers that never touch a
  *   wrapper).
- * - `@zingage/cache:read-store` -- one message per physical Store read that a
- *   `Cache` makes. The exported `getMany`/`getOne` Store helpers read a bare
- *   Store with no cache name, so they publish nothing.
+ * - `@zingage/cache:read-store` -- one message per physical Store read. Only a
+ *   `Cache` reads a Store, so every message carries a cache name.
  * - `@zingage/cache:fetch` -- how was a logical wrapped-producer request
  *   answered? Published by the producer wrappers, once per call of the
  *   wrapped function (per request element, for bulk), at settlement.

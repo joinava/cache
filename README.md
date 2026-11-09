@@ -142,7 +142,7 @@ This is particularly useful when a producer that fetches a collection wants to a
 ### Read capabilities and batching
 
 A Store declares exactly one read primitive. MemoryStore implements `get(request)`. PostgresStore and SqliteStore implement `getMany(requests)`.
-The exported `getOne(store, request)` and `getMany(store, requests)` adapters support either capability without accumulating calls.
+Read through a Cache. The Cache adapts to either primitive, and it publishes diagnostics for each Store read.
 
 Both Cache methods accept `{ signal, autoBatch?: false }`. Bulk-capable stores accumulate calls by default; single-only stores dispatch promptly.
 Configure the accumulation scheduler with `readBatching`. Its maximum batch size, 20 by default, limits only accumulated reads. Dispatch runs after Promise continuations.

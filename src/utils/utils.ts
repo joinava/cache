@@ -183,20 +183,6 @@ export type StoreReadObservation = {
   outcome: "success" | "failure" | "cancelled";
 };
 
-/** Read a known set without accumulating independent calls. */
-export async function getMany<
-  Spec extends CacheSpec,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-  const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
->(
-  store: Store<Spec, Validators, Params>,
-  requests: Reqs,
-  options?: { signal?: AbortSignal },
-): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
-  return await readStoreObserved(store, requests, options);
-}
-
 export async function readStoreObserved<
   Spec extends CacheSpec,
   Validators extends AnyValidators,
@@ -264,23 +250,6 @@ export async function readStoreObserved<
   }
   options?.signal?.throwIfAborted();
   return results;
-}
-
-/** Read one request through either primitive. Error slots reject this call. */
-export async function getOne<
-  Spec extends CacheSpec,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-  Id extends Spec["id"],
->(
-  store: Store<Spec, Validators, Params>,
-  request: StoreGetManyRequest<Spec, NoInfer<Params>> & { readonly id: Id },
-  options?: { signal?: AbortSignal },
-) {
-  const results = await getMany(store, [request] as const, options);
-  const result = results[0];
-  if (result instanceof Error) throw result;
-  return result;
 }
 
 /** Reject the first Error in request order after all results have settled. */

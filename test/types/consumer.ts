@@ -7,13 +7,11 @@ import {
   wrapProducer,
   Cache,
   MemoryStore,
-  getOne,
-  getMany,
+  naiveGetMany,
   throwIfAnyError,
   resourceType,
   type SpecOf,
   type Store,
-  type NormalizedParams,
 } from "@zingage/cache";
 import type { IsEqual } from "type-fest";
 
@@ -31,18 +29,6 @@ const cache = new Cache({
   store: memory,
   resourceTypes: registry,
 });
-declare const params: NormalizedParams<{}>;
-const raw = throwIfAnyError(
-  await getMany(memory, [
-    { id: "user:a", params },
-    { id: "count:a", params },
-  ] as const),
-);
-const rawTypes: IsEqual<(typeof raw)[0][number]["content"], { name: string }> =
-  true;
-const secondRawType: IsEqual<(typeof raw)[1][number]["content"], number> = true;
-const one = await getOne(memory, { id: "count:a", params });
-const oneType: IsEqual<(typeof one)[number]["content"], number> = true;
 const cached = throwIfAnyError(
   await cache.getMany([
     { id: "user:a", params: {}, directives: {} },
@@ -57,7 +43,7 @@ const cachedSecondType: IsEqual<
   NonNullable<(typeof cached)[1]["usable"]>["content"],
   number
 > = true;
-void [rawTypes, secondRawType, oneType, cachedType, cachedSecondType];
+void [cachedType, cachedSecondType];
 
 const methods = {
   store: memory.store.bind(memory),
@@ -69,7 +55,7 @@ const methods = {
 const both: Store<SpecOf<typeof registry>, {}, {}> = {
   ...methods,
   get: memory.get.bind(memory),
-  getMany: async (requests) => await getMany(memory, requests),
+  getMany: async (requests) => await naiveGetMany(memory, requests),
 };
 // @ts-expect-error A Store must declare one read primitive.
 const neither: Store<SpecOf<typeof registry>, {}, {}> = methods;

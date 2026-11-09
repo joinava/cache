@@ -6,8 +6,8 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
 
 ### Breaking changes
 
-- Stores declare exactly one read capability: `get` or `getMany`. Use the
-  exported `getOne` and `getMany` adapters to read either kind of Store.
+- Stores declare exactly one read capability: `get` or `getMany`. Read through
+  a Cache, which adapts to either kind of Store.
 - Bulk Cache reads return positional results containing successes or `Error`
   values. Handle each slot or use `throwIfAnyError` to reject partial failure.
 - Replace `batchReads` with `readBatching`. Both Cache read methods now support

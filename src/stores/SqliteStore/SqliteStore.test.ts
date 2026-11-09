@@ -1,4 +1,5 @@
-import { getOne, throwIfAnyError, getMany } from "../../utils/utils.js";
+import { throwIfAnyError } from "../../utils/utils.js";
+import { getMany, getOne } from "../../../test/fixtures.js";
 import assert from "node:assert/strict";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
