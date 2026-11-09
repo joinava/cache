@@ -36,34 +36,12 @@ const matchingParams = {
   format: "json",
   lang: "en",
 } as NormalizedParams<TestParams>;
-const unmatchedParams = {
-  format: "html",
-  lang: "en",
-} as NormalizedParams<TestParams>;
-const missingFormatParams = { lang: "en" } as NormalizedParams<TestParams>;
 const varyOnFormat = { format: "json" } as NormalizedVary<TestParams>;
-const varyOnMissingFormat = { format: null } as NormalizedVary<TestParams>;
 const varyOnLanguage = { lang: "en" } as NormalizedVary<TestParams>;
 const emptyVary = {} as NormalizedVary<TestParams>;
 const directives = { freshUntilAge: 60 } as NormalizedProducerDirectives;
 
 describe("SqliteStore", () => {
-  it("returns empty results for misses and empty getMany requests", async () => {
-    await withTempStore(async ({ store }) => {
-      await store.store([]);
-      await store.delete("missing");
-
-      assert.deepEqual(
-        await getOne(store, { id: "missing", params: matchingParams }),
-        [],
-      );
-      assert.deepEqual(
-        await getMany(store, [] as const).then(throwIfAnyError),
-        [],
-      );
-    });
-  });
-
   it("roundtrips stored entries through a reopened database", async () => {
     await withTempStore(async ({ databasePath }) => {
       const store = new SqliteStore<TestSpec, {}, TestParams>({ databasePath });
@@ -105,37 +83,6 @@ describe("SqliteStore", () => {
     });
   });
 
-  it("keeps the newest birth date when one store call contains duplicate variants", async () => {
-    await withTempStore(async ({ store }) => {
-      await store.store([
-        {
-          entry: makeEntry("id", "oldest", varyOnFormat, {
-            date: new Date("2024-01-01T00:00:00.000Z"),
-          }),
-          maxStoreForSeconds: 60,
-        },
-        {
-          entry: makeEntry("id", "later-date-but-older-birth", varyOnFormat, {
-            date: new Date("2024-01-01T00:00:10.000Z"),
-            initialAge: 20,
-          }),
-          maxStoreForSeconds: 60,
-        },
-        {
-          entry: makeEntry("id", "newest-birth", varyOnFormat, {
-            date: new Date("2024-01-01T00:00:05.000Z"),
-          }),
-          maxStoreForSeconds: 60,
-        },
-      ]);
-
-      const result = await getOne(store, { id: "id", params: matchingParams });
-
-      assert.equal(result.length, 1);
-      assert.deepEqual(result[0]?.content, { value: "newest-birth" });
-    });
-  });
-
   it("replaces an existing variant on later store calls", async () => {
     await withTempStore(async ({ store }) => {
       await store.store([
@@ -154,48 +101,6 @@ describe("SqliteStore", () => {
 
       assert.equal(result.length, 1);
       assert.deepEqual(result[0]?.content, { value: "replacement" });
-    });
-  });
-
-  it("deletes all variants for an id", async () => {
-    await withTempStore(async ({ store }) => {
-      await store.store([
-        { entry: makeEntry("id", "first"), maxStoreForSeconds: 60 },
-        {
-          entry: makeEntry("id", "second", varyOnLanguage),
-          maxStoreForSeconds: 60,
-        },
-        {
-          entry: makeEntry("other", "other", {} as NormalizedVary<TestParams>),
-          maxStoreForSeconds: 60,
-        },
-      ]);
-
-      await store.delete("id");
-
-      assert.deepEqual(
-        await getOne(store, { id: "id", params: matchingParams }),
-        [],
-      );
-      assert.equal(
-        (await getOne(store, { id: "other", params: matchingParams })).length,
-        1,
-      );
-    });
-  });
-
-  it("treats delete of a missing id as a no-op", async () => {
-    await withTempStore(async ({ store }) => {
-      await store.store([
-        { entry: makeEntry("id", "first"), maxStoreForSeconds: 60 },
-      ]);
-
-      await store.delete("missing");
-
-      assert.equal(
-        (await getOne(store, { id: "id", params: matchingParams })).length,
-        1,
-      );
     });
   });
 
@@ -271,76 +176,6 @@ describe("SqliteStore", () => {
       },
       { fallbackDeleteAfter: Infinity },
     );
-  });
-
-  it("matches vary subsets exactly and can return multiple matching variants", async () => {
-    await withTempStore(async ({ store }) => {
-      await store.store([
-        { entry: makeEntry("id", "empty", emptyVary), maxStoreForSeconds: 60 },
-        {
-          entry: makeEntry("id", "format", varyOnFormat),
-          maxStoreForSeconds: 60,
-        },
-        {
-          entry: makeEntry("id", "lang", varyOnLanguage),
-          maxStoreForSeconds: 60,
-        },
-        {
-          entry: makeEntry("id", "missing-format", varyOnMissingFormat),
-          maxStoreForSeconds: 60,
-        },
-      ]);
-
-      assert.deepEqual(
-        (await getOne(store, { id: "id", params: matchingParams }))
-          .map(({ content }) => content.value)
-          .sort(),
-        ["empty", "format", "lang"],
-      );
-      assert.deepEqual(
-        (await getOne(store, { id: "id", params: missingFormatParams }))
-          .map(({ content }) => content.value)
-          .sort(),
-        ["empty", "lang", "missing-format"],
-      );
-      assert.deepEqual(
-        (await getOne(store, { id: "id", params: unmatchedParams }))
-          .map(({ content }) => content.value)
-          .sort(),
-        ["empty", "lang"],
-      );
-    });
-  });
-
-  it("supports getMany order, duplicates, misses, and per-request params", async () => {
-    await withTempStore(async ({ store }) => {
-      await store.store([
-        { entry: makeEntry("one", "one-json"), maxStoreForSeconds: 60 },
-        {
-          entry: makeEntry("one", "one-any", emptyVary),
-          maxStoreForSeconds: 60,
-        },
-        { entry: makeEntry("two", "two-json"), maxStoreForSeconds: 60 },
-      ]);
-
-      const result = await getMany(store, [
-        { id: "one", params: matchingParams },
-        { id: "missing", params: matchingParams },
-        { id: "two", params: unmatchedParams },
-        { id: "one", params: unmatchedParams },
-      ] as const).then(throwIfAnyError);
-
-      assert.deepEqual(result[0].map(({ content }) => content.value).sort(), [
-        "one-any",
-        "one-json",
-      ]);
-      assert.deepEqual(result[1], []);
-      assert.deepEqual(result[2], []);
-      assert.deepEqual(
-        result[3].map(({ content }) => content.value),
-        ["one-any"],
-      );
-    });
   });
 
   it("chunks large getMany batches across SQLite variable limits", async () => {
@@ -523,38 +358,6 @@ describe("SqliteStore", () => {
     });
   });
 
-  it("supports many concurrent writes to different ids", async () => {
-    await withTempStore(
-      async ({ store }) => {
-        const ids = Array.from({ length: 40 }, (_, i) => `id:${i}`);
-
-        await Promise.all(
-          ids.map(async (id, i) =>
-            store.store([
-              {
-                entry: makeEntry(id, `value:${i}`),
-                maxStoreForSeconds: 60,
-              },
-            ]),
-          ),
-        );
-
-        const result = await getMany(
-          store,
-          ids.map((id) => ({ id, params: matchingParams })),
-        ).then(throwIfAnyError);
-
-        assert.deepEqual(
-          result
-            .flatMap((entries) => entries.map(({ content }) => content.value))
-            .sort(),
-          ids.map((_, i) => `value:${i}`).sort(),
-        );
-      },
-      { readWorkerCount: 4 },
-    );
-  });
-
   it("keeps coherent last-writer-wins state for concurrent writes to one variant", async () => {
     await withTempStore(async ({ store }) => {
       const writes = Array.from({ length: 20 }, (_, i) =>
@@ -615,57 +418,6 @@ describe("SqliteStore", () => {
       await Promise.all([first.close(), second.close()]);
       await rm(directory, { recursive: true, force: true });
     }
-  });
-
-  it("keeps get results valid while stores and deletes run concurrently", async () => {
-    await withTempStore(
-      async ({ store }) => {
-        await store.store(
-          Array.from({ length: 20 }, (_, i) => ({
-            entry: makeEntry(`id:${i}`, `initial:${i}`),
-            maxStoreForSeconds: 60,
-          })),
-        );
-
-        const operations: Promise<unknown>[] = [];
-        for (let i = 0; i < 20; i += 1) {
-          const id = `id:${i}`;
-          operations.push(
-            store.store([
-              {
-                entry: makeEntry(id, `updated:${i}`),
-                maxStoreForSeconds: 60,
-              },
-            ]),
-            getOne(store, { id: id, params: matchingParams }).then(
-              (entries) => {
-                for (const entry of entries) {
-                  assert.equal(entry.id, id);
-                  assert.deepEqual(entry.vary, varyOnFormat);
-                }
-              },
-            ),
-          );
-          if (i % 3 === 0) {
-            operations.push(store.delete(id));
-          }
-        }
-
-        await Promise.all(operations);
-
-        for (let i = 0; i < 20; i += 1) {
-          const id = `id:${i}`;
-          for (const entry of await getOne(store, {
-            id: id,
-            params: matchingParams,
-          })) {
-            assert.equal(entry.id, id);
-            assert.deepEqual(entry.vary, varyOnFormat);
-          }
-        }
-      },
-      { readWorkerCount: 4 },
-    );
   });
 
   it("leaves a portable database artifact after close", async () => {

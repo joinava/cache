@@ -1,4 +1,4 @@
-import { chunk, groupBy } from "es-toolkit";
+import { chunk, groupBy, partition } from "es-toolkit";
 import { sortCooperatively } from "../../utils/cooperative.js";
 import { timeSlicedMap, timeSlicedForEach } from "../../utils/time-slicing.js";
 import type { ColumnType, PostgresPool, RawBuilder, SqlBool } from "kysely";
@@ -275,12 +275,12 @@ export default class PostgresStore<
           return asError(error);
         }
       });
-      const queryRequests = encoded.filter(
-        (value): value is Exclude<typeof value, Error> =>
-          !(value instanceof Error),
+
+      const [encodingFailures, queryRequests] = partition(
+        encoded,
+        (value): value is Error => value instanceof Error,
       );
-      if (queryRequests.length === 0)
-        return encoded.map((value) => (value instanceof Error ? value : []));
+      if (queryRequests.length === 0) return encodingFailures;
 
       const values = sql.join(queryRequests.map(({ value }) => value));
       let rows: RequestRow[];
@@ -342,6 +342,7 @@ export default class PostgresStore<
         ),
       );
     }
+
     // Preserve duplicate slots and misses in the original request order.
     return results.flat() as StoreGetManyResult<Spec, Reqs, Validators, Params>;
   }
