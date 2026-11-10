@@ -27,7 +27,7 @@ import {
 
 /**
  * Runtime coverage contract (§6.3, §6.4, as amended by the 2026-07-30
- * single-producer design): the by-id-type helpers and the hashed-input wrappers
+ * single-producer design): the by-id-type helpers and the hashed-input builders
  * throw at construction on keyless records; an id classifying outside a
  * wrapper's DECLARED coverage throws NoProducerForResourceTypeError BEFORE any
  * store read; two partial wrappers over one cache serve their own types
@@ -48,32 +48,18 @@ const threeTypeRegistry = {
 
 describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
   describe("construction throws on a keyless producers/branches record", () => {
-    it("wrapHashedInputProducer / wrapBulkHashedInputProducer: empty record and bare function both throw at construction time", async () => {
-      const cache = new Cache({
-        store: new MemoryStore(),
-        name: uniqueCacheName("construct-computing"),
-        resourceTypes: registry,
-      });
-      try {
-        // Neither form supplied.
-        // @ts-expect-error deliberately reaching the runtime guard
-        expect(() => wrapHashedInputProducer({ cache })).to.throw();
-        // @ts-expect-error deliberately reaching the runtime guard
-        expect(() => wrapHashedInputProducer({ cache })).to.throw();
-        // A builder with no `.when` branches could never produce anything.
-        expect(() =>
-          hashedInputProducerByInputType<{
-            site_day: HashedInputVariant<{ key: string }, string>;
-          }>().build(),
-        ).to.throw();
-        expect(() =>
-          bulkHashedInputProducerByInputType<{
-            site_day: HashedInputVariant<{ key: string }, string>;
-          }>().build(),
-        ).to.throw();
-      } finally {
-        await cache.close();
-      }
+    it("hashed-input producer builders with no branches throw at build time", () => {
+      // A builder with no `.when` branches could never produce anything.
+      expect(() =>
+        hashedInputProducerByInputType<{
+          site_day: HashedInputVariant<{ key: string }, string>;
+        }>().build(),
+      ).to.throw();
+      expect(() =>
+        bulkHashedInputProducerByInputType<{
+          site_day: HashedInputVariant<{ key: string }, string>;
+        }>().build(),
+      ).to.throw();
     });
   });
 

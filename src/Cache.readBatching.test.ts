@@ -543,17 +543,4 @@ describe("autoBatch: false (direct Store reads)", suiteOptions, () => {
       /one entry array or Error/,
     );
   });
-
-  it("rejects explicit true for JavaScript callers", async (t) => {
-    const { store } = spiedStore();
-    const cache = cacheOver(store);
-    t.after(async () => await cache.close());
-    await assert.rejects(
-      Reflect.apply(cache.get.bind(cache), cache, [
-        lookup("a"),
-        { autoBatch: true },
-      ]),
-      /omitted or false/,
-    );
-  });
 });

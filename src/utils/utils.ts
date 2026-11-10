@@ -1,8 +1,13 @@
-import { TimeSliceBudget, timeSlicedForEach } from "@zingage/scheduling";
+import {
+  TimeSliceBudget,
+  timeSlicedForEach,
+  timeSlicedMap,
+} from "@zingage/scheduling";
 import { default as debug } from "debug";
 import { maxBy } from "es-toolkit";
 
 import pLimit from "p-limit";
+import type { NonEmptyArray } from "type-party";
 import type { CacheSpec, SpecForId } from "../types/00_CacheSpec.js";
 import type { Entry, NormalizedParams } from "../types/06_Normalization.js";
 import type {
@@ -155,24 +160,6 @@ export function asError(error: unknown): Error {
     : new Error("Cache operation failed", { cause: error });
 }
 
-/** Check capability presence before any dispatch. */
-export function assertStoreReader(store: {
-  get?: unknown;
-  getMany?: unknown;
-}): void {
-  const single = typeof store.get === "function";
-  const bulk = typeof store.getMany === "function";
-  if (
-    single === bulk ||
-    (!single && store.get !== undefined) ||
-    (!bulk && store.getMany !== undefined)
-  ) {
-    throw new CacheContractError(
-      "A Store must declare exactly one of get or getMany",
-    );
-  }
-}
-
 /** One actual primitive call, before operational failures become positional slots. */
 export type StoreReadObservation = {
   operation: "get" | "getMany";
@@ -194,7 +181,6 @@ export async function readStoreObserved<
   options?: { signal?: AbortSignal },
   observe?: (event: StoreReadObservation) => void,
 ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
-  assertStoreReader(store);
   options?.signal?.throwIfAborted();
   if (requests.length === 0)
     return [] as StoreGetManyResult<Spec, Reqs, Validators, Params>;
@@ -252,6 +238,25 @@ export async function readStoreObserved<
   options?.signal?.throwIfAborted();
   return results;
 }
+
+/**
+ * `timeSlicedMap` for a non-empty array, keeping its positional type the way
+ * `mapNonEmpty` does. `timeSlicedMap` returns one result per input, in order.
+ */
+export async function timeSlicedMapNonEmpty<
+  T extends Readonly<NonEmptyArray<unknown>>,
+  U,
+>(
+  items: T,
+  callback: (item: T[number], index: number) => U & Synchronous<U>,
+  budget?: TimeSliceBudget,
+): Promise<{ [K in keyof T]: U }> {
+  return (await timeSlicedMap<T[number], U>(items, callback, budget)) as {
+    [K in keyof T]: U;
+  };
+}
+
+type Synchronous<Result> = Result extends PromiseLike<unknown> ? never : Result;
 
 /** Reject the first Error in request order after all results have settled. */
 export function throwIfAnyError<const Results extends readonly unknown[]>(

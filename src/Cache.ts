@@ -1,3 +1,5 @@
+import { sumBy } from "es-toolkit";
+import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
 import type { InvariantOf, ReadonlyDeep } from "type-fest";
 import {
   cacheReadStoreChannel,
@@ -53,12 +55,12 @@ import {
 } from "./utils/storeReadBatcher.js";
 import {
   asError,
-  assertStoreReader,
   CacheContractError,
   readStoreObserved,
   raceWithSignal,
   assertUnreachable,
   defaultLoggersByComponent,
+  timeSlicedMapNonEmpty,
 } from "./utils/utils.js";
 
 /** Omission selects capability-driven accumulation; false sends the set as one Store call. */
@@ -294,13 +296,6 @@ export default class Cache<
     const unboundLogger = options.logger ?? defaultLoggersByComponent.cache;
     this.#logger = unboundLogger.bind(null, "cache");
     this.#dataStore = options.store;
-    assertStoreReader(this.#dataStore);
-    if (
-      options.readBatching !== undefined &&
-      (typeof options.readBatching !== "object" ||
-        options.readBatching === null)
-    )
-      throw new CacheContractError("readBatching must be a settings object");
     this.#readBatcher =
       this.#dataStore.getMany === undefined
         ? undefined
@@ -453,27 +448,11 @@ export default class Cache<
     options?: ReadOptions,
   ): Promise<GetManyResults<Reqs, RT, Validators, Params>> {
     options?.signal?.throwIfAborted();
-    if (options?.autoBatch !== undefined && options.autoBatch !== false)
-      throw new CacheContractError("autoBatch must be omitted or false");
-    if (!Array.isArray(requests))
-      throw new CacheContractError("requests must be an array");
-    const resourceTypes = requests.map((req) => {
-      if (
-        typeof req !== "object" ||
-        req === null ||
-        typeof req.id !== "string" ||
-        typeof req.params !== "object" ||
-        req.params === null ||
-        typeof req.directives !== "object" ||
-        req.directives === null
-      )
-        throw new CacheContractError(
-          "A cache request requires id, params, and directives",
-        );
-      return this.classify(req.id);
-    });
-    if (requests.length === 0)
+    if (!isNonEmptyArray(requests))
       return [] as GetManyResults<Reqs, RT, Validators, Params>;
+    // Classify every request id up front: a classification failure rejects
+    // the whole operation before we touch the store.
+    const resourceTypes = mapNonEmpty(requests, (req) => this.classify(req.id));
     const startedAt = performance.now();
     const publishRead = (
       index: number,
@@ -491,15 +470,29 @@ export default class Cache<
       });
     };
     if (this.#closed) {
-      if (this.#onGetAfterClose === "throw")
+      if (this.#onGetAfterClose === "throw") {
+        this.#logger(
+          "trace",
+          "received getMany request when closed and throwing",
+        );
         throw new Error("Store has been closed...");
-      return requests.map((_, index) => {
+      }
+      this.#logger(
+        "trace",
+        "received getMany request when closed, so returning no entries",
+      );
+      return mapNonEmpty(requests, (_req, index) => {
         publishRead(index, { found: "none" });
         return { validatable: [] };
       }) as GetManyResults<Reqs, RT, Validators, Params>;
     }
     const now = new Date();
-    const normalized = requests.map((req) => ({
+    this.#logger("trace", "received getMany request", {
+      requestCount: requests.length,
+      requests: requests.map((r) => ({ id: r.id, params: r.params })),
+    });
+    this.#logger("trace", "requested entries from the store");
+    const normalized = mapNonEmpty(requests, (req) => ({
       id: req.id,
       params: this.normalizeParams(req.params),
     }));
@@ -522,27 +515,12 @@ export default class Cache<
               dispatched.then((results) => results[index]!),
             );
           })();
-    const results = Promise.all(
-      reads.map(async (read, index) => {
-        const entries = await read;
-        if (entries instanceof Error) {
-          return {
-            result: entries,
-            outcome: { found: "read-failed", error: entries } as const,
-          };
-        }
-        const { result, outcome } = this.#processCacheEntries(
-          entries as unknown as Entry<SpecOf<RT>, Validators, Params>[],
-          requests[index]!.directives,
-          now,
-          { requestIndex: index },
-        );
-        return { result, outcome };
-      }),
-    );
-    let settled;
+    let entriesForRequests;
     try {
-      settled = await raceWithSignal(results, options?.signal);
+      entriesForRequests = await raceWithSignal(
+        Promise.all(reads),
+        options?.signal,
+      );
     } catch (error) {
       requests.forEach((_, index) =>
         publishRead(
@@ -554,10 +532,28 @@ export default class Cache<
       );
       throw error;
     }
-    return settled.map(({ result, outcome }, index) => {
+    this.#logger("trace", "received entries from the store", {
+      resultCount: sumBy(entriesForRequests, (entries) =>
+        entries instanceof Error ? 0 : entries.length,
+      ),
+    });
+    // Classifying entries is synchronous, so yield between requests to keep a
+    // large known set from blocking the event loop.
+    return (await timeSlicedMapNonEmpty(requests, (req, index) => {
+      const entries = entriesForRequests[index]!;
+      if (entries instanceof Error) {
+        publishRead(index, { found: "read-failed", error: entries });
+        return entries;
+      }
+      const { result, outcome } = this.#processCacheEntries(
+        entries as unknown as Entry<SpecOf<RT>, Validators, Params>[],
+        req.directives,
+        now,
+        { requestIndex: index },
+      );
       publishRead(index, outcome);
       return result;
-    }) as GetManyResults<Reqs, RT, Validators, Params>;
+    })) as GetManyResults<Reqs, RT, Validators, Params>;
   }
 
   /**

@@ -170,32 +170,6 @@ describe("raw Store adapters", () => {
     assert.deepEqual(await getMany(store, []), []);
     assert.equal(read.mock.callCount(), 0);
   });
-
-  it("rejects invalid capabilities at construction for JavaScript callers", async (t) => {
-    const memory = new MemoryStore();
-    t.after(async () => await memory.close());
-    const options = singleTypeCacheOptions<string>()({
-      name: "invalid-capability",
-      store: memory,
-    });
-    assert.throws(
-      () =>
-        Reflect.construct(Cache, [
-          { ...options, store: { get: undefined, getMany: undefined } },
-        ]),
-      CacheContractError,
-    );
-    assert.throws(
-      () =>
-        Reflect.construct(Cache, [
-          {
-            ...options,
-            store: { get: memory.get.bind(memory), getMany: async () => [] },
-          },
-        ]),
-      CacheContractError,
-    );
-  });
 });
 
 describe("throwIfAnyError", () => {

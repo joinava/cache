@@ -1084,10 +1084,19 @@ describe("Large bulk producer calls", { timeout: 20_000 }, () => {
     });
     try {
       const result = await wrapped.getMany(requests);
-      assert.equal(producer.mock.callCount(), batchSize / 20);
+      // Cache reads yield between time slices, so misses can reach the
+      // producer scheduler across turns and leave a batch short. Each request
+      // still reaches the producer exactly once, in a batch of at most 20.
+      const produced = producer.mock.calls.flatMap(({ arguments: [batch] }) =>
+        batch.map(({ id }) => id),
+      );
+      assert.deepEqual(
+        produced.toSorted(),
+        requests.map(({ id }) => id).toSorted(),
+      );
       assert.ok(
         producer.mock.calls.every(
-          ({ arguments: [requests] }) => requests.length === 20,
+          ({ arguments: [batch] }) => batch.length <= 20,
         ),
       );
       assert.deepEqual(

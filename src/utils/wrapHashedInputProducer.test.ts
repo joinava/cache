@@ -1179,40 +1179,6 @@ describe(
       await closing;
       await cache.close();
     });
-
-    it("rejects descriptor capabilities in the wrong field and conflicting hash functions", () => {
-      const cache = new Cache({
-        store: new MemoryStore<SpecOf<typeof testRegistry>>(),
-        ...testCacheOptions,
-      });
-      const descriptor = hashedInputProducerByInputType<{
-        computed: HashedInputVariant<Input, string>;
-      }>()
-        .when(
-          (input): input is Input =>
-            typeof input === "object" && input !== null && "text" in input,
-          {
-            name: "computed",
-            hashInput,
-            produce: async (input) => result(input.text),
-          },
-        )
-        .build();
-      assert.throws(
-        () =>
-          Reflect.apply(wrapHashedInputProducer, undefined, [
-            { cache, produceMany: descriptor },
-          ]),
-        /capability/,
-      );
-      assert.throws(
-        () =>
-          Reflect.apply(wrapHashedInputProducer, undefined, [
-            { cache, produce: descriptor, hashInput },
-          ]),
-        /EITHER/,
-      );
-    });
   },
 );
 

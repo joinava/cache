@@ -485,24 +485,12 @@ function checkMintedId(
  * its one entry is nameless (see {@link checkMintedId}).
  */
 function branchEntriesFor(
-  wrapperName: string,
   hashedInputProducer: HashedInputProducer<HashedInputProducerMeta> | undefined,
   hashInput: ((input: never) => string | Promise<string>) | undefined,
   produce: ((input: never) => Promise<unknown>) | undefined,
 ): readonly (readonly [string | undefined, LooseBranch<never>])[] {
-  if (hashedInputProducer !== undefined) {
-    if (hashInput !== undefined || produce !== undefined) {
-      throw new CacheContractError(
-        `${wrapperName}: pass EITHER a typed producer descriptor or a callback with hashInput; descriptors carry their own hash functions.`,
-      );
-    }
+  if (hashedInputProducer !== undefined)
     return hashedInputProducer[builtBranches].entries;
-  }
-  if (hashInput === undefined || produce === undefined) {
-    throw new CacheContractError(
-      `${wrapperName}: pass a typed descriptor under produce or produceMany, or a callback with hashInput.`,
-    );
-  }
   return [[undefined, { hashInput, produce } as unknown as LooseBranch<never>]];
 }
 
@@ -609,11 +597,6 @@ export function wrapHashedInputProducer(
 ): unknown {
   const { cache, produce, produceMany, hashInput, ...producerOptions } =
     options;
-  if ((produce === undefined) === (produceMany === undefined)) {
-    throw new CacheContractError(
-      "wrapHashedInputProducer requires exactly one of produce or produceMany",
-    );
-  }
   const bulk = produceMany !== undefined;
   const primitive = produce ?? produceMany!;
   const descriptor =
@@ -622,16 +605,7 @@ export function wrapHashedInputProducer(
     builtBranches in primitive
       ? primitive
       : undefined;
-  if (
-    descriptor !== undefined &&
-    descriptor[builtBranches].kind !== (bulk ? "bulk" : "single")
-  ) {
-    throw new CacheContractError(
-      "Hashed producer descriptor capability does not match its field",
-    );
-  }
   const branchEntries = branchEntriesFor(
-    "wrapHashedInputProducer",
     descriptor,
     hashInput,
     descriptor === undefined

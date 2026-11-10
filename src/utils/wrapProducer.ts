@@ -505,22 +505,6 @@ export default function wrapProducer<
   } = options;
   const single = options.produce;
   const bulk = options.produceMany;
-  if (
-    (typeof single === "function") === (typeof bulk === "function") ||
-    (single !== undefined && typeof single !== "function") ||
-    (bulk !== undefined && typeof bulk !== "function")
-  ) {
-    throw new CacheContractError(
-      "wrapProducer requires exactly one of produce or produceMany",
-    );
-  }
-  if (
-    options.producerBatching !== undefined &&
-    (options.producerBatching === null ||
-      typeof options.producerBatching !== "object")
-  ) {
-    throw new CacheContractError("producerBatching must be a settings object");
-  }
   const producer = single ?? bulk!;
   const covered = coveredTypeSet(producer);
   type Request = LooseRequestFor<RT, Params>;
@@ -731,17 +715,6 @@ export default function wrapProducer<
     const { signal } = callOptions;
     const caller = {};
     const batching = callOptions.autoBatch;
-    if (
-      batching !== undefined &&
-      (batching === null ||
-        typeof batching !== "object" ||
-        (batching.store !== undefined && batching.store !== false) ||
-        (batching.producer !== undefined && batching.producer !== false))
-    ) {
-      throw new CacheContractError(
-        "autoBatch accepts only { store?: false, producer?: false }",
-      );
-    }
     // Classify every ID before dispatch. Contract failures never become slot errors.
     const items = requests.map((input) => {
       const complete = completeRequest(input) as Request;
