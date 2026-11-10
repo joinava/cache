@@ -265,7 +265,6 @@ export function bulkMemoryStore<
     },
     store: memory.store.bind(memory),
     delete: memory.delete.bind(memory),
-    close: memory.close.bind(memory),
     [Symbol.asyncDispose]: memory[Symbol.asyncDispose].bind(memory),
   };
 }

@@ -542,10 +542,6 @@ export default class PostgresStore<
     }
   }
 
-  async close(): Promise<void> {
-    await this[Symbol.asyncDispose]();
-  }
-
   async [Symbol.asyncDispose]() {
     // we don't need to do anything here, the caller should handle closing db connection
     this.logInfo(

@@ -125,7 +125,7 @@ describe("raceWithSignal", () => {
 describe("raw Store adapters", () => {
   it("preserves one operational Error across all bulk slots and scalar rejection", async (t) => {
     const store = bulkMemoryStore();
-    t.after(async () => await store.close());
+    t.after(async () => await store[Symbol.asyncDispose]());
     const failure = new TypeError("custom Store failure");
     t.mock.method(store, "getMany", async () => {
       throw failure;
@@ -139,7 +139,7 @@ describe("raw Store adapters", () => {
 
   it("wraps a whole-operation non-Error failure once", async (t) => {
     const store = bulkMemoryStore();
-    t.after(async () => await store.close());
+    t.after(async () => await store[Symbol.asyncDispose]());
     const cause = { failed: true };
     t.mock.method(store, "getMany", async () => {
       throw cause;
@@ -155,7 +155,7 @@ describe("raw Store adapters", () => {
 
   it("rejects malformed positional output instead of converting it to slots", async (t) => {
     const store = bulkMemoryStore();
-    t.after(async () => await store.close());
+    t.after(async () => await store[Symbol.asyncDispose]());
     t.mock.method(store, "getMany", async () => []);
     await assert.rejects(
       getMany(store, [{ id: "a", params: emptyParams }]),
@@ -165,7 +165,7 @@ describe("raw Store adapters", () => {
 
   it("does not dispatch an empty known set", async (t) => {
     const store = bulkMemoryStore();
-    t.after(async () => await store.close());
+    t.after(async () => await store[Symbol.asyncDispose]());
     const read = t.mock.method(store, "getMany");
     assert.deepEqual(await getMany(store, []), []);
     assert.equal(read.mock.callCount(), 0);

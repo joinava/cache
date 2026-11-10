@@ -415,7 +415,7 @@ export default class Cache<
    * Emits one `read` diagnostics message (see `CACHE_READ_CHANNEL_NAME`) per
    * call: the lookup result on success, or `found: "read-failed"` with the
    * error if the store threw (and then the error still propagates). An
-   * aborted read emits `found: "aborted"`.
+   * *aborted* read emits nothing, matching the `throwIfAborted` fast path.
    *
    * A bulk-capable Store accumulates reads by default. Set `autoBatch: false`
    * on this call to dispatch immediately, as one Store call.
@@ -443,10 +443,10 @@ export default class Cache<
    * request's id. A slot holds an Error when the read failed for that request.
    *
    * Emits one `read` diagnostics message PER request: the lookup result on
-   * success, `found: "read-failed"` with the error for a failed request, or
-   * `found: "aborted"` when the caller cancels. All request ids are classified
-   * up front, so a classification failure rejects the whole call before
-   * touching the store, emitting nothing.
+   * success, or `found: "read-failed"` with the error for a failed request. An
+   * *aborted* read emits nothing. All request ids are classified up front, so
+   * a classification failure rejects the whole call before touching the store,
+   * emitting nothing.
    *
    * @param requests Array of consumer requests to process
    * @returns Promise that resolves to one CacheLookupResult or Error per
@@ -473,10 +473,7 @@ export default class Cache<
     const readStartedAt = performance.now();
     const publishRead = (
       i: number,
-      outcome:
-        | CacheReadOutcome
-        | { found: "read-failed"; error: unknown }
-        | { found: "aborted" },
+      outcome: CacheReadOutcome | { found: "read-failed"; error: unknown },
     ) => {
       publishCacheRead({
         cache: this.name,
@@ -557,14 +554,17 @@ export default class Cache<
       // use it as a total denominator. A failed known-set read is N lookups
       // that all failed together. One message for the set would make a
       // subscriber's per-id read counts disagree with the successful path.
-      requests.forEach((_req, i) => {
-        publishRead(
-          i,
-          options?.signal?.aborted === true
-            ? { found: "aborted" }
-            : { found: "read-failed", error },
-        );
-      });
+      // An *aborted* read is not a failed read: the caller cancelled, and
+      // aborts already emit nothing (the `throwIfAborted` at the top of this
+      // method rejects before any message), so staying silent keeps that
+      // consistent instead of inflating read-failure rates with client
+      // cancellations.
+      if (options?.signal?.aborted !== true) {
+        requests.forEach((_req, i) => {
+          publishRead(i, { found: "read-failed", error });
+        });
+      }
+
       throw error;
     });
 
@@ -737,7 +737,7 @@ export default class Cache<
     this.#readBatcher?.flushNow();
     this.#closePromise = (async () => {
       await Promise.allSettled(this.#operations);
-      await this.#dataStore.close();
+      await this.#dataStore[Symbol.asyncDispose]();
     })();
 
     return this.#closePromise;

@@ -214,11 +214,6 @@ export type StoreOperations<
    * Await operation promises when their results or errors matter.
    */
   [Symbol.asyncDispose](): Promise<void>;
-
-  /**
-   * Release owned resources to completion, without a deadline.
-   */
-  close(): Promise<void>;
 };
 
 /**

@@ -488,7 +488,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("an aborted dispatched read publishes an aborted outcome instead of a read failure", async () => {
+    it("an ABORTED read is not a failed read: it publishes nothing, matching the pre-aborted fast path", async () => {
       const { name, store, cache } = makeHarness("read-abort-not-failure");
       const controller = new AbortController();
       // Reject the way a signal-aware store does once the signal fires.
@@ -504,14 +504,7 @@ describe("diagnostics channels (§6.5)", () => {
             { signal: controller.signal },
           ),
         );
-        expect(capture.read).to.deep.equal([
-          {
-            cache: name,
-            resourceType: "site_day",
-            resourceId: "site:a",
-            found: "aborted",
-          },
-        ]);
+        expect(capture.read).to.deep.equal([]);
       } finally {
         capture.stop();
         await cache.close();

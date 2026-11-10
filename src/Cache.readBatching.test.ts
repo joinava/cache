@@ -167,9 +167,7 @@ describe("Cache read batching", suiteOptions, () => {
       assert.equal(c?.status === "fulfilled" && c.value.usable?.content, "c");
       assert.deepEqual(getManyRequestCounts(), [2]);
       assert.deepEqual(
-        capture.read
-          .filter(({ found }) => found !== "aborted")
-          .map(({ resourceId }) => resourceId),
+        capture.read.map(({ resourceId }) => resourceId),
         ["a", "c"],
       );
     } finally {
@@ -282,10 +280,10 @@ describe("Cache read batching", suiteOptions, () => {
         events.push("getMany");
       },
     });
-    const close = store.close.bind(store);
-    mock.method(store, "close", async () => {
+    const dispose = store[Symbol.asyncDispose].bind(store);
+    mock.method(store, Symbol.asyncDispose, async () => {
       events.push("close");
-      return close();
+      return dispose();
     });
     const cache = cacheOver(store);
     await cache.store([{ id: "a", content: "a", directives: freshFor100 }]);
@@ -492,7 +490,7 @@ describe("autoBatch: false (direct Store reads)", suiteOptions, () => {
         await release.promise;
       },
     });
-    const cleanup = t.mock.method(store, "close");
+    const cleanup = t.mock.method(store, Symbol.asyncDispose);
     const cache = cacheOver(store);
     const controller = new AbortController();
     const read = cache.get(lookup("a"), { signal: controller.signal });

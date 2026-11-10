@@ -166,7 +166,6 @@ export type CacheReadMessage = Attribution & {
   /** Elapsed lookup time after classification, in milliseconds. Slots of one call share a start time. */
   durationMs: number;
 } & (
-    | { found: "aborted"; vary?: undefined }
     | {
         found: CacheReadFoundWithEntry;
         /** The selected entry's normalized vary identifies its stored variant. */
