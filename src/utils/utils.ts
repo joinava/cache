@@ -4,7 +4,7 @@ import {
   timeSlicedMap,
 } from "@zingage/scheduling";
 import { default as debug } from "debug";
-import { maxBy } from "es-toolkit";
+import { maxBy, partition, sumBy } from "es-toolkit";
 
 import pLimit from "p-limit";
 import type { NonEmptyArray } from "type-party";
@@ -210,19 +210,17 @@ export async function readStoreObserved<
       );
     }
 
+    const [failures, successes] = partition(
+      results,
+      (slot): slot is Error => slot instanceof Error,
+    );
     observe?.({
       operation: "getMany",
       requestCount: requests.length,
-      failedRequestCount: results.filter((slot) => slot instanceof Error)
-        .length,
-      entryCount: results.reduce(
-        (total, slot) => total + (slot instanceof Error ? 0 : slot.length),
-        0,
-      ),
+      failedRequestCount: failures.length,
+      entryCount: sumBy(successes, (entries) => entries.length),
       durationMs: performance.now() - startedAt,
-      outcome: results.some((slot) => slot instanceof Error)
-        ? "failure"
-        : "success",
+      outcome: failures.length > 0 ? "failure" : "success",
     });
   } catch (failure) {
     observe?.({
@@ -259,15 +257,13 @@ export async function timeSlicedMapNonEmpty<
   U,
 >(
   items: T,
-  callback: (item: T[number], index: number) => U & Synchronous<U>,
+  callback: (item: T[number], index: number) => U,
   budget?: TimeSliceBudget,
 ): Promise<{ [K in keyof T]: U }> {
   return (await timeSlicedMap<T[number], U>(items, callback, budget)) as {
     [K in keyof T]: U;
   };
 }
-
-type Synchronous<Result> = Result extends PromiseLike<unknown> ? never : Result;
 
 /** Reject the first Error in request order after all results have settled. */
 export function throwIfAnyError<const Results extends readonly unknown[]>(

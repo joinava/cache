@@ -2,6 +2,7 @@ import { expect } from "chai";
 import assert from "node:assert/strict";
 import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { setTimeout as delay } from "timers/promises";
+import type { DistributedOmit } from "type-fest";
 
 import {
   idStartsWith,
@@ -104,19 +105,37 @@ export const V2_CHANNEL_NAMES = {
   readStore: "@zingage/cache:read-store",
 } as const;
 
+/**
+ * A captured message. `captureChannels` drops the measurement fields `Keys`
+ * unless the caller asks for measurements, so they are optional here.
+ */
+type Captured<Message, Keys extends keyof Message> = DistributedOmit<
+  Message,
+  Keys
+> &
+  Partial<Pick<Message, Keys>>;
+
+type CapturedReadMessage = Captured<CacheReadMessage, "durationMs">;
+type CapturedFetchMessage = Captured<CacheFetchMessage, "durationMs">;
+type CapturedProduceMessage = Captured<CacheProduceMessage, "queueWaitTotalMs">;
+type CapturedReadStoreMessage = Captured<
+  CacheReadStoreMessage,
+  "durationMs" | "queueWaitTotalMs"
+>;
+
 export type CapturedMessage =
-  | { channel: "read"; message: CacheReadMessage }
-  | { channel: "fetch"; message: CacheFetchMessage }
-  | { channel: "produce"; message: CacheProduceMessage }
+  | { channel: "read"; message: CapturedReadMessage }
+  | { channel: "fetch"; message: CapturedFetchMessage }
+  | { channel: "produce"; message: CapturedProduceMessage }
   | { channel: "store-entry"; message: CacheStoreEntryMessage }
-  | { channel: "read-store"; message: CacheReadStoreMessage };
+  | { channel: "read-store"; message: CapturedReadStoreMessage };
 
 export type ChannelCapture = {
-  read: CacheReadMessage[];
-  fetch: CacheFetchMessage[];
-  produce: CacheProduceMessage[];
+  read: CapturedReadMessage[];
+  fetch: CapturedFetchMessage[];
+  produce: CapturedProduceMessage[];
   storeEntry: CacheStoreEntryMessage[];
-  readStore: CacheReadStoreMessage[];
+  readStore: CapturedReadStoreMessage[];
   /** Every captured message, across channels, in arrival order. */
   all: CapturedMessage[];
   /** Unsubscribes all listeners. Always call (e.g. in `finally`). */
@@ -130,21 +149,20 @@ export type ChannelCapture = {
  * other). Call `stop()` when done -- leaked subscribers poison other tests'
  * counts.
  *
- * By default, each message drops its timing fields and the produce and
- * read-store batching fields. It keeps `failedRequestCount` on produce
- * messages, because that count does not depend on timing. Outcome tests deep-equal messages, and those
- * fields depend on timing or batch boundaries. Pass `{ measurements: true }`
- * to keep them, as the timing and batching tests do.
+ * By default, read, fetch, and read-store messages drop `durationMs`, and
+ * produce and read-store messages drop `queueWaitTotalMs`. Outcome tests
+ * deep-equal messages, and those fields depend on timing. Pass
+ * `{ measurements: true }` to keep them, as the timing tests do.
  */
 export function captureChannels(
   cacheName: string,
   options: { measurements?: true } = {},
 ): ChannelCapture {
-  const read: CacheReadMessage[] = [];
-  const fetch: CacheFetchMessage[] = [];
-  const produce: CacheProduceMessage[] = [];
+  const read: CapturedReadMessage[] = [];
+  const fetch: CapturedFetchMessage[] = [];
+  const produce: CapturedProduceMessage[] = [];
   const storeEntry: CacheStoreEntryMessage[] = [];
-  const readStore: CacheReadStoreMessage[] = [];
+  const readStore: CapturedReadStoreMessage[] = [];
   const all: CapturedMessage[] = [];
 
   const isForThisCache = (msg: unknown): boolean =>
@@ -178,14 +196,17 @@ export function captureChannels(
       all.push({ channel, message } as CapturedMessage);
     };
 
-  const onRead = collect<CacheReadMessage>("read", read);
-  const onFetch = collect<CacheFetchMessage>("fetch", fetch);
-  const onProduce = collect<CacheProduceMessage>("produce", produce);
+  const onRead = collect<CapturedReadMessage>("read", read);
+  const onFetch = collect<CapturedFetchMessage>("fetch", fetch);
+  const onProduce = collect<CapturedProduceMessage>("produce", produce);
   const onStoreEntry = collect<CacheStoreEntryMessage>(
     "store-entry",
     storeEntry,
   );
-  const onReadStore = collect<CacheReadStoreMessage>("read-store", readStore);
+  const onReadStore = collect<CapturedReadStoreMessage>(
+    "read-store",
+    readStore,
+  );
 
   subscribe(V2_CHANNEL_NAMES.read, onRead);
   subscribe(V2_CHANNEL_NAMES.fetch, onFetch);
@@ -299,7 +320,7 @@ export const sortByResourceId = <T extends { resourceId: string }>(
  * `vary: {}` reads as an extra field and fails here.
  */
 export function expectProducerPathFetch(
-  msg: CacheFetchMessage | undefined,
+  msg: CapturedFetchMessage | undefined,
   expected: {
     cache: string;
     resourceType: string;
@@ -329,7 +350,7 @@ export function expectProducerPathFetch(
  * field exists to prevent.
  */
 export function expectCachePathFetch(
-  msg: CacheFetchMessage | undefined,
+  msg: CapturedFetchMessage | undefined,
   expected: {
     cache: string;
     resourceType: string;
@@ -358,7 +379,7 @@ export function expectCachePathFetch(
  * caller reports 1.
  */
 export function expectProduceMessage(
-  msg: CacheProduceMessage | undefined,
+  msg: CapturedProduceMessage | undefined,
   expected: {
     cache: string;
     autoBatched: boolean;

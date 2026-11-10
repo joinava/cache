@@ -164,7 +164,7 @@ export type CacheReadFound = CacheReadFoundWithEntry | "none";
 export type CacheReadMessage = Attribution & {
   resourceId: string;
   /** Elapsed lookup time after classification, in milliseconds. Slots of one call share a start time. */
-  durationMs?: number;
+  durationMs: number;
 } & (
     | { found: "aborted"; vary?: undefined }
     | {
@@ -306,7 +306,7 @@ export type CacheFetchDisposition =
  */
 export type CacheFetchMessage = Attribution & {
   /** Logical public-call duration, including all slots in a known set. */
-  durationMs?: number;
+  durationMs: number;
   resourceId: string;
   /**
    * True if this request's own SETTLEMENT rode an already-in-flight producer
