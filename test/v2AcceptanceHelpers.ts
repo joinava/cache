@@ -171,13 +171,7 @@ export function captureChannels(
           );
         }
         if (channel === "produce") {
-          [
-            "operation",
-            "automatic",
-            "requestCount",
-            "operationFailed",
-            "queueWaitTotalMs",
-          ].forEach((key) => Reflect.deleteProperty(message, key));
+          Reflect.deleteProperty(message, "queueWaitTotalMs");
         }
       }
       bucket.push(message);
@@ -367,6 +361,7 @@ export function expectProduceMessage(
   msg: CacheProduceMessage | undefined,
   expected: {
     cache: string;
+    autoBatched: boolean;
     trigger: "miss" | "revalidation" | "bypass";
     requests: readonly { resourceType: string; resourceId: string }[];
     collapsedCallerCount: number;
@@ -385,6 +380,8 @@ export function expectProduceMessage(
   );
   expect(rest).to.deep.equal({
     cache: expected.cache,
+    autoBatched: expected.autoBatched,
+    requestCount: expected.requests.length,
     trigger: expected.trigger,
     collapsedCallerCount: expected.collapsedCallerCount,
     outcome: expected.outcome,

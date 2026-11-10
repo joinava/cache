@@ -355,30 +355,22 @@ export const CACHE_PRODUCE_CHANNEL_NAME = "@zingage/cache:produce";
  */
 export type CacheProduceMessage = {
   cache: string;
-  /** Which producer capability ran: `produce` or `produceMany`. */
-  operation?: "produce" | "produceMany";
   /**
    * True when the producer scheduler dispatched this invocation from its
    * automatic queue, including the flush that `close()` starts. False when it
    * ran directly: a single `produce` call, or a call with
    * `autoBatch: { producer: false }`.
    */
-  automatic?: boolean;
+  autoBatched: boolean;
   /** Requests in this invocation. */
-  requestCount?: number;
+  requestCount: number;
   /** Failed result slots, or every request when the invocation rejects. */
   failedRequestCount: number;
-  /**
-   * True when the whole invocation failed: the producer rejected, threw, or
-   * broke its result contract. False when it returned a result array, even
-   * one with Error slots.
-   */
-  operationFailed?: boolean;
   /**
    * Time the requests waited in the automatic queue, summed over requests.
    * Zero for direct invocations.
    */
-  queueWaitTotalMs?: number;
+  queueWaitTotalMs: number;
   /**
    * Why the producer was contacted. Compatible requests keep their initiating
    * cause when callers join them. A bulk invocation reports `mixed` when its
@@ -508,7 +500,7 @@ export type CacheReadStoreMessage = {
    * accumulated requests from one or more callers. False when the read ran
    * directly: an `autoBatch: false` call, or a Store that has no `getMany`.
    */
-  automatic: boolean;
+  autoBatched: boolean;
   /**
    * `failure` when any slot holds an Error or the whole call failed.
    * `cancelled` when a direct Store call rejects after its caller cancels.

@@ -702,9 +702,7 @@ export default function wrapProducer<
       let results: readonly (Result | Error)[];
 
       const common = {
-        operation:
-          bulk === undefined ? ("produce" as const) : ("produceMany" as const),
-        automatic: tasks[0]!.automatic,
+        autoBatched: tasks[0]!.automatic,
         requestCount: tasks.length,
         queueWaitTotalMs: tasks.reduce(
           (sum, task) => sum + task.queueWaitMs,
@@ -773,7 +771,6 @@ export default function wrapProducer<
             collapsedCallerCount: new Set(
               tasks.flatMap((task) => [...task.attachedCallers()]),
             ).size,
-            operationFailed: true,
             failedRequestCount: tasks.length,
             outcome: "error",
             durationMs: performance.now() - startedAt,
@@ -798,7 +795,6 @@ export default function wrapProducer<
           collapsedCallerCount: new Set(
             tasks.flatMap((task) => [...task.attachedCallers()]),
           ).size,
-          operationFailed: false,
           failedRequestCount: results.filter(
             (result) => result instanceof Error,
           ).length,

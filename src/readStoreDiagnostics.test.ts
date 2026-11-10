@@ -73,7 +73,7 @@ describe("read dispatch diagnostics", () => {
     assert.equal(capture.readStore[0]?.outcome, "failure");
     assert.equal(capture.readStore[0]?.failedRequestCount, 2);
     assert.equal(capture.readStore[0]?.queueWaitTotalMs, 0);
-    assert.equal(capture.readStore[0]?.automatic, false);
+    assert.equal(capture.readStore[0]?.autoBatched, false);
   });
 });
 

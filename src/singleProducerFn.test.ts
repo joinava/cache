@@ -272,6 +272,7 @@ describe("single producer function + by-id-type sugar", () => {
         expect(capture.produce).to.have.lengthOf(1);
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: true,
           trigger: "miss",
           requests: [
             { resourceType: "story", resourceId: "story:1" },

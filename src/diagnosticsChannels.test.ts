@@ -603,6 +603,7 @@ describe("diagnostics channels (§6.5)", () => {
         });
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
           collapsedCallerCount: 1,
@@ -653,6 +654,7 @@ describe("diagnostics channels (§6.5)", () => {
         });
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
           collapsedCallerCount: 1,
@@ -714,6 +716,7 @@ describe("diagnostics channels (§6.5)", () => {
         );
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: false,
           trigger: "revalidation",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
           collapsedCallerCount: 1,
@@ -778,6 +781,7 @@ describe("diagnostics channels (§6.5)", () => {
         );
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: false,
           trigger: "revalidation",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
           collapsedCallerCount: 1,
@@ -843,6 +847,7 @@ describe("diagnostics channels (§6.5)", () => {
         });
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
           collapsedCallerCount: 1,
@@ -903,6 +908,7 @@ describe("diagnostics channels (§6.5)", () => {
         );
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
           collapsedCallerCount: 1,
@@ -1074,6 +1080,7 @@ describe("diagnostics channels (§6.5)", () => {
         expect(capture.produce).to.have.lengthOf(1);
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
           collapsedCallerCount: 2,
@@ -1166,6 +1173,7 @@ describe("diagnostics channels (§6.5)", () => {
         });
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: false,
           trigger: "revalidation",
           requests: [{ resourceType: "site_day", resourceId: "site:swr" }],
           collapsedCallerCount: 2,
@@ -1318,6 +1326,7 @@ describe("diagnostics channels (§6.5)", () => {
         ).to.deep.equal(["served-from-producer", "cache-read-error"]);
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: true,
           trigger: "bypass",
           requests: [{ resourceType: "site_day", resourceId: "site:bypass" }],
           collapsedCallerCount: 1,
@@ -1864,11 +1873,9 @@ describe("diagnostics channels (§6.5)", () => {
           assert.equal((await result).length, 3);
           assert.equal(capture.produce.length, 1);
           const operation = capture.produce[0]!;
-          assert.equal(operation.operation, "produceMany");
-          assert.equal(operation.automatic, true);
+          assert.equal(operation.autoBatched, true);
           assert.equal(operation.requestCount, 2);
           assert.equal(operation.failedRequestCount, 0);
-          assert.equal(operation.operationFailed, false);
           assert.equal(operation.collapsedCallerCount, 1);
           assert.equal(operation.queueWaitTotalMs, 10);
           assert.equal(operation.durationMs, 7);
@@ -2179,6 +2186,7 @@ describe("diagnostics channels (§6.5)", () => {
         ]);
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: "site:k1" }],
           collapsedCallerCount: 1,
@@ -2602,6 +2610,7 @@ describe("diagnostics channels (§6.5)", () => {
         expect(capture.produce).to.have.lengthOf(1);
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: siteId }],
           collapsedCallerCount: 2,
@@ -2739,6 +2748,7 @@ describe("diagnostics channels (§6.5)", () => {
         );
         expectProduceMessage(capture.produce[1], {
           cache: name,
+          autoBatched: false,
           trigger: "revalidation",
           requests: [{ resourceType: "site_day", resourceId: siteId }],
           collapsedCallerCount: 1,
@@ -2815,6 +2825,7 @@ describe("diagnostics channels (§6.5)", () => {
         expect(capture.produce).to.have.lengthOf(3);
         expectProduceMessage(capture.produce[2], {
           cache: name,
+          autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: siteId }],
           collapsedCallerCount: 1,
@@ -2856,6 +2867,7 @@ describe("diagnostics channels (§6.5)", () => {
         });
         expectProduceMessage(capture.produce[3], {
           cache: name,
+          autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: siteId }],
           collapsedCallerCount: 1,

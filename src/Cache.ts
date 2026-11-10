@@ -470,9 +470,9 @@ export default class Cache<
     // the whole operation before we touch the store.
     const resourceTypes = mapNonEmpty(requests, (req) => this.classify(req.id));
 
-    const startedAt = performance.now();
+    const readStartedAt = performance.now();
     const publishRead = (
-      index: number,
+      i: number,
       outcome:
         | CacheReadOutcome
         | { found: "read-failed"; error: unknown }
@@ -480,9 +480,9 @@ export default class Cache<
     ) => {
       publishCacheRead({
         cache: this.name,
-        resourceType: resourceTypes[index]!,
-        resourceId: requests[index]!.id,
-        durationMs: performance.now() - startedAt,
+        resourceType: resourceTypes[i]!,
+        resourceId: requests[i]!.id,
+        durationMs: performance.now() - readStartedAt,
         ...outcome,
       });
     };
@@ -499,8 +499,8 @@ export default class Cache<
         "trace",
         "received getMany request when closed, so returning no entries",
       );
-      return mapNonEmpty(requests, (_req, index) => {
-        publishRead(index, { found: "none" });
+      return mapNonEmpty(requests, (_req, i) => {
+        publishRead(i, { found: "none" });
         return { validatable: [] };
       }) as GetManyResults<Reqs, RT, Validators, Params>;
     }
@@ -512,7 +512,7 @@ export default class Cache<
     });
     this.#logger("trace", "requested entries from the store");
 
-    const normalized = mapNonEmpty(requests, (req) => ({
+    const storeRequests = mapNonEmpty(requests, (req) => ({
       id: req.id,
       params: this.normalizeParams(req.params),
     }));
@@ -536,69 +536,60 @@ export default class Cache<
     // serves decisions computed against a stale clock. Only a PENDING-only
     // promise share is sound, which bounds the skew to the read's own
     // duration.
-    const reads =
+    const cacheEntriesForRequests = await raceWithSignal(
       this.#readBatcher !== undefined && options?.autoBatch !== false
-        ? normalized.map((request) =>
-            this.#readBatcher!
-              .read(request, options?.signal)
-              .catch((error: unknown) => {
-                options?.signal?.throwIfAborted();
-                if (error instanceof CacheContractError) throw error;
-                return asError(error);
-              }),
+        ? Promise.all(
+            storeRequests.map((storeRequest) =>
+              this.#readBatcher!
+                .read(storeRequest, options?.signal)
+                .catch((error: unknown) => {
+                  options?.signal?.throwIfAborted();
+                  if (error instanceof CacheContractError) throw error;
+                  return asError(error);
+                }),
+            ),
           )
-        : (() => {
-            const dispatched = this.#readStore(normalized, options);
-            return normalized.map((_, index) =>
-              dispatched.then((results) => results[index]!),
-            );
-          })();
-
-    let entriesForRequests;
-    try {
-      entriesForRequests = await raceWithSignal(
-        Promise.all(reads),
-        options?.signal,
-      );
-    } catch (error) {
+        : this.#readStore(storeRequests, options),
+      options?.signal,
+    ).catch((error: unknown) => {
       // One message PER REQUEST, not one per call, before the error
       // propagates: the channel is one-message-per-lookup, so subscribers can
       // use it as a total denominator. A failed known-set read is N lookups
       // that all failed together. One message for the set would make a
       // subscriber's per-id read counts disagree with the successful path.
-      requests.forEach((_, index) =>
+      requests.forEach((_req, i) => {
         publishRead(
-          index,
+          i,
           options?.signal?.aborted === true
             ? { found: "aborted" }
             : { found: "read-failed", error },
-        ),
-      );
+        );
+      });
       throw error;
-    }
+    });
 
     this.#logger("trace", "received entries from the store", {
-      resultCount: sumBy(entriesForRequests, (entries) =>
-        entries instanceof Error ? 0 : entries.length,
+      resultCount: sumBy(cacheEntriesForRequests, (it) =>
+        it instanceof Error ? 0 : it.length,
       ),
     });
 
     // Classifying entries is synchronous, so yield between requests to keep a
     // large known set from blocking the event loop.
-    return (await timeSlicedMapNonEmpty(requests, (req, index) => {
-      const entries = entriesForRequests[index]!;
-      if (entries instanceof Error) {
-        publishRead(index, { found: "read-failed", error: entries });
-        return entries;
+    return (await timeSlicedMapNonEmpty(requests, (req, i) => {
+      const cacheEntries = cacheEntriesForRequests[i]!;
+      if (cacheEntries instanceof Error) {
+        publishRead(i, { found: "read-failed", error: cacheEntries });
+        return cacheEntries;
       }
 
       const { result, outcome } = this.#processCacheEntries(
-        entries as unknown as Entry<SpecOf<RT>, Validators, Params>[],
+        cacheEntries as unknown as Entry<SpecOf<RT>, Validators, Params>[],
         req.directives,
         now,
-        { requestIndex: index },
+        { requestIndex: i },
       );
-      publishRead(index, outcome);
+      publishRead(i, outcome);
       return result;
     })) as GetManyResults<Reqs, RT, Validators, Params>;
   }
@@ -621,10 +612,10 @@ export default class Cache<
    * Emits one `store-entry` diagnostics message PER entry (see
    * `CACHE_STORE_ENTRY_CHANNEL_NAME`).
    */
-  public store(
+  public async store(
     data: readonly ProducerResultResource<SpecOf<RT>, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
-    return this.#track(() => this.#store(data));
+    return await this.#track(() => this.#store(data));
   }
 
   async #store(
@@ -778,7 +769,7 @@ export default class Cache<
               cacheReadStoreChannel.publish({
                 cache: this.name,
                 operation: event.operation,
-                automatic: queueWaitTotalMs !== undefined,
+                autoBatched: queueWaitTotalMs !== undefined,
                 outcome: event.outcome,
                 requestCount: event.requestCount,
                 failedRequestCount: event.failedRequestCount,

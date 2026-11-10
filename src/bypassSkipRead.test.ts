@@ -75,6 +75,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       });
       expectProduceMessage(capture.produce[0], {
         cache: name,
+        autoBatched: false,
         trigger: "bypass",
         requests: [{ resourceType: "site_day", resourceId: "site:a" }],
         collapsedCallerCount: 1,
@@ -412,6 +413,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       expect(capture.produce).to.have.lengthOf(1);
       expectProduceMessage(capture.produce[0], {
         cache: name,
+        autoBatched: false,
         trigger: "bypass",
         requests: [{ resourceType: "site_day", resourceId: "site:a" }],
         collapsedCallerCount: 2,
