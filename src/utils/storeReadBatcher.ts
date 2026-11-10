@@ -42,7 +42,10 @@ export class StoreReadBatcher<
       async (reads) => {
         const live = reads.filter(({ signal }) => !signal?.aborted);
         if (live.length === 0) return reads.map(() => []);
+
         const startedAt = performance.now();
+        // Let a rejection propagate: DataLoader rejects every load in this
+        // batch, while Error slots reject only their own loads.
         const results = await dispatch(
           live.map(({ request }) => request),
           live.reduce((sum, read) => sum + startedAt - read.enqueuedAt, 0),

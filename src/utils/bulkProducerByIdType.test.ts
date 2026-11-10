@@ -228,11 +228,12 @@ describe("bulkProducerByIdType", () => {
     // A HEALTHY sibling is wired up alongside to pin the blast radius: it still
     // runs, and one slice's contract violation still fails the whole invocation,
     // so its results are not delivered either.
-    const bizBulk = mock.fn(async (reqs: readonly { readonly id: string }[]) =>
-      reqs.map((req) => ({
-        content: `biz-${req.id}`,
-        directives: freshFor100,
-      })),
+    const bizBulk = mock.fn(
+      async (reqs: readonly { readonly id: string }[]) =>
+        reqs.map((req) => ({
+          content: `biz-${req.id}`,
+          directives: freshFor100,
+        })),
     );
     const producer = bulkProducerByIdType(registry, {
       site_day: async (reqs) =>

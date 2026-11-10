@@ -286,8 +286,10 @@ function initialize(data: WorkerInitData): SqliteStoreWorkerContext {
       const uniqueIds = [...new Set(ids)];
       const results = new Map<string, CacheRow[] | Error>();
       for (const chunk of chunks(uniqueIds, SQLITE_MAX_BOUND_IDS_PER_QUERY)) {
-        if (Atomics.load(cancelled, 0) !== 0)
+        if (Atomics.load(cancelled, 0) !== 0) {
           throw new DOMException("Store read cancelled", "AbortError");
+        }
+
         try {
           const rows = db
             .prepare(`
@@ -303,6 +305,7 @@ function initialize(data: WorkerInitData): SqliteStoreWorkerContext {
           chunk.forEach((id) => results.set(id, error));
         }
       }
+
       return results;
     },
     upsert: (entry) => {
@@ -376,13 +379,16 @@ function getManyMatchingEntryJson(
   cancelled: Int32Array<SharedArrayBuffer>,
 ): (WorkerEntryJson[] | Error)[] {
   if (requests.length === 0) return [];
+
   const rowsById = context.selectByIds(
     requests.map(({ id }) => id),
     cancelled,
   );
+
   return requests.map(({ id, params }) => {
     const rows = rowsById.get(id) ?? [];
     if (rows instanceof Error) return rows;
+
     try {
       return rows
         .filter(

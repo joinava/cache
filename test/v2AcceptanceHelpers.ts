@@ -162,13 +162,15 @@ export function captureChannels(
       if (!isForThisCache(msg)) return;
       const message = { ...(msg as M) };
       if (options.measurements !== true) {
-        if (channel === "read" || channel === "fetch")
+        if (channel === "read" || channel === "fetch") {
           Reflect.deleteProperty(message, "durationMs");
-        if (channel === "read-store")
+        }
+        if (channel === "read-store") {
           ["durationMs", "queueWaitTotalMs"].forEach((key) =>
             Reflect.deleteProperty(message, key),
           );
-        if (channel === "produce")
+        }
+        if (channel === "produce") {
           [
             "operation",
             "automatic",
@@ -176,6 +178,7 @@ export function captureChannels(
             "operationFailed",
             "queueWaitTotalMs",
           ].forEach((key) => Reflect.deleteProperty(message, key));
+        }
       }
       bucket.push(message);
       all.push({ channel, message } as CapturedMessage);

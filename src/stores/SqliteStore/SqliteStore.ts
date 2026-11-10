@@ -163,27 +163,36 @@ export default class SqliteStore<
   ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
     options?.signal?.throwIfAborted();
 
-    if (requests.length === 0)
+    if (requests.length === 0) {
       return [] as StoreGetManyResult<Spec, Reqs, Validators, Params>;
+    }
+
     const cancelled = new Int32Array(
       new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT),
     );
     const onAbort = () => Atomics.store(cancelled, 0, 1);
     options?.signal?.addEventListener("abort", onAbort, { once: true });
+
     try {
       const entries = await this.#read({
         type: "getMany",
         requests: requests.map(({ id, params }) => ({ id, params })),
         cancelled,
       });
+
       options?.signal?.throwIfAborted();
-      if (entries.length !== requests.length)
+      if (entries.length !== requests.length) {
         throw new CacheContractError("SQLite returned an invalid result count");
+      }
+
       this.#scheduleLazyCleanup();
+
       return entries.map((requestEntries, index) => {
         if (requestEntries instanceof Error) return requestEntries;
+
         try {
           // Check persisted IDs because SQL text binding can replace lone surrogates.
+          // Entry JSON preserves them, so a colliding well-formed ID cannot hit.
           return requestEntries
             .map((entry) => this.#deserializeEntry<Spec["id"]>(entry))
             .filter((entry) => entry.id === requests[index]!.id);
@@ -235,10 +244,14 @@ export default class SqliteStore<
 
   async #closeGracefully(): Promise<void> {
     this.#status = "closing";
+
     // Drain first: Piscina.close has an implicit deadline and may abandon work.
     await Promise.allSettled(this.#pending);
+
     const failures: unknown[] = [];
     try {
+      // Piscina does not expose a worker shutdown hook that it awaits. Close
+      // the writer explicitly because it must checkpoint the WAL.
       await this.#write(
         { type: "close", checkpoint: true },
         { allowWhenClosing: true },
@@ -246,6 +259,7 @@ export default class SqliteStore<
     } catch (error) {
       failures.push(error);
     }
+
     // No accepted tasks remain. Termination releases every read connection.
     const pools = await Promise.allSettled([
       this.#readPool.destroy(),
@@ -254,9 +268,12 @@ export default class SqliteStore<
     pools.forEach((result) => {
       if (result.status === "rejected") failures.push(result.reason);
     });
+
     this.#status = "closed";
-    if (failures.length > 0)
+
+    if (failures.length > 0) {
       throw new AggregateError(failures, "SQLite cleanup failed");
+    }
   }
 
   public async [Symbol.asyncDispose](): Promise<void> {
@@ -269,6 +286,7 @@ export default class SqliteStore<
       () => this.#pending.delete(pending),
       () => this.#pending.delete(pending),
     );
+
     return pending;
   }
 
@@ -341,8 +359,10 @@ export default class SqliteStore<
     >;
 
     const date = parseDateString(_.date satisfies string as DateString);
-    if (!Number.isFinite(date.getTime()))
+    if (!Number.isFinite(date.getTime())) {
       throw new Error("Invalid cached entry date");
+    }
+
     return {
       id: _.id,
       content: _.content,

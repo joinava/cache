@@ -156,6 +156,7 @@ export default class MemoryStore<
     options?: { signal?: AbortSignal },
   ): Promise<Entry<SpecForId<Spec, Id>, Validators, Params>[]> {
     options?.signal?.throwIfAborted();
+
     const { id, params: normalizedParams } = request;
     const resourceMetadata = this.resourceMetadataMap.get(id);
 
@@ -185,15 +186,18 @@ export default class MemoryStore<
     entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
     // Derive each input's slot (variant + full cache key) once, up front.
-    const prepared = await timeSlicedMap(entriesWithTimes, (input, index) => {
-      const variantKey = resultVariantKey(input.entry.vary);
-      return {
-        input,
-        index,
-        variantKey,
-        cacheKey: makeCacheKey(input.entry.id, variantKey),
-      };
-    });
+    const prepared = await timeSlicedMap(
+      entriesWithTimes,
+      (input, index) => {
+        const variantKey = resultVariantKey(input.entry.vary);
+        return {
+          input,
+          index,
+          variantKey,
+          cacheKey: makeCacheKey(input.entry.id, variantKey),
+        };
+      },
+    );
 
     // Dedupe within the call per the contract's uniform rule: for each slot,
     // only the entry with the newest birth date persists (the same rule the
@@ -219,9 +223,8 @@ export default class MemoryStore<
     // Each slot's winner reports how its validators relate to that slot's
     // entry immediately before persistence; every other input (a dropped
     // within-call duplicate) is omitted.
-    return await timeSlicedMap(
-      prepared,
-      ({ index }) => resultByInputIndex.get(index) ?? {},
+    return await timeSlicedMap(prepared, ({ index }) =>
+      resultByInputIndex.get(index) ?? {},
     );
   }
 

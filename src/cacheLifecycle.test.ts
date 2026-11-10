@@ -23,8 +23,9 @@ describe("close() drains accepted work", suiteOptions, () => {
     const entered = Promise.withResolvers<void>();
     const read = cache.get.bind(cache);
     t.mock.method(cache, "get", async (...args: Parameters<typeof read>) => {
-      if (args[0].id === "invalid")
+      if (args[0].id === "invalid") {
         throw new CacheContractError("invalid lookup");
+      }
       entered.resolve();
       await slow.promise;
       return read(...args);

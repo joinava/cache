@@ -298,15 +298,16 @@ type HashedInputProducerProblems<
           };
     }[Meta["covered"] & ResourceTypeName<RT>];
 
+type HashedReadOptions = WrappedReadOptions & {
+  directives?: ConsumerDirectives;
+};
+
 /**
- * The function a hashed-input wrapper returns. `Extract` rather than `&` when
+ * The object a hashed-input wrapper returns. `Extract` rather than `&` when
  * satisfying `SpecForId`'s id constraint: an intersection with a union does not
  * reduce, which silently widens the content back to the whole registry's union
  * on a partially-covering producer.
  */
-type HashedReadOptions = WrappedReadOptions & {
-  directives?: ConsumerDirectives;
-};
 type WrappedHashedInputProducer<
   RT extends ResourceTypes,
   Input,
@@ -489,8 +490,9 @@ function branchEntriesFor(
   hashInput: ((input: never) => string | Promise<string>) | undefined,
   produce: ((input: never) => Promise<unknown>) | undefined,
 ): readonly (readonly [string | undefined, LooseBranch<never>])[] {
-  if (hashedInputProducer !== undefined)
+  if (hashedInputProducer !== undefined) {
     return hashedInputProducer[builtBranches].entries;
+  }
   return [[undefined, { hashInput, produce } as unknown as LooseBranch<never>]];
 }
 
@@ -507,6 +509,10 @@ function branchEntriesFor(
  *
  * Scheduling, partial results, persistence, and shutdown follow wrapProducer.
  * Call options also accept directives, which apply to every supplied input.
+ *
+ * See the module docs for when to use this vs. {@link wrapProducer}, and for the
+ * branch/coverage/minted-id contracts. Any {@link WrapProducerOptions} field may
+ * be set alongside.
  */
 export function wrapHashedInputProducer<
   RT extends ResourceTypes,
@@ -599,6 +605,7 @@ export function wrapHashedInputProducer(
     options;
   const bulk = produceMany !== undefined;
   const primitive = produce ?? produceMany!;
+
   const descriptor =
     typeof primitive === "object" &&
     primitive !== null &&
@@ -612,6 +619,7 @@ export function wrapHashedInputProducer(
       ? (primitive as (input: never) => Promise<unknown>)
       : undefined,
   );
+
   const registry = new InputRegistry<never>();
   const hashingTasks = new Set<Promise<unknown>>();
   const ownHashing = <T>(promise: Promise<T>): Promise<T> => {
@@ -619,20 +627,29 @@ export function wrapHashedInputProducer(
     void promise.finally(() => hashingTasks.delete(promise)).catch(() => {});
     return promise;
   };
+
   const hashSupplementals = makeSupplementalHasher<never>(
     "wrapHashedInputProducer",
     branchEntries,
     cache,
     ownHashing,
   );
+  // Bound concurrent input hashing (see HASH_CONCURRENCY); shared across calls.
   const hashLimit = pLimit(HASH_CONCURRENCY);
+
   const retain = (id: string) => {
     registry.acquire(id, registry.get(id));
     return () => registry.release(id);
   };
+
+  // The internal producer for a branch recovers that branch's inputs from the
+  // registry and hands them to the branch's `produce`. Each production task
+  // holds its own lease (see `retain`), so the inputs stay registered until
+  // production settles.
   const internalSingle =
     (branch: LooseBranch<never>) => async (request: { readonly id: string }) =>
       hashSupplementals(await branch.produce(registry.get(request.id)));
+
   const internalBulk =
     (branch: LooseBranch<never>) =>
     async (requests: readonly { readonly id: string }[]) => {
@@ -650,19 +667,35 @@ export function wrapHashedInputProducer(
           | Error
         )[]
       >;
+
       const results = await producer(
         requests.map(({ id }) => registry.get(id)),
       );
-      if (!Array.isArray(results) || results.length !== requests.length)
+      if (!Array.isArray(results) || results.length !== requests.length) {
         throw new CacheContractError(
           "Producer result count must match request count",
         );
+      }
+
       return Promise.all(
         results.map(async (result) =>
           result instanceof Error ? result : hashSupplementals(result),
         ),
       );
     };
+
+  // With named branches the per-type record goes through `producerByIdType`
+  // (or `bulkProducerByIdType`), which turns it into the single producer
+  // function `wrapProducer` takes and which carries this wrapper's coverage, so
+  // the branch keys still bound the delegated requests. The single-producer
+  // form needs none of that: there is one producer for every id it mints, and
+  // branchEntriesFor guarantees exactly one entry for it.
+  //
+  // SAFETY: the casts bridge the erased internal producers to the helper's
+  // per-type record type, which is opaque while `RT` is an unresolved generic.
+  // Runtime dispatch upholds the contract: each producer only ever receives ids
+  // its own branch's `hashInput` minted, checked in `run` to classify to that
+  // branch's type before any request.
   const wrapped = bulk
     ? wrapProducer({
         ...producerOptions,
@@ -711,10 +744,12 @@ export function wrapHashedInputProducer(
           { [producerRequestLease]: retain },
         ),
       });
+
   const calls = new Set<Promise<unknown>>();
   const admissions = new Set<Promise<void>>();
   let closed = false;
   let closing: Promise<void> | undefined;
+
   const run = async (
     inputs: readonly never[],
     admitted: () => void,
@@ -723,6 +758,11 @@ export function wrapHashedInputProducer(
   ) => {
     const signal = callOptions?.signal;
     signal?.throwIfAborted();
+
+    // Route each input to its branch, keeping the branch itself (not just its
+    // name) so hashing doesn't have to look it up again, then hash with that
+    // branch's `hashInput` (bounded by `hashLimit`; `hashInput` may be sync --
+    // p-limit handles that).
     const routed = inputs.map((input) => ({
       input,
       branch: findBranch("wrapHashedInputProducer", branchEntries, input),
@@ -733,17 +773,23 @@ export function wrapHashedInputProducer(
       ),
     );
     signal?.throwIfAborted();
+
     ids.forEach((id, index) =>
       checkMintedId(cache, routed[index]!.branch[0], id),
     );
+
     // Acquire only after every mint check succeeds, so failed checks retain no input.
     ids.forEach((id, index) => registry.acquire(id, inputs[index]!));
+
     try {
       const wrappedOptions = {
         ...callOptions,
         [wrappedReadStartedAt]: startedAt,
       };
       const result = wrapped.getMany(
+        // The call-level directives apply to every element. The conditional
+        // spread avoids `directives: undefined`, which
+        // `exactOptionalPropertyTypes` rejects.
         ids.map((id) => ({
           id,
           ...(callOptions?.directives === undefined
@@ -758,17 +804,21 @@ export function wrapHashedInputProducer(
       ids.forEach((id) => registry.release(id));
     }
   };
+
   const getMany = (
     inputs: readonly never[],
     callOptions?: HashedReadOptions,
   ) => {
-    if (closed)
+    if (closed) {
       return Promise.reject(
         new CacheContractError("Producer wrapper is closed"),
       );
+    }
+
     const admission = Promise.withResolvers<void>();
     admissions.add(admission.promise);
     void admission.promise.then(() => admissions.delete(admission.promise));
+
     const startedAt = performance.now();
     const promise = Promise.resolve()
       .then(() =>
@@ -777,8 +827,10 @@ export function wrapHashedInputProducer(
       .finally(() => admission.resolve());
     calls.add(promise);
     void promise.finally(() => calls.delete(promise)).catch(() => {});
+
     return promise;
   };
+
   return {
     get: async (input: never, callOptions?: HashedReadOptions) => {
       let stored: Promise<void> | undefined;
@@ -788,6 +840,7 @@ export function wrapHashedInputProducer(
           stored = promise;
         },
       });
+
       if (result instanceof Error) throw result;
       if (stored !== undefined) callOptions?.onStore?.(stored);
       return result!;
@@ -795,7 +848,9 @@ export function wrapHashedInputProducer(
     getMany,
     close: () => {
       if (closing) return closing;
+
       closed = true;
+
       // Finish hashing and admission before closing the underlying producer client.
       closing = (async () => {
         await Promise.allSettled(admissions);
@@ -804,6 +859,7 @@ export function wrapHashedInputProducer(
         await Promise.allSettled(hashingTasks);
         await Promise.allSettled(calls);
       })();
+
       return closing;
     },
   };

@@ -163,6 +163,7 @@ export type CacheReadFound = CacheReadFoundWithEntry | "none";
  */
 export type CacheReadMessage = Attribution & {
   resourceId: string;
+  /** Elapsed lookup time after classification, in milliseconds. Slots of one call share a start time. */
   durationMs?: number;
 } & (
     | { found: "aborted"; vary?: undefined }
@@ -382,6 +383,13 @@ export type CacheProduceMessage = {
    * Why the producer was contacted. Compatible requests keep their initiating
    * cause when callers join them. A bulk invocation reports `mixed` when its
    * distinct requests have different initiating causes.
+   *
+   * Bypass never shares a request with the other two causes: the collapse key
+   * includes the request's directives, so a `maxAge: 0` caller and a
+   * plain-miss caller never share one. Miss and revalidation callers use
+   * identical directives and CAN share one: a same-key miss arriving while a
+   * revalidation is in flight rides it (and vice versa) without re-labeling
+   * the trigger.
    */
   trigger: "miss" | "revalidation" | "bypass" | "mixed";
   /**

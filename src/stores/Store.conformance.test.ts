@@ -3,6 +3,10 @@ import { getMany, getOne } from "../../test/fixtures.js";
 import { sortBy, isEqual } from "es-toolkit";
 import { setTimeout as sleep } from "node:timers/promises";
 import { AnyValidatorsArb } from "../../test/arbitraries/02_Validators.js";
+// The change-detection result types are the source of truth in 06_Store.ts per
+// the shared contract; import them from there directly so this suite compiles
+// against the contract regardless of whether they're also re-exported from the
+// public barrel.
 import type {
   StoreEntryRelationship,
   StoreEntryResult,
@@ -1022,7 +1026,9 @@ function defineCommonStoreBehavior(
     "ignores undefined-valued keys when comparing validators, on both sides",
     [],
     async (store) => {
-      // Deliberately type-violating input; see the section comment above.
+      // Deliberately type-violating input; see the "Validators are
+      // interpreted as their JSON-serialized form" section comment in
+      // defineChangeDetectionConformance.
       const dirtyOne = {
         etag: "1",
         extra: undefined,
@@ -1117,6 +1123,8 @@ function defineCommonStoreBehavior(
 
   commonBehavior(
     "reports is-new when the slot's stored record has expired, even if it's still physically present",
+    // PostgresStore never expires records -- every record it holds is
+    // returned by `get` -- so this test does not apply to it.
     ["PostgresStore"],
     async (store) => {
       // 0.125s is exactly representable in binary, so `* 1000` stays an

@@ -23,6 +23,13 @@ import Cache, { singleTypeCacheOptions } from "./Cache.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 import wrapProducer from "./utils/wrapProducer.js";
 
+/**
+ * The read-batching contract: for a Store with `getMany`, the `get()` calls of
+ * one event-loop turn share `store.getMany()` calls of at most
+ * `readBatching.maxBatchSize` requests, and nothing else about a `get()`
+ * changes. Each request still gets its own lookup result and its own `read`
+ * message.
+ */
 describe("Cache read batching", suiteOptions, () => {
   it("serves concurrent gets from one getMany call, with each request's own result", async () => {
     const { store, getManyRequestCounts } = spiedStore();

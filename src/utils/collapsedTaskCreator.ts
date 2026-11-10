@@ -129,6 +129,29 @@ export type PendingProduction<Request> = {
 /**
  * Schedules independent producer requests and shares compatible pending work.
  * Cancellation removes queued participation. Dispatched work always completes.
+ *
+ * The producer wrappers' internal variant of {@link collapsedTaskCreator}. It
+ * keeps the same collapse semantics: same key + pending + within
+ * `collapseTasksMs` of the task's start ⇒ reuse. It adds support for
+ * producer-invocation telemetry:
+ *
+ * - Each request is labeled with the trigger that motivated it. The label of
+ *   the request that actually CREATES a task is fixed as that task's trigger.
+ *   Riders never re-label it.
+ * - The dispatch function receives a {@link PendingProduction} per task, so it
+ *   can publish invocation-scoped diagnostics (trigger, attached-caller count).
+ * - Each attachment says whether it `rode` an already-pending task (true) or
+ *   initiated one (false). Settlements that DEPEND on the invocation
+ *   (served-from-producer / producer-error / served-stale-after-error /
+ *   aborted-while-waiting) report this as the fetch channel's `collapsed`
+ *   flag. Cache-served settlements (fresh or stale-while-revalidating) report
+ *   `collapsed: false` even when they attached a background revalidation as a
+ *   rider, since their settlement never depended on it (see
+ *   CacheFetchMessage.collapsed).
+ *
+ * Not exported from the package: the public `collapsedTaskCreator` remains
+ * the general-purpose utility.
+ * @internal
  */
 export function createProducerScheduler<Request, Result>(options: {
   bulk: boolean;
@@ -161,11 +184,13 @@ export function createProducerScheduler<Request, Result>(options: {
     result: ReturnType<typeof Promise.withResolvers<Result>>;
     release: (() => void) | undefined;
   };
+
   /** Tasks a new request can join, by key, until they settle. */
   const pending = new Map<string | symbol, Task>();
   /** Tasks not yet dispatched. */
   const queued = new Set<Task>();
   const running = new Set<Promise<unknown>>();
+
   const maxBatchSize = options.maxBatchSize ?? 20;
   if (
     maxBatchSize !== Infinity &&
@@ -175,6 +200,7 @@ export function createProducerScheduler<Request, Result>(options: {
       "producerBatching.maxBatchSize must be a positive integer",
     );
   }
+
   let scheduled = false;
   let draining = false;
 
@@ -183,10 +209,15 @@ export function createProducerScheduler<Request, Result>(options: {
     task.release = undefined;
     task.state = "settled";
     queued.delete(task);
+    // Only remove this task from `pending` if `pending` still holds this
+    // task for its key. It could hold a new one if this task was replaced for
+    // taking longer than collapseTasksMs.
     if (pending.get(task.key) === task) pending.delete(task.key);
   };
+
   const dispatch = (selected: readonly Task[], automatic: boolean) => {
     const tasks = selected.filter((task) => task.state === "queued");
+
     // Single producers take one request per call. Automatic accumulation
     // splits at maxBatchSize. A direct call is never split.
     const batchSize = !options.bulk ? 1 : automatic ? maxBatchSize : Infinity;
@@ -196,11 +227,13 @@ export function createProducerScheduler<Request, Result>(options: {
         .slice(offset, offset + batchSize)
         .filter((task) => task.state === "queued");
       if (batch.length === 0) continue;
+
       const now = performance.now();
       batch.forEach((task) => {
         task.state = "running";
         queued.delete(task);
       });
+
       const operation = Promise.try(() =>
         options.dispatch(
           batch.map((task) => ({
@@ -214,10 +247,12 @@ export function createProducerScheduler<Request, Result>(options: {
         ),
       )
         .then((results) => {
-          if (results.length !== batch.length)
+          if (results.length !== batch.length) {
             throw new CacheContractError(
               "Producer result count must match request count",
             );
+          }
+
           batch.forEach((task, index) => {
             forget(task);
             const result = results[index]!;
@@ -232,12 +267,15 @@ export function createProducerScheduler<Request, Result>(options: {
             task.result.reject(failure);
           });
         });
+
       running.add(operation);
       void operation.finally(() => running.delete(operation));
     }
   };
+
   const schedule = () => {
     if (scheduled || queued.size === 0) return;
+
     scheduled = true;
     const callback = AsyncLocalStorage.bind(() => {
       scheduled = false;
@@ -269,6 +307,7 @@ export function createProducerScheduler<Request, Result>(options: {
           signal?.throwIfAborted();
           const key = options.key(request) ?? Symbol();
           signal?.throwIfAborted();
+
           const existing = pending.get(key);
           const now = Date.now();
           const rode =
@@ -290,15 +329,20 @@ export function createProducerScheduler<Request, Result>(options: {
                 result: Promise.withResolvers<Result>(),
                 release: options.retain?.(request),
               };
+
           if (!rode) {
+            // This replaces an existing pending task for this key if the
+            // other task was too old.
             pending.set(key, task);
             queued.add(task);
             // Cancellation can remove the last participant before anyone awaits.
             void task.result.promise.catch(() => {});
           }
+
           task.callers.add(caller);
           task.participants += 1;
           task.background ||= background;
+
           const abort = () => {
             task.participants -= 1;
             if (
@@ -310,19 +354,23 @@ export function createProducerScheduler<Request, Result>(options: {
               task.result.reject(signal?.reason);
             }
           };
+
           if (!background && signal) {
             signal.addEventListener("abort", abort, { once: true });
             void task.result.promise
               .finally(() => signal.removeEventListener("abort", abort))
               .catch(() => {});
           }
+
           return { task, promise: task.result.promise, rode };
         },
       );
+
       if (!options.bulk || !automatic || draining) {
         // A direct caller also removes shared queued work from accumulation.
         dispatch([...new Set(attached.map(({ task }) => task))], false);
       } else schedule();
+
       return attached.map(({ promise, rode }) => ({ promise, rode }));
     },
     flush() {

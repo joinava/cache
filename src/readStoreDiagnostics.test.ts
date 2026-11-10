@@ -161,8 +161,9 @@ describe("read-store channel", suiteOptions, () => {
         beforeGetMany: async () => {
           started.resolve();
           await gate.promise;
-          if (settlement === "failure")
+          if (settlement === "failure") {
             throw new Error("Store failed after caller cancellation");
+          }
         },
       });
       const cache = cacheOver(store, {

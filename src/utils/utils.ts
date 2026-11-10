@@ -170,6 +170,7 @@ export type StoreReadObservation = {
   outcome: "success" | "failure" | "cancelled";
 };
 
+/** Observe an actual Store invocation without including caller classification. */
 export async function readStoreObserved<
   Spec extends CacheSpec,
   Validators extends AnyValidators,
@@ -182,12 +183,18 @@ export async function readStoreObserved<
   observe?: (event: StoreReadObservation) => void,
 ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
   options?.signal?.throwIfAborted();
-  if (requests.length === 0)
+
+  if (requests.length === 0) {
     return [] as StoreGetManyResult<Spec, Reqs, Validators, Params>;
-  if (store.getMany === undefined)
+  }
+
+  if (store.getMany === undefined) {
     return readSingleStore(store, requests, 10, options, observe);
+  }
+
   const startedAt = observe === undefined ? 0 : performance.now();
   let results: StoreGetManyResult<Spec, Reqs, Validators, Params>;
+
   try {
     results = await store.getMany(requests, options);
     if (
@@ -202,6 +209,7 @@ export async function readStoreObserved<
         "Store.getMany must return one entry array or Error per request",
       );
     }
+
     observe?.({
       operation: "getMany",
       requestCount: requests.length,
@@ -225,8 +233,10 @@ export async function readStoreObserved<
       durationMs: performance.now() - startedAt,
       outcome: options?.signal?.aborted ? "cancelled" : "failure",
     });
+
     options?.signal?.throwIfAborted();
     if (failure instanceof CacheContractError) throw failure;
+
     const error = asError(failure);
     return requests.map(() => error) as StoreGetManyResult<
       Spec,
@@ -235,6 +245,7 @@ export async function readStoreObserved<
       Params
     >;
   }
+
   options?.signal?.throwIfAborted();
   return results;
 }
@@ -264,6 +275,7 @@ export function throwIfAnyError<const Results extends readonly unknown[]>(
 ): { [K in keyof Results]: Exclude<Results[K], Error> } {
   const failure = results.find((result) => result instanceof Error);
   if (failure instanceof Error) throw failure;
+
   return results as { [K in keyof Results]: Exclude<Results[K], Error> };
 }
 
@@ -276,6 +288,13 @@ export function throwIfAnyError<const Results extends readonly unknown[]>(
  * identity. Non-Error rejections are wrapped with their original cause.
  * Request order and duplicate slots are preserved. Caller cancellation still
  * rejects the operation rather than becoming a partial read failure.
+ *
+ * @param store The store instance to use for retrieving entries
+ * @param requests Array of requests, each containing an id and params
+ * @param maxConcurrency Maximum number of concurrent requests (default: 10)
+ * @returns A promise that resolves to a tuple-typed array, where each output
+ *  slot holds matching entries or an Error for the corresponding request, with
+ *  content narrowed to the spec variants compatible with that request's id.
  */
 async function readSingleStore<
   Spec extends CacheSpec,
@@ -304,14 +323,18 @@ async function readSingleStore<
       const pendingYield = budget.yieldIfNeeded();
       if (pendingYield !== undefined) await pendingYield;
       options?.signal?.throwIfAborted();
+
       const startedAt = observe === undefined ? 0 : performance.now();
       try {
         const invocation = budget.measure(() => ({
           promise: store.get(request, options),
         }));
         const entries = await invocation.promise;
-        if (!Array.isArray(entries))
+
+        if (!Array.isArray(entries)) {
           throw new CacheContractError("Store.get must return an entry array");
+        }
+
         observe?.({
           operation: "get",
           requestCount: 1,
@@ -320,6 +343,7 @@ async function readSingleStore<
           durationMs: performance.now() - startedAt,
           outcome: "success",
         });
+
         return entries;
       } catch (error) {
         observe?.({
@@ -330,8 +354,10 @@ async function readSingleStore<
           durationMs: performance.now() - startedAt,
           outcome: options?.signal?.aborted ? "cancelled" : "failure",
         });
+
         options?.signal?.throwIfAborted();
         if (error instanceof CacheContractError) throw error;
+
         return asError(error);
       }
     }),
@@ -340,6 +366,7 @@ async function readSingleStore<
   // Wait for every dispatched read before releasing lifecycle ownership.
   const settled = await Promise.allSettled(promises);
   options?.signal?.throwIfAborted();
+
   const res = settled.map((result) => {
     if (result.status === "rejected") throw result.reason;
     return result.value;

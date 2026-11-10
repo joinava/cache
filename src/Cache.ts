@@ -437,6 +437,20 @@ export default class Cache<
    * Read a known set and preserve positional successes and operational errors.
    * Cancellation and invalid contracts reject the complete public call.
    * Both read shapes use the same capability-driven accumulation policy.
+   *
+   * The result is a tuple typed per-request: each output slot's content type
+   * is narrowed to the spec variants compatible with the corresponding input
+   * request's id. A slot holds an Error when the read failed for that request.
+   *
+   * Emits one `read` diagnostics message PER request: the lookup result on
+   * success, `found: "read-failed"` with the error for a failed request, or
+   * `found: "aborted"` when the caller cancels. All request ids are classified
+   * up front, so a classification failure rejects the whole call before
+   * touching the store, emitting nothing.
+   *
+   * @param requests Array of consumer requests to process
+   * @returns Promise that resolves to one CacheLookupResult or Error per
+   * request, in the same order as the input requests
    */
   public async getMany<
     const Reqs extends readonly ReadonlyConsumerRequest<
@@ -448,11 +462,14 @@ export default class Cache<
     options?: ReadOptions,
   ): Promise<GetManyResults<Reqs, RT, Validators, Params>> {
     options?.signal?.throwIfAborted();
-    if (!isNonEmptyArray(requests))
+    if (!isNonEmptyArray(requests)) {
       return [] as GetManyResults<Reqs, RT, Validators, Params>;
+    }
+
     // Classify every request id up front: a classification failure rejects
     // the whole operation before we touch the store.
     const resourceTypes = mapNonEmpty(requests, (req) => this.classify(req.id));
+
     const startedAt = performance.now();
     const publishRead = (
       index: number,
@@ -469,6 +486,7 @@ export default class Cache<
         ...outcome,
       });
     };
+
     if (this.#closed) {
       if (this.#onGetAfterClose === "throw") {
         this.#logger(
@@ -486,18 +504,38 @@ export default class Cache<
         return { validatable: [] };
       }) as GetManyResults<Reqs, RT, Validators, Params>;
     }
+
     const now = new Date();
     this.#logger("trace", "received getMany request", {
       requestCount: requests.length,
       requests: requests.map((r) => ({ id: r.id, params: r.params })),
     });
     this.#logger("trace", "requested entries from the store");
+
     const normalized = mapNonEmpty(requests, (req) => ({
       id: req.id,
       params: this.normalizeParams(req.params),
     }));
+
     // Store requests retain separate slots, even when their IDs are equal.
     // Freshness belongs to each logical read, never to shared physical work.
+    //
+    // Unlike producer invocations, store reads are NOT collapsed: N concurrent
+    // identical requests get N separate lookup results. A point read is cheap
+    // next to the producer calls collapsing exists to protect.
+    //
+    // Read batching does not change that. It batches the QUERY only: the
+    // accumulated reads share one `store.getMany()` call, but each request
+    // still gets its own slot of that call's result, and the code below still
+    // classifies it against this call's own `now`. Requests share one query,
+    // never one result.
+    //
+    // Worth knowing if that ever changes: reads must not reuse results across
+    // a time window the way producer invocations do. A lookup result is a
+    // freshness decision evaluated at a specific `now`, so replaying one
+    // serves decisions computed against a stale clock. Only a PENDING-only
+    // promise share is sound, which bounds the skew to the read's own
+    // duration.
     const reads =
       this.#readBatcher !== undefined && options?.autoBatch !== false
         ? normalized.map((request) =>
@@ -515,6 +553,7 @@ export default class Cache<
               dispatched.then((results) => results[index]!),
             );
           })();
+
     let entriesForRequests;
     try {
       entriesForRequests = await raceWithSignal(
@@ -522,6 +561,11 @@ export default class Cache<
         options?.signal,
       );
     } catch (error) {
+      // One message PER REQUEST, not one per call, before the error
+      // propagates: the channel is one-message-per-lookup, so subscribers can
+      // use it as a total denominator. A failed known-set read is N lookups
+      // that all failed together. One message for the set would make a
+      // subscriber's per-id read counts disagree with the successful path.
       requests.forEach((_, index) =>
         publishRead(
           index,
@@ -532,11 +576,13 @@ export default class Cache<
       );
       throw error;
     }
+
     this.#logger("trace", "received entries from the store", {
       resultCount: sumBy(entriesForRequests, (entries) =>
         entries instanceof Error ? 0 : entries.length,
       ),
     });
+
     // Classifying entries is synchronous, so yield between requests to keep a
     // large known set from blocking the event loop.
     return (await timeSlicedMapNonEmpty(requests, (req, index) => {
@@ -545,6 +591,7 @@ export default class Cache<
         publishRead(index, { found: "read-failed", error: entries });
         return entries;
       }
+
       const { result, outcome } = this.#processCacheEntries(
         entries as unknown as Entry<SpecOf<RT>, Validators, Params>[],
         req.directives,
@@ -691,12 +738,17 @@ export default class Cache<
 
   public close(): Promise<void> {
     if (this.#closePromise !== undefined) return this.#closePromise;
+
     this.#closed = true;
+    // A batched read that `get()` accepted before this call still runs: start
+    // the queued ones now, so that they are in flight when close() waits for
+    // tracked Store calls, as unbatched reads would be.
     this.#readBatcher?.flushNow();
     this.#closePromise = (async () => {
       await Promise.allSettled(this.#operations);
       await this.#dataStore.close();
     })();
+
     return this.#closePromise;
   }
 
@@ -747,11 +799,13 @@ export default class Cache<
       () => this.#operations.delete(promise),
       () => this.#operations.delete(promise),
     );
+
     try {
       resolve(start());
     } catch (error) {
       reject(error);
     }
+
     return promise;
   }
 

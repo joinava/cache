@@ -2057,9 +2057,8 @@ describe("diagnostics channels (§6.5)", () => {
       // A buggy producer that returns one result for three requests. An
       // under-return poisons the positional (result, request) pairing -- a
       // dropped MIDDLE element would pair later results with the wrong
-      // requests -- so elements before the gap must not report
-      // served-from-producer (the call rejects; nothing is delivered),
-      // elements after it must still settle, and the prefix must not store.
+      // requests -- so no element reports a fetch outcome (the call rejects;
+      // nothing is delivered), and the prefix must not store.
       //
       // A BARE producer, deliberately: this is the wrapper's OWN under-return
       // check, and a bare producer is the only way left to reach it.
@@ -2083,7 +2082,7 @@ describe("diagnostics channels (§6.5)", () => {
               { id: "site:c" },
             ]),
           {
-            // `name` pins it to a plain Error, which is also the "not a
+            // `name` pins it to the contract error, which is also the "not a
             // coverage failure" check: NoProducerForResourceTypeError would
             // carry its own name.
             name: "CacheContractError",
@@ -2139,7 +2138,8 @@ describe("diagnostics channels (§6.5)", () => {
           directivesImpliedBypass: false,
           collapsed: false,
         });
-        // The invocation itself settled by rejecting: outcome "error".
+        // The producer invocation rejected, so produce reports "error" even
+        // though the call resolved with positional Errors.
         expect(capture.produce).to.have.lengthOf(1);
         expect(capture.produce[0]?.outcome).to.equal("error");
         expect(capture.storeEntry).to.deep.equal([]);
@@ -2236,8 +2236,9 @@ describe("diagnostics channels (§6.5)", () => {
             ? wrapProducer({
                 cache,
                 produce: async () => {
-                  if (mode === "scalar-failure")
+                  if (mode === "scalar-failure") {
                     throw new Error("scalar failed");
+                  }
                   return { content: "ok", directives: freshFor100 };
                 },
               })
@@ -2259,9 +2260,9 @@ describe("diagnostics channels (§6.5)", () => {
                 ? [{ id: "site:a" }]
                 : [{ id: "site:a" }, { id: "site:b" }],
             );
-            if (mode === "contract")
+            if (mode === "contract") {
               await assert.rejects(pending, /results for/);
-            else await pending;
+            } else await pending;
             assert.equal(capture.produce.length, 1);
             assert.equal(
               capture.produce[0]?.failedRequestCount,

@@ -18,7 +18,7 @@ Stores never see resource-type names or classification (below); those are entire
 
 ### The resource-type registry
 
-Every `Cache` is built over a **resource-type registry** ([`ResourceTypes`](./src/types/00_ResourceTypes.ts)): a record naming each _kind_ of resource the cache can hold, pairing a runtime classifier for that kind's id sub-space (`matches`) with its content type (a type-level phantom). `Cache` takes a single options bag; `store`, `name` and `resourceTypes` are all required:
+Every `Cache` is built over a **resource-type registry** ([`ResourceTypes`](./src/types/00_ResourceTypes.ts)): a record naming each *kind* of resource the cache can hold, pairing a runtime classifier for that kind's id sub-space (`matches`) with its content type (a type-level phantom). `Cache` takes a single options bag; `store`, `name` and `resourceTypes` are all required:
 
 ```ts
 const storiesResourceTypes = {
@@ -33,20 +33,17 @@ const cache = new Cache({
 });
 ```
 
-The registry's `matches` guards must **partition the id space**: for every id the cache will ever see (requests, primary results, supplemental results, deletes), exactly one entry must match. `cache.classify(id)` evaluates _every_ guard: zero matches throws `UnclassifiableIdError`, two or more throws `AmbiguousResourceTypeError` — fail loud over first-match-wins, so a registry overlap is caught the first time it occurs. Classification runs on every `get`/`getMany` request id, every stored entry id (primary _and_ supplemental, all validated before anything persists — a producer minting a malformed id can't write a permanently unreadable row), and every `delete` id. Guards should be cheap (prefix checks preferred); ids must carry their type in-band: **an id must be classifiable by inspection**.
+The registry's `matches` guards must **partition the id space**: for every id the cache will ever see (requests, primary results, supplemental results, deletes), exactly one entry must match. `cache.classify(id)` evaluates *every* guard: zero matches throws `UnclassifiableIdError`, two or more throws `AmbiguousResourceTypeError` — fail loud over first-match-wins, so a registry overlap is caught the first time it occurs. Classification runs on every `get`/`getMany` request id, every stored entry id (primary *and* supplemental, all validated before anything persists — a producer minting a malformed id can't write a permanently unreadable row), and every `delete` id. Guards should be cheap (prefix checks preferred); ids must carry their type in-band: **an id must be classifiable by inspection**.
 
 A cache with exactly **one** resource type doesn't have to name it — `singleTypeCacheOptions` builds the whole options bag, naming the type after the cache (override with `resourceTypeName`):
 
 ```ts
 const cache = new Cache(
-  singleTypeCacheOptions<TicketSchema>()({
-    store,
-    name: "zendesk_ticket_schemas",
-  }),
+  singleTypeCacheOptions<TicketSchema>()({ store, name: "zendesk_ticket_schemas" }),
 );
 ```
 
-By default its sole type accepts every id, so classification never fails and the id space is `string`. Spread the result to set anything else `CacheOptions` accepts. The one thing it gives up is precision of the resource-type _name_: `classify()` returns `string` rather than a literal, which is the point of not having to pick one.
+By default its sole type accepts every id, so classification never fails and the id space is `string`. Spread the result to set anything else `CacheOptions` accepts. The one thing it gives up is precision of the resource-type *name*: `classify()` returns `string` rather than a literal, which is the point of not having to pick one.
 
 To narrow the id space below `string` — template-literal or branded ids flowing through to every request, producer, and entry type — pass a **real guard** as `validateId`:
 
@@ -60,7 +57,7 @@ const cache = new Cache(
 );
 ```
 
-`validateId` is _required_ as soon as the id space is narrower than `string`, so a narrowed id type always has a runtime check behind it — naming a narrow `Id` by explicit type argument without supplying the guard is a compile error. The store needs no type argument to earn the narrowing: `Id` comes from the guard alone, and the store is only checked for coverage (see below).
+`validateId` is *required* as soon as the id space is narrower than `string`, so a narrowed id type always has a runtime check behind it — naming a narrow `Id` by explicit type argument without supplying the guard is a compile error. The store needs no type argument to earn the narrowing: `Id` comes from the guard alone, and the store is only checked for coverage (see below).
 
 Writing the one-entry registry out by hand stays equivalent, and is the better choice when you also want the literal resource-type name:
 
@@ -84,14 +81,10 @@ So the cache doesn't require a match: it captures the store's own spec and only 
 
 ```ts
 const store = new MemoryStore<SpecOf<typeof everyResourceTypeWeHave>>();
-const cache = new Cache({
-  store,
-  name: "stories",
-  resourceTypes: storiesResourceTypes,
-});
+const cache = new Cache({ store, name: "stories", resourceTypes: storiesResourceTypes });
 ```
 
-A store that does _not_ cover the registry is still rejected, so this convenience can't silently accept a store that would fail at runtime on an id it doesn't handle. The same rule applies to `singleTypeCacheOptions`, so one general-purpose store can back several single-type caches:
+A store that does *not* cover the registry is still rejected, so this convenience can't silently accept a store that would fail at runtime on an id it doesn't handle. The same rule applies to `singleTypeCacheOptions`, so one general-purpose store can back several single-type caches:
 
 ```ts
 const store = new MemoryStore<SpecOf<typeof everyResourceTypeWeHave>>();
@@ -117,21 +110,13 @@ type StoriesCacheSpec = SpecOf<typeof storiesResourceTypes>;
 // Per-id content narrowing on read:
 const storyRes = await cache.get({ id: "story:1", params: {}, directives: {} });
 //    storyRes.usable?.content has type `Story | undefined`
-const collRes = await cache.get({
-  id: "collection:top",
-  params: {},
-  directives: {},
-});
+const collRes = await cache.get({ id: "collection:top", params: {}, directives: {} });
 //    collRes.usable?.content has type `Story[] | undefined`
 
 // The (id, content) pair is also enforced on write:
 await cache.store([
-  { id: "story:1", content: aStory, directives: { freshUntilAge: 60 } }, // ok
-  {
-    id: "collection:top",
-    content: [story1, story2],
-    directives: { freshUntilAge: 60 },
-  }, // ok
+  { id: "story:1", content: aStory, directives: { freshUntilAge: 60 } },           // ok
+  { id: "collection:top", content: [story1, story2], directives: { freshUntilAge: 60 } }, // ok
   // @ts-expect-error -- can't store a Story[] under a story:* id
   { id: "story:bad", content: [story1], directives: { freshUntilAge: 60 } },
 ]);

@@ -1,7 +1,7 @@
 /**
  * @fileoverview The hashed-input producer builder: a `.when` chain over a
  * declared variant map that produces an opaque value only
- * {@link wrapHashedInputProducer}/`wrapHashedInputProducer` can consume.
+ * {@link wrapHashedInputProducer} can consume.
  *
  * Split out from the wrappers because it deliberately does not need them, or a
  * `Cache`: a hashed-input producer is a value in its own right, buildable and

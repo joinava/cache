@@ -267,6 +267,7 @@ export default class PostgresStore<
       offset: number,
     ): Promise<ReadResult[]> => {
       signal?.throwIfAborted();
+
       const encoded = requestsChunk.map(({ id, params }, index) => {
         const requestIndex = offset + index;
         try {
@@ -301,28 +302,34 @@ export default class PostgresStore<
           return asError(failure);
         }
       })();
-      if (rows instanceof Error)
+      if (rows instanceof Error) {
         return encoded.map((value) => (value instanceof Error ? value : rows));
+      }
+
       signal?.throwIfAborted();
 
       // Every returned row must belong to a slot included in this query.
       const expectedIndices = new Set(
         queryRequests.map(({ requestIndex }) => requestIndex),
       );
-      if (rows.some((row) => !expectedIndices.has(row.request_index)))
+      if (rows.some((row) => !expectedIndices.has(row.request_index))) {
         throw new CacheContractError(
           "Postgres returned an unexpected request index",
         );
+      }
+
       const rowsByRequest = groupBy(rows, (row) => row.request_index);
 
       return encoded.map((value, index): ReadResult => {
         if (value instanceof Error) return value;
+
         const request = requestsChunk[index]!;
         try {
           // SQL bindings can replace lone surrogates. A different SQL key or
           // persisted ID is a miss, even if Postgres considered it a match.
           return (rowsByRequest[value.requestIndex] ?? []).flatMap((row) => {
             if (row.resource_id !== request.id) return [];
+
             const entry = this.deserializeEntry(row.entry);
             return entry.id === request.id ? [entry] : [];
           });
@@ -410,42 +417,23 @@ export default class PostgresStore<
     const readOldAndUpsert = (batch: typeof rows) =>
       this.db
         .with("old", (db) =>
-          db
-            .selectFrom(this.tableName)
-            .where((eb) =>
-              eb.or(
-                batch.map((row) =>
-                  eb.and([
-                    eb("resource_id", "=", row.resource_id),
-                    eb(
-                      "vary",
-                      "=",
-                      sql<Readonly<NormalizedVary<Params>>>`${row.vary}::jsonb`,
-                    ),
-                  ]),
-                ),
-              ),
-            )
+          db.selectFrom(this.tableName)
+            .where((eb) => eb.or(batch.map((row) => eb.and([
+              eb("resource_id", "=", row.resource_id),
+              eb("vary", "=", sql<Readonly<NormalizedVary<Params>>>`${row.vary}::jsonb`),
+            ]))))
             .select((eb) => [
               "resource_id",
               "vary",
-              sql<Partial<Validators>>`${eb.ref("entry")} -> 'validators'`.as(
-                "validators",
-              ),
+              sql<Partial<Validators>>`${eb.ref("entry")} -> 'validators'`.as("validators"),
             ]),
         )
         .with("upsert", (db) =>
-          db
-            .insertInto(this.tableName)
-            .values(batch)
-            .onConflict((oc) =>
-              oc
-                .columns(["resource_id", "vary"])
-                .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") })),
-            ),
+          db.insertInto(this.tableName).values(batch)
+            .onConflict((oc) => oc.columns(["resource_id", "vary"])
+              .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") }))),
         )
-        .selectFrom("old")
-        .selectAll("old");
+        .selectFrom("old").selectAll("old");
     const batchSize = 1_000;
     // Keep the one-statement fast path for ordinary small cache writes.
     const oldRows = (await (
@@ -457,9 +445,7 @@ export default class PostgresStore<
             // Each batch reads only its own slots before replacing them.
             for (let start = 0; start < rows.length; start += batchSize) {
               const result = await trx.executeQuery<OldRow>(
-                readOldAndUpsert(
-                  rows.slice(start, start + batchSize),
-                ).compile(),
+                readOldAndUpsert(rows.slice(start, start + batchSize)).compile(),
               );
               previous.push(...result.rows);
             }
@@ -668,8 +654,9 @@ export default class PostgresStore<
     const date = parseDateString(
       _.date satisfies string as unknown as DateString,
     );
-    if (!Number.isFinite(date.getTime()))
+    if (!Number.isFinite(date.getTime())) {
       throw new Error("Invalid cached entry date");
+    }
     return {
       id: _.id,
       content: _.content,

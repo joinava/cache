@@ -211,8 +211,9 @@ describe("adapter lifecycle and positional contracts", () => {
     let closedWhileActive = false;
     const store = {
       get: async ({ id }: { id: string }) => {
-        if (id === "invalid")
+        if (id === "invalid") {
           throw new CacheContractError("invalid single result");
+        }
         active = true;
         started.resolve();
         await held.promise;
