@@ -671,7 +671,7 @@ export default function wrapProducer<
     collapseTasksMs: collapseOverlappingRequestsTime * 1000,
     // The key covers the full request (id, normalized params, directives) but
     // not resourceType, which is derived from the id and so adds nothing.
-    key: ({ request }) => {
+    makeKey: ({ request }) => {
       try {
         return stableStringify({
           ...request,
@@ -702,7 +702,7 @@ export default function wrapProducer<
       let results: readonly (Result | Error)[];
 
       const common = {
-        autoBatched: tasks[0]!.automatic,
+        autoBatched: tasks[0]!.autoBatched,
         requestCount: tasks.length,
         queueWaitTotalMs: tasks.reduce(
           (sum, task) => sum + task.queueWaitMs,

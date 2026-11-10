@@ -29,6 +29,7 @@ import {
   type Store,
   type StoreEntryInput,
   type StoreEntryResult,
+  type StoreGetManyRequest,
   type Vary,
 } from "./types/index.js";
 import {
@@ -748,11 +749,10 @@ export default class Cache<
   }
 
   #readStore<
-    const Requests extends
-      readonly import("./types/06_Store.js").StoreGetManyRequest<
-        StoreSupportedTypes,
-        Params
-      >[],
+    const Requests extends readonly StoreGetManyRequest<
+      StoreSupportedTypes,
+      Params
+    >[],
   >(
     requests: Requests,
     options?: { signal?: AbortSignal },

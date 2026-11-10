@@ -248,18 +248,11 @@ export function postgresStoreFixture(
  * autoBatch, and the read-store `getMany` operation use this Store. Its
  * getMany fans out to MemoryStore.get, so a slot can hold an Error.
  */
-export function bulkMemoryStore<
-  Spec extends import("../src/types/index.js").CacheSpec =
-    import("../src/types/index.js").CacheSpec,
->() {
+export function bulkMemoryStore<Spec extends CacheSpec = CacheSpec>() {
   const memory = new MemoryStore<Spec>();
   return {
     async getMany<
-      const Reqs extends
-        readonly import("../src/types/index.js").StoreGetManyRequest<
-          Spec,
-          AnyParams
-        >[],
+      const Reqs extends readonly StoreGetManyRequest<Spec, AnyParams>[],
     >(requests: Reqs, options?: { signal?: AbortSignal }) {
       return await readStoreObserved(memory, requests, options);
     },

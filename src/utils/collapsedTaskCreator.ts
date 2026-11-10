@@ -123,7 +123,11 @@ export type PendingProduction<Request> = {
   readonly attachedCallerCount: () => number;
   readonly attachedCallers: () => ReadonlySet<object>;
   readonly queueWaitMs: number;
-  readonly automatic: boolean;
+  /**
+   * True when the scheduler dispatched this request from its automatic queue.
+   * Reported as the produce message's `autoBatched`.
+   */
+  readonly autoBatched: boolean;
 };
 
 /**
@@ -151,6 +155,31 @@ export type PendingProduction<Request> = {
  *
  * Not exported from the package: the public `collapsedTaskCreator` remains
  * the general-purpose utility.
+ *
+ * @param options.bulk True when the producer takes many requests per call
+ *   (`produceMany`). Then `dispatch` receives every request of a batch at once,
+ *   and requests attached with `automatic: true` accumulate in a queue. False
+ *   for a single-request producer (`produce`): each `dispatch` call receives
+ *   exactly one request, and nothing accumulates.
+ * @param options.maxBatchSize The most requests one automatic dispatch takes.
+ *   Defaults to 20. A direct (non-automatic) dispatch is never split. Ignored
+ *   when `bulk` is false.
+ * @param options.batchScheduleFn Schedules the automatic queue's flush. It
+ *   receives the flush callback. Defaults to the next tick after the current
+ *   microtasks, so requests from one event-loop turn share a batch.
+ * @param options.collapseTasksMs As in {@link collapsedTaskCreator}: a new
+ *   request joins a pending task with the same key only if that task started
+ *   less than this many milliseconds ago.
+ * @param options.makeKey As in {@link collapsedTaskCreator}: converts a request
+ *   into the key that decides which pending task it may join. Return
+ *   `undefined` for a request that must not share work with any other; the
+ *   scheduler then gives it a key that matches nothing.
+ * @param options.retain Called when a task is created. It returns a release
+ *   function that the scheduler calls once the task settles. The wrappers use
+ *   it to keep a request's inputs alive while its production is pending.
+ * @param options.dispatch Runs one producer invocation for the given tasks. It
+ *   resolves with one result or Error per task, in order. A rejection fails
+ *   every task in the invocation.
  * @internal
  */
 export function createProducerScheduler<Request, Result>(options: {
@@ -158,7 +187,7 @@ export function createProducerScheduler<Request, Result>(options: {
   maxBatchSize?: number;
   batchScheduleFn?: (dispatch: () => void) => void;
   collapseTasksMs: number;
-  key: (request: Request) => string | undefined;
+  makeKey: (request: Request) => string | undefined;
   retain?: (request: Request) => () => void;
   dispatch: (
     requests: readonly PendingProduction<Request>[],
@@ -242,7 +271,7 @@ export function createProducerScheduler<Request, Result>(options: {
             attachedCallerCount: () => task.callers.size,
             attachedCallers: () => task.callers,
             queueWaitMs: task.accumulated ? now - task.enqueuedAt : 0,
-            automatic,
+            autoBatched: automatic,
           })),
         ),
       )
@@ -305,7 +334,7 @@ export function createProducerScheduler<Request, Result>(options: {
       const attached = requests.map(
         ({ request, trigger, background = false, signal, caller }) => {
           signal?.throwIfAborted();
-          const key = options.key(request) ?? Symbol();
+          const key = options.makeKey(request) ?? Symbol();
           signal?.throwIfAborted();
 
           const existing = pending.get(key);

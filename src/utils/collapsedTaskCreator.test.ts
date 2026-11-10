@@ -14,7 +14,7 @@ it(
       bulk: true,
       maxBatchSize: 1,
       collapseTasksMs: 3_000,
-      key: (request) => request,
+      makeKey: (request) => request,
       batchScheduleFn: (dispatch) => scheduled.resolve(dispatch),
       dispatch: async (requests) => {
         const values = requests.map(({ request }) => request);
@@ -54,7 +54,7 @@ it(
       bulk: true,
       maxBatchSize: 1,
       collapseTasksMs: 3_000,
-      key: (request) => request,
+      makeKey: (request) => request,
       batchScheduleFn: (dispatch) => scheduled.resolve(dispatch),
       dispatch: async (requests) => {
         const values = requests.map(({ request }) => request);
@@ -90,7 +90,7 @@ it(
     const scheduler = createProducerScheduler<number, number>({
       bulk: true,
       collapseTasksMs: 0,
-      key: (request) => String(request),
+      makeKey: (request) => String(request),
       batchScheduleFn: (dispatch) => scheduled.resolve(dispatch),
       dispatch: async (requests) => {
         const values = requests.map(({ request }) => request);
