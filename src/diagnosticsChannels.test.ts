@@ -328,7 +328,7 @@ describe("diagnostics channels (§6.5)", () => {
       const capture = captureChannels(name);
       try {
         await cache
-          .getMany([
+          .getUnbatched([
             { id: "site:a", params: {}, directives: {} },
             { id: "biz:b", params: {}, directives: {} },
             { id: "site:a", params: {}, directives: {} },
@@ -448,7 +448,7 @@ describe("diagnostics channels (§6.5)", () => {
       try {
         const thrown = await expectRejection(() =>
           cache
-            .getMany([
+            .getUnbatched([
               { id: "site:a", params: {}, directives: {} },
               { id: "biz:b", params: {}, directives: {} },
               // A duplicate gets its own message, exactly as on the success path.
@@ -599,7 +599,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "success",
           minDurationMs: 15,
         });
@@ -650,7 +650,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "error",
           minDurationMs: 15,
         });
@@ -712,7 +712,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "revalidation",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "success",
           minDurationMs: 20,
         });
@@ -777,7 +777,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "revalidation",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "error",
         });
         // The logical request settled as a stale serve -- exactly one fetch,
@@ -843,7 +843,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "error",
         });
       } finally {
@@ -904,7 +904,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "success",
           minDurationMs: 50,
         });
@@ -1011,7 +1011,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("riders: a concurrent identical request performs its own read, then rides the in-flight invocation -- no new produce, fetch collapsed: true, collapsedCallerCount 2 (§7)", async () => {
+    it("riders: a concurrent identical request performs its own read, then rides the in-flight invocation -- no new produce, fetch collapsed: true, collapsedRequestCount 1 (§7)", async () => {
       const { name, cache } = makeHarness("fetch-rider");
       const capture = captureChannels(name);
       // Gated rather than delayed, so the initiator's invocation is held
@@ -1076,7 +1076,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-          collapsedCallerCount: 2,
+          collapsedRequestCount: 1,
           outcome: "success",
         });
 
@@ -1107,7 +1107,7 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
-    it("SWR riders: a second stale-served caller rides the in-flight revalidation -- counted in collapsedCallerCount, but its fetch stays collapsed: false (settlement-centric)", async () => {
+    it("SWR riders: a second stale-served caller rides the in-flight revalidation -- its revalidation's ride counts in collapsedRequestCount, but its fetch stays collapsed: false (settlement-centric)", async () => {
       const { name, cache } = makeHarness("fetch-swr-rider");
       // Seeded (before capture starts) as stale but well inside the SWR
       // window, backdated so no wall-clock wait is involved.
@@ -1152,7 +1152,7 @@ describe("diagnostics channels (§6.5)", () => {
         // shared invocation -- so both fetches report collapsed: false,
         // while the produce message counts the rider. The channels
         // deliberately reconcile as an inequality:
-        // Σ(collapsedCallerCount − 1) ≥ #collapsed-true fetches (§6.5.3).
+        // Σ collapsedRequestCount ≥ #collapsed-true fetches (§6.5.3).
         expect(capture.fetch).to.have.lengthOf(2);
         capture.fetch.forEach((message) => {
           expectCachePathFetch(message, {
@@ -1169,7 +1169,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "revalidation",
           requests: [{ resourceType: "site_day", resourceId: "site:swr" }],
-          collapsedCallerCount: 2,
+          collapsedRequestCount: 1,
           outcome: "success",
         });
       } finally {
@@ -1322,7 +1322,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: true,
           trigger: "bypass",
           requests: [{ resourceType: "site_day", resourceId: "site:bypass" }],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "success",
         });
       } finally {
@@ -1552,7 +1552,7 @@ describe("diagnostics channels (§6.5)", () => {
       const capture = captureChannels(name);
       try {
         await cache
-          .getMany([
+          .getUnbatched([
             { id: "site:a", params: { locale: "en" }, directives: {} },
             { id: "site:a", params: { locale: "fr" }, directives: {} },
             // No matching variant: `found: "none"`, and so no variant to identify.
@@ -1869,7 +1869,7 @@ describe("diagnostics channels (§6.5)", () => {
           assert.equal(operation.autoBatched, true);
           assert.equal(operation.requestCount, 2);
           assert.equal(operation.failedRequestCount, 0);
-          assert.equal(operation.collapsedCallerCount, 1);
+          assert.equal(operation.collapsedRequestCount, 0);
           assert.equal(operation.queueWaitTotalMs, 10);
           assert.equal(operation.durationMs, 7);
           assert.deepEqual(
@@ -2182,7 +2182,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: "site:k1" }],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "success",
         });
         expect(capture.fetch).to.have.lengthOf(1);
@@ -2606,7 +2606,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: siteId }],
-          collapsedCallerCount: 2,
+          collapsedRequestCount: 1,
           outcome: "success",
           minDurationMs: 15,
         });
@@ -2744,7 +2744,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "revalidation",
           requests: [{ resourceType: "site_day", resourceId: siteId }],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "success",
           minDurationMs: 15,
         });
@@ -2821,7 +2821,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: siteId }],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "error",
           minDurationMs: 15,
         });
@@ -2863,7 +2863,7 @@ describe("diagnostics channels (§6.5)", () => {
           autoBatched: false,
           trigger: "miss",
           requests: [{ resourceType: "site_day", resourceId: siteId }],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "error",
           minDurationMs: 15,
         });

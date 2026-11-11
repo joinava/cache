@@ -316,7 +316,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
           const getManySpy = getSpy;
           const thrown = await expectRejection(() =>
             cache
-              .getMany([
+              .getUnbatched([
                 { id: "site:good", params: {}, directives: {} },
                 {
                   id: "nope" as string as `site:${string}`,
@@ -633,7 +633,7 @@ describe("resource-type classification (§6.1, §6.2)", () => {
             },
           ]);
           const [protoRes, toStringRes] = await cache
-            .getMany([
+            .getUnbatched([
               { id: "__proto__", params: {}, directives: {} },
               { id: "toString", params: {}, directives: {} },
             ])

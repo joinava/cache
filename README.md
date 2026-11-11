@@ -18,7 +18,7 @@ Stores never see resource-type names or classification (below); those are entire
 
 ### The resource-type registry
 
-Every `Cache` is built over a **resource-type registry** ([`ResourceTypes`](./src/types/00_ResourceTypes.ts)): a record naming each *kind* of resource the cache can hold, pairing a runtime classifier for that kind's id sub-space (`matches`) with its content type (a type-level phantom). `Cache` takes a single options bag; `store`, `name` and `resourceTypes` are all required:
+Every `Cache` is built over a **resource-type registry** ([`ResourceTypes`](./src/types/00_ResourceTypes.ts)): a record naming each _kind_ of resource the cache can hold, pairing a runtime classifier for that kind's id sub-space (`matches`) with its content type (a type-level phantom). `Cache` takes a single options bag; `store`, `name` and `resourceTypes` are all required:
 
 ```ts
 const storiesResourceTypes = {
@@ -33,17 +33,20 @@ const cache = new Cache({
 });
 ```
 
-The registry's `matches` guards must **partition the id space**: for every id the cache will ever see (requests, primary results, supplemental results, deletes), exactly one entry must match. `cache.classify(id)` evaluates *every* guard: zero matches throws `UnclassifiableIdError`, two or more throws `AmbiguousResourceTypeError` — fail loud over first-match-wins, so a registry overlap is caught the first time it occurs. Classification runs on every `get`/`getMany` request id, every stored entry id (primary *and* supplemental, all validated before anything persists — a producer minting a malformed id can't write a permanently unreadable row), and every `delete` id. Guards should be cheap (prefix checks preferred); ids must carry their type in-band: **an id must be classifiable by inspection**.
+The registry's `matches` guards must **partition the id space**: for every id the cache will ever see (requests, primary results, supplemental results, deletes), exactly one entry must match. `cache.classify(id)` evaluates _every_ guard: zero matches throws `UnclassifiableIdError`, two or more throws `AmbiguousResourceTypeError` — fail loud over first-match-wins, so a registry overlap is caught the first time it occurs. Classification runs on every `get`/`getUnbatched` request id, every stored entry id (primary _and_ supplemental, all validated before anything persists — a producer minting a malformed id can't write a permanently unreadable row), and every `delete` id. Guards should be cheap (prefix checks preferred); ids must carry their type in-band: **an id must be classifiable by inspection**.
 
 A cache with exactly **one** resource type doesn't have to name it — `singleTypeCacheOptions` builds the whole options bag, naming the type after the cache (override with `resourceTypeName`):
 
 ```ts
 const cache = new Cache(
-  singleTypeCacheOptions<TicketSchema>()({ store, name: "zendesk_ticket_schemas" }),
+  singleTypeCacheOptions<TicketSchema>()({
+    store,
+    name: "zendesk_ticket_schemas",
+  }),
 );
 ```
 
-By default its sole type accepts every id, so classification never fails and the id space is `string`. Spread the result to set anything else `CacheOptions` accepts. The one thing it gives up is precision of the resource-type *name*: `classify()` returns `string` rather than a literal, which is the point of not having to pick one.
+By default its sole type accepts every id, so classification never fails and the id space is `string`. Spread the result to set anything else `CacheOptions` accepts. The one thing it gives up is precision of the resource-type _name_: `classify()` returns `string` rather than a literal, which is the point of not having to pick one.
 
 To narrow the id space below `string` — template-literal or branded ids flowing through to every request, producer, and entry type — pass a **real guard** as `validateId`:
 
@@ -57,7 +60,7 @@ const cache = new Cache(
 );
 ```
 
-`validateId` is *required* as soon as the id space is narrower than `string`, so a narrowed id type always has a runtime check behind it — naming a narrow `Id` by explicit type argument without supplying the guard is a compile error. The store needs no type argument to earn the narrowing: `Id` comes from the guard alone, and the store is only checked for coverage (see below).
+`validateId` is _required_ as soon as the id space is narrower than `string`, so a narrowed id type always has a runtime check behind it — naming a narrow `Id` by explicit type argument without supplying the guard is a compile error. The store needs no type argument to earn the narrowing: `Id` comes from the guard alone, and the store is only checked for coverage (see below).
 
 Writing the one-entry registry out by hand stays equivalent, and is the better choice when you also want the literal resource-type name:
 
@@ -81,10 +84,14 @@ So the cache doesn't require a match: it captures the store's own spec and only 
 
 ```ts
 const store = new MemoryStore<SpecOf<typeof everyResourceTypeWeHave>>();
-const cache = new Cache({ store, name: "stories", resourceTypes: storiesResourceTypes });
+const cache = new Cache({
+  store,
+  name: "stories",
+  resourceTypes: storiesResourceTypes,
+});
 ```
 
-A store that does *not* cover the registry is still rejected, so this convenience can't silently accept a store that would fail at runtime on an id it doesn't handle. The same rule applies to `singleTypeCacheOptions`, so one general-purpose store can back several single-type caches:
+A store that does _not_ cover the registry is still rejected, so this convenience can't silently accept a store that would fail at runtime on an id it doesn't handle. The same rule applies to `singleTypeCacheOptions`, so one general-purpose store can back several single-type caches:
 
 ```ts
 const store = new MemoryStore<SpecOf<typeof everyResourceTypeWeHave>>();
@@ -110,13 +117,21 @@ type StoriesCacheSpec = SpecOf<typeof storiesResourceTypes>;
 // Per-id content narrowing on read:
 const storyRes = await cache.get({ id: "story:1", params: {}, directives: {} });
 //    storyRes.usable?.content has type `Story | undefined`
-const collRes = await cache.get({ id: "collection:top", params: {}, directives: {} });
+const collRes = await cache.get({
+  id: "collection:top",
+  params: {},
+  directives: {},
+});
 //    collRes.usable?.content has type `Story[] | undefined`
 
 // The (id, content) pair is also enforced on write:
 await cache.store([
-  { id: "story:1", content: aStory, directives: { freshUntilAge: 60 } },           // ok
-  { id: "collection:top", content: [story1, story2], directives: { freshUntilAge: 60 } }, // ok
+  { id: "story:1", content: aStory, directives: { freshUntilAge: 60 } }, // ok
+  {
+    id: "collection:top",
+    content: [story1, story2],
+    directives: { freshUntilAge: 60 },
+  }, // ok
   // @ts-expect-error -- can't store a Story[] under a story:* id
   { id: "story:bad", content: [story1], directives: { freshUntilAge: 60 } },
 ]);
@@ -131,7 +146,7 @@ Without batching, each `cache.get()` makes its own Store call. For `PostgresStor
 A Store declares exactly one read primitive. MemoryStore implements `get(request)`. PostgresStore and SqliteStore implement `getMany(requests)`.
 Read through a Cache. The Cache adapts to either primitive, and it publishes diagnostics for each Store read.
 
-Both Cache methods accept `{ signal, autoBatch?: false }`. Bulk-capable stores accumulate calls by default; single-only stores dispatch promptly.
+`cache.get()` reads one request. With a bulk-capable Store, it joins the automatic accumulation. `cache.getUnbatched()` reads a known set as one Store call, sent promptly. Both accept `{ signal }`. Single-only stores dispatch every read promptly.
 Configure the accumulation scheduler with `readBatching`. Its maximum batch size, 20 by default, limits only accumulated reads. Dispatch runs after Promise continuations.
 
 ```ts
@@ -141,9 +156,11 @@ const cache = new Cache({
   resourceTypes: visitsResourceTypes,
   readBatching: { maxBatchSize: 20, batchScheduleFn: setImmediate },
 });
-const partial = await cache.getMany(requests);
+const lookups = await Promise.all(
+  requests.map((request) => cache.get(request)),
+);
+const partial = await cache.getUnbatched(requests);
 const complete = throwIfAnyError(partial);
-await cache.getMany(requests, { autoBatch: false });
 ```
 
 - **Requests share one Store call, never one result.** Each `get()` still classifies its own id, evaluates freshness at its own `now`, selects its own entry, and publishes its own `read` message. So a batched `get()` that succeeds returns what an unbatched one returns. Accumulation never caches or shares results, even for identical requests.
@@ -151,8 +168,8 @@ await cache.getMany(requests, { autoBatch: false });
 - **The Store call runs in the first caller's async context.** The batch binds the async context (for example, `AsyncLocalStorage` stores and the active tracing span) of the `get()` that opened it, with the default or a custom scheduler. So the query's span appears in that caller's trace only.
 - **One request's input can fail other requests.** For example, Postgres rejects a statement that binds an id with U+0000. When the whole Store call fails, every slot in it receives that Error, including other callers' requests.
 
-`autoBatch: false` sends the supplied known set promptly as one call to the Store's bulk primitive. The batch limit does not split it. It does not force individual reads.
-Only `false` is an explicit override. Constructor settings control scheduling, not participation defaults.
+`getUnbatched()` sends the supplied known set promptly as one call to the Store's bulk primitive. The batch limit does not split it. It does not force individual reads.
+Constructor settings control scheduling only. The method a caller picks decides whether a read accumulates.
 
 Bulk reads return positional lookup results or Error slots. Empty entry arrays represent successful misses.
 An operational failure of an entire Store call fills every affected slot with the same Error. Cancellation and package contract violations reject the call.
@@ -377,13 +394,13 @@ Subscribers must use bounded cache names, resource types, operation kinds, and o
 
 See [`diagnostics.ts`](./src/diagnostics.ts) for the message types. Logical read, fetch, and store-entry messages carry `{ cache, resourceType }` attribution — the cache instance's `name` and the classified resource-type name — so subscribers can build per-cache, per-resource-type metrics with no name threading. (`produce` covers a whole invocation, so it carries `cache` at the top level and each element's `resourceType` inside `requests[]`.) `read-store` messages carry only `cache` because one Store read can mix resource types. Each channel exports its name constant, its message type, and a typed channel object (`TypedChannel`).
 
-| Channel                      | Cardinality                                                                              | Message highlights                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ---------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@zingage/cache:read`        | One per cache lookup (`Cache.get`; per request for `getMany`) — including direct callers | `found`: `"usable"` \| `"usable-while-revalidate"` \| `"usable-if-error"` \| `"none"`, evaluated against the request's directives; plus `vary` — identifying the selected entry's variant — on the three entry-selecting results, and omitted on the others. Bypass requests never appear (they skip the read). A read the store _failed_ publishes `found: "read-failed"` with the `error` — one message per request in the failed call — and _then_ the error propagates, which keeps the channel a total denominator. An **aborted** read emits nothing. |
-| `@zingage/cache:read-store`  | One per actual Store read: automatic or direct                                           | Cache name, Store method, automatic or direct, success/failure/cancellation, dispatched and failed request counts, returned entry count, Store duration, and summed caller queue wait. No resource IDs or payloads.                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `@zingage/cache:fetch`       | One per logical request to a producer client, at settlement                              | `disposition`: `served-from-cache`, `served-stale-while-revalidating`, `served-stale-after-error`, `served-from-producer`, `producer-error`, `cache-read-error`, or `aborted`; `collapsed` (the settlement rode an in-flight invocation; cache-served settlements report `false` even when they attached a background revalidation as a rider); cache-served dispositions carry `vary` (identifying the served entry's variant) and producer-path dispositions carry `directivesImpliedBypass`.                                                                                                                                                 |
-| `@zingage/cache:produce`     | One per actual producer invocation (foreground misses AND background revalidations)      | `trigger`: `"miss"` \| `"revalidation"` \| `"bypass"` \| `"mixed"` (the invocation's initiating cause; riders never re-label); `requests[]` (`{resourceType, resourceId}`, in the order the producer received them — a bulk batch MAY span resource types, so read each element's own `resourceType`); `collapsedCallerCount`; `outcome`; `failedRequestCount`; `durationMs`. `failedRequestCount` counts Error slots in a resolved bulk result, or every request if the invocation rejects or violates its contract.                                                                                                                           |
-| `@zingage/cache:store-entry` | One per entry passed to `Cache.store()` (supplementals attributed to their own type)     | `resourceId`, `vary`, `validators`, `relationshipToExistingStoredData` (`"is-new"` \| `"unchanged"` \| `"changed"` \| `undefined`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Channel                      | Cardinality                                                                                   | Message highlights                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@zingage/cache:read`        | One per cache lookup (`Cache.get`; per request for `getUnbatched`) — including direct callers | `found`: `"usable"` \| `"usable-while-revalidate"` \| `"usable-if-error"` \| `"none"`, evaluated against the request's directives; plus `vary` — identifying the selected entry's variant — on the three entry-selecting results, and omitted on the others. Bypass requests never appear (they skip the read). A read the store _failed_ publishes `found: "read-failed"` with the `error` — one message per request in the failed call — and _then_ the error propagates, which keeps the channel a total denominator. An **aborted** read emits nothing.                                                                                                                                                    |
+| `@zingage/cache:read-store`  | One per actual Store read: automatic or direct                                                | Cache name, Store method, automatic or direct, success/failure/cancellation, dispatched and failed request counts, returned entry count, Store duration, and summed caller queue wait. No resource IDs or payloads.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `@zingage/cache:fetch`       | One per logical request to a producer client, at settlement                                   | `disposition`: `served-from-cache`, `served-stale-while-revalidating`, `served-stale-after-error`, `served-from-producer`, `producer-error`, `cache-read-error`, or `aborted`; `collapsed` (the settlement rode an in-flight invocation; cache-served settlements report `false` even when they attached a background revalidation as a rider); cache-served dispositions carry `vary` (identifying the served entry's variant) and producer-path dispositions carry `directivesImpliedBypass`.                                                                                                                                                                                                                |
+| `@zingage/cache:produce`     | One per actual producer invocation (foreground misses AND background revalidations)           | `trigger`: `"miss"` \| `"revalidation"` \| `"bypass"` \| `"mixed"` (the invocation's initiating cause; riders never re-label); `requests[]` (`{resourceType, resourceId}`, in the order the producer received them — a bulk batch MAY span resource types, so read each element's own `resourceType`); `collapsedRequestCount` (requests that rode this invocation's tasks instead of starting producer work: 0 for a lone request; a background revalidation that rides counts too, though it has no `fetch` message); `outcome`; `failedRequestCount`; `durationMs`. `failedRequestCount` counts Error slots in a resolved bulk result, or every request if the invocation rejects or violates its contract. |
+| `@zingage/cache:store-entry` | One per entry passed to `Cache.store()` (supplementals attributed to their own type)          | `resourceId`, `vary`, `validators`, `relationshipToExistingStoredData` (`"is-new"` \| `"unchanged"` \| `"changed"` \| `undefined`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 A cache's unit of storage is the `(id, vary)` **pair**, where `vary` is the normalized paramName→value map that defines a **variant**: a producer that varies on request params writes one entry per variant under one id. So the three channels that can identify a variant all report the same normalized `vary` object — `store-entry` for the entry written, `read`/`fetch` for the entry a lookup _selected_ — which is what lets a subscriber attribute serves to the exact stored variant (e.g. how many times one version was served before a newer one replaced it) instead of smearing every variant's serves onto whichever variant stored first. Where no variant was served the key is **omitted**, never published as `{}`, because `{}` identifies a real variant — the only one a non-varying producer ever writes. That covers `found: "none"`/`"read-failed"`/`"aborted"` on `read`, and every producer-path disposition on `fetch` — including `served-from-producer`, which did hand the caller a value: that value came from the origin, not a stored variant, and the variant it lands in is reported on `store-entry` if and when the write succeeds.
 
@@ -391,7 +408,7 @@ A cache's unit of storage is the `(id, vary)` **pair**, where `vary` is the norm
 
 `fetch` and `produce` are the two spans of one story with different subjects and cardinalities: a `fetch` is the consumer-side span (one per logical request); a `produce` is the origin-side span (one per invocation). N collapsed callers ride one invocation, one bulk invocation covers many requests, a stale-while-revalidate refresh settles _after_ its triggering fetch already shipped, and an `aborted` fetch settles _before_ its invocation does (the shared producer call keeps running and stores in the background).
 
-`read-store` covers every actual Store read: automatic batches and direct `Cache.get`/`Cache.getMany` calls. `operation` identifies the Store method. Empty direct calls and entirely cancelled queued batches emit nothing. `requestCount` counts dispatched slots, including duplicates. `failedRequestCount` counts Error slots, or every request on whole-operation failure. `entryCount` counts entries in successful slots, even when another slot fails; whole-operation failures report zero entries. `queueWaitTotalMs / requestCount` gives mean dispatched caller queue wait; direct calls report zero. `durationMs` covers the Store call, not database execution time or a physical query count: a Store may issue multiple queries or use no database.
+`read-store` covers every actual Store read: automatic batches and direct `Cache.getUnbatched` calls. `operation` identifies the Store method. Empty direct calls and entirely cancelled queued batches emit nothing. `requestCount` counts dispatched slots, including duplicates. `failedRequestCount` counts Error slots, or every request on whole-operation failure. `entryCount` counts entries in successful slots, even when another slot fails; whole-operation failures report zero entries. `queueWaitTotalMs / requestCount` gives mean dispatched caller queue wait; direct calls report zero. `durationMs` covers the Store call, not database execution time or a physical query count: a Store may issue multiple queries or use no database.
 
 The package does not calculate returned payload bytes, serialize values for telemetry, choose metric tags, or create monitors. Subscribers own aggregation and telemetry costs.
 
@@ -407,6 +424,8 @@ Upgrading from 1.6.0, whose single channel reported a `status` string: `hit` →
 - Replace `wrapBulkHashedInputProducer` with `wrapHashedInputProducer` and move its capability into `produceMany`.
 - Move typed `hashedInputProducer` descriptors into the matching capability field.
 - Handle bulk Error slots or explicitly call `throwIfAnyError`.
+- Replace `Cache.getMany(requests)` with `Cache.get` for each request, so that reads from many calls share Store calls. Use `Cache.getUnbatched(requests)` instead for a known set when you don't want batching: it sends the set as one Store call.
+- Replace `CacheReadFound` with `CacheReadMessage["found"]`. Narrow on `found` instead of using `CacheReadFoundWithEntry`.
 - Read through a Cache instead of reading a Store directly. The package no longer exports `getOne`, `getMany`, or `naiveGetMany`.
 - Close all clients before their shared Cache, then close externally owned producer dependencies and database pools.
 

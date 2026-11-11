@@ -589,9 +589,10 @@ describe("wrapProducer with produceMany", () => {
       it("should throw when cache read fails and onCacheReadFailure is 'throw'", async () => {
         const { cache } = makeTestStoreAndCache();
 
-        // Mock cache.getMany to simulate a cache read failure
-        const originalGetMany = cache.getMany.bind(cache);
-        cache.getMany = async () => {
+        // Mock cache.get, which the wrapper's automatic path calls per
+        // request, to simulate a cache read failure
+        const originalGet = cache.get.bind(cache);
+        cache.get = async () => {
           throw new Error("Cache read error");
         };
 
@@ -623,7 +624,7 @@ describe("wrapProducer with produceMany", () => {
           // Producer should not have been called
           assert.equal(bulkProducer.mock.callCount(), 0);
         } finally {
-          cache.getMany = originalGetMany;
+          cache.get = originalGet;
           await cache.close();
         }
       });
@@ -631,9 +632,10 @@ describe("wrapProducer with produceMany", () => {
       it("should fall back to producer when cache read fails and onCacheReadFailure is 'call-producer'", async () => {
         const { cache } = makeTestStoreAndCache();
 
-        // Mock cache.getMany to simulate a cache read failure
-        const originalGetMany = cache.getMany.bind(cache);
-        cache.getMany = async () => {
+        // Mock cache.get, which the wrapper's automatic path calls per
+        // request, to simulate a cache read failure
+        const originalGet = cache.get.bind(cache);
+        cache.get = async () => {
           throw new Error("Cache read error");
         };
 
@@ -668,7 +670,7 @@ describe("wrapProducer with produceMany", () => {
           // Producer should have been called
           assert.equal(bulkProducer.mock.callCount(), 1);
         } finally {
-          cache.getMany = originalGetMany;
+          cache.get = originalGet;
           await cache.close();
         }
       });
@@ -877,7 +879,7 @@ describe("wrapProducer with produceMany", () => {
         const finish = Promise.withResolvers<void>();
         const controller = new AbortController();
         const reason = new Error("abort during cache read");
-        const read = mock.method(cache, "getMany", async () => {
+        const read = mock.method(cache, "getUnbatched", async () => {
           started.resolve();
           await finish.promise;
           // The Cache completes normally despite cancellation. The wrapper must

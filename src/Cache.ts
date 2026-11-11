@@ -1,7 +1,9 @@
 import { sumBy } from "es-toolkit";
 import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
 import type { InvariantOf, ReadonlyDeep } from "type-fest";
+import type { PickEach } from "type-party";
 import {
+  type CacheReadMessage,
   cacheReadStoreChannel,
   cacheStoreEntryChannel,
   publishCacheRead,
@@ -57,7 +59,6 @@ import {
   type RequestScheduler,
 } from "./utils/requestScheduler.js";
 import {
-  asError,
   CacheContractError,
   readStoreObserved,
   raceWithSignal,
@@ -66,8 +67,8 @@ import {
   timeSlicedMapNonEmpty,
 } from "./utils/utils.js";
 
-/** Omission selects capability-driven accumulation; false sends the set as one Store call. */
-export type ReadOptions = { signal?: AbortSignal; autoBatch?: false };
+/** Options for {@link Cache.get} and {@link Cache.getUnbatched}. */
+export type ReadOptions = { signal?: AbortSignal };
 
 /**
  * Thrown when an id matches zero resource types in the cache's registry.
@@ -216,7 +217,7 @@ export type CacheOptions<
   /**
    * Configure accumulation for bulk-capable Stores. The default limit is 20 and
    * applies only to accumulated reads. Single-only Stores dispatch promptly.
-   * Per-call autoBatch: false sends the call's set as one Store call.
+   * `getUnbatched` sends its set as one Store call instead.
    */
   readBatching?: BatchOptions;
 };
@@ -307,7 +308,7 @@ export default class Cache<
     const unboundLogger = options.logger ?? defaultLoggersByComponent.cache;
     this.#logger = unboundLogger.bind(null, "cache");
     this.#dataStore = options.store;
-    // No makeKey: reads never share work (see the Store read in getMany).
+    // No makeKey: reads never share work (see the Store read in get).
     this.#readScheduler =
       this.#dataStore.getMany === undefined
         ? undefined
@@ -351,7 +352,7 @@ export default class Cache<
    * (rather than first-match-wins) so registry overlaps are caught the first
    * time an id hits them.
    *
-   * Classification runs on every get/getMany request id, every stored entry
+   * Classification runs on every get/getUnbatched request id, every stored entry
    * id (primary and supplemental), and every delete id -- classification
    * failures reject the operation BEFORE touching the store.
    *
@@ -434,8 +435,9 @@ export default class Cache<
    * error if the store threw (and then the error still propagates). An
    * *aborted* read emits nothing, matching the `throwIfAborted` fast path.
    *
-   * A bulk-capable Store accumulates reads by default. Set `autoBatch: false`
-   * on this call to dispatch immediately, as one Store call.
+   * A bulk-capable Store accumulates reads from many `get` calls into shared
+   * Store calls. Use {@link Cache.getUnbatched} to send a known set as one
+   * Store call instead.
    * If Store.getMany returns an Error in this request's slot, only this caller
    * rejects. Other callers in the automatic batch retain their hits or misses.
    * A rejected store promise rejects every non-cancelled caller in the batch.
@@ -444,16 +446,123 @@ export default class Cache<
     req: ReadonlyConsumerRequest<Params, Id>,
     options?: ReadOptions,
   ): Promise<CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>> {
-    const results = await this.getMany([req] as const, options);
-    const result = results[0];
-    if (result instanceof Error) throw result;
+    options?.signal?.throwIfAborted();
+    // Classify up front: a classification failure rejects before we touch the
+    // store.
+    const resourceType = this.classify(req.id);
+
+    const readStartedAt = performance.now();
+    const publishRead = (
+      outcome: PickEach<CacheReadMessage, "found" | "vary" | "error">,
+    ) => {
+      publishCacheRead({
+        cache: this.name,
+        resourceType,
+        resourceId: req.id,
+        durationMs: performance.now() - readStartedAt,
+        ...outcome,
+      });
+    };
+
+    if (this.#closed) {
+      if (this.#onGetAfterClose === "throw") {
+        this.#logger("trace", "received get request when closed and throwing");
+        throw new Error("Store has been closed...");
+      }
+      this.#logger(
+        "trace",
+        "received get request when closed, so returning no entries",
+      );
+      publishRead({ found: "none" });
+      return { validatable: [] };
+    }
+
+    const now = new Date();
+    this.#logger("trace", "received get request", {
+      id: req.id,
+      params: req.params,
+    });
+
+    const storeRequest = {
+      id: req.id,
+      params: this.normalizeParams(req.params),
+    };
+
+    // Unlike producer invocations, store reads are NOT collapsed: N concurrent
+    // identical requests get N separate lookup results. A point read is cheap
+    // next to the producer calls collapsing exists to protect.
+    //
+    // Read batching does not change that. It batches the QUERY only: the
+    // accumulated reads share one `store.getMany()` call, but each request
+    // still gets its own slot of that call's result, and the code below still
+    // classifies it against this call's own `now`. Requests share one query,
+    // never one result.
+    //
+    // Worth knowing if that ever changes: reads must not reuse results across
+    // a time window the way producer invocations do. A lookup result is a
+    // freshness decision evaluated at a specific `now`, so replaying one
+    // serves decisions computed against a stale clock. Only a PENDING-only
+    // promise share is sound, which bounds the skew to the read's own
+    // duration.
+    const read =
+      this.#readScheduler === undefined
+        ? this.#readStore([storeRequest] as const, options).then(
+            ([entries]) => {
+              if (entries instanceof Error) throw entries;
+              return entries;
+            },
+          )
+        : this.#readScheduler.attach(
+            [
+              {
+                request: storeRequest,
+                ...(options?.signal ? { signal: options.signal } : {}),
+              },
+            ],
+            true,
+          )[0]!.promise;
+
+    const cacheEntries = await raceWithSignal(read, options?.signal).catch(
+      (error: unknown) => {
+        // An *aborted* read is not a failed read: the caller cancelled, and
+        // aborts already emit nothing (the `throwIfAborted` at the top of this
+        // method rejects before any message), so staying silent keeps that
+        // consistent instead of inflating read-failure rates with client
+        // cancellations.
+        if (options?.signal?.aborted !== true) {
+          publishRead({ found: "read-failed", error });
+        }
+
+        throw error;
+      },
+    );
+
+    this.#logger("trace", "received entries from the store", {
+      resultCount: cacheEntries.length,
+    });
+
+    const { result, outcome } = this.#processCacheEntries(
+      cacheEntries as unknown as Entry<
+        SpecForId<SpecOf<RT>, Id>,
+        Validators,
+        Params
+      >[],
+      req.directives,
+      now,
+      { requestIndex: 0 },
+    );
+    publishRead(outcome);
     return result;
   }
 
   /**
-   * Read a known set and preserve positional successes and operational errors.
-   * Cancellation and invalid contracts reject the complete public call.
-   * Both read shapes use the same capability-driven accumulation policy.
+   * Read a known set as one Store call, sent promptly. The call never joins
+   * the automatic accumulation that {@link Cache.get} uses, and the batch
+   * limit does not split it. A Store without `getMany` reads each request
+   * with `get` instead.
+   *
+   * Preserves positional successes and operational errors. Cancellation and
+   * invalid contracts reject the complete public call.
    *
    * The result is a tuple typed per-request: each output slot's content type
    * is narrowed to the spec variants compatible with the corresponding input
@@ -469,7 +578,7 @@ export default class Cache<
    * @returns Promise that resolves to one CacheLookupResult or Error per
    * request, in the same order as the input requests
    */
-  public async getMany<
+  public async getUnbatched<
     const Reqs extends readonly ReadonlyConsumerRequest<
       Params,
       SpecOf<RT>["id"]
@@ -490,7 +599,7 @@ export default class Cache<
     const readStartedAt = performance.now();
     const publishRead = (
       i: number,
-      outcome: CacheReadOutcome | { found: "read-failed"; error: unknown },
+      outcome: PickEach<CacheReadMessage, "found" | "vary" | "error">,
     ) => {
       publishCacheRead({
         cache: this.name,
@@ -505,13 +614,13 @@ export default class Cache<
       if (this.#onGetAfterClose === "throw") {
         this.#logger(
           "trace",
-          "received getMany request when closed and throwing",
+          "received getUnbatched request when closed and throwing",
         );
         throw new Error("Store has been closed...");
       }
       this.#logger(
         "trace",
-        "received getMany request when closed, so returning no entries",
+        "received getUnbatched request when closed, so returning no entries",
       );
       return mapNonEmpty(requests, (_req, i) => {
         publishRead(i, { found: "none" });
@@ -520,56 +629,21 @@ export default class Cache<
     }
 
     const now = new Date();
-    this.#logger("trace", "received getMany request", {
+    this.#logger("trace", "received getUnbatched request", {
       requestCount: requests.length,
       requests: requests.map((r) => ({ id: r.id, params: r.params })),
     });
     this.#logger("trace", "requested entries from the store");
 
-    const storeRequests = mapNonEmpty(requests, (req) => ({
+    // Store requests retain separate slots, even when their IDs are equal.
+    // Freshness belongs to each logical read, never to shared physical work.
+    const storeRequests = await timeSlicedMapNonEmpty(requests, (req) => ({
       id: req.id,
       params: this.normalizeParams(req.params),
     }));
 
-    // Store requests retain separate slots, even when their IDs are equal.
-    // Freshness belongs to each logical read, never to shared physical work.
-    //
-    // Unlike producer invocations, store reads are NOT collapsed: N concurrent
-    // identical requests get N separate lookup results. A point read is cheap
-    // next to the producer calls collapsing exists to protect.
-    //
-    // Read batching does not change that. It batches the QUERY only: the
-    // accumulated reads share one `store.getMany()` call, but each request
-    // still gets its own slot of that call's result, and the code below still
-    // classifies it against this call's own `now`. Requests share one query,
-    // never one result.
-    //
-    // Worth knowing if that ever changes: reads must not reuse results across
-    // a time window the way producer invocations do. A lookup result is a
-    // freshness decision evaluated at a specific `now`, so replaying one
-    // serves decisions computed against a stale clock. Only a PENDING-only
-    // promise share is sound, which bounds the skew to the read's own
-    // duration.
     const cacheEntriesForRequests = await raceWithSignal(
-      this.#readScheduler !== undefined && options?.autoBatch !== false
-        ? Promise.all(
-            this.#readScheduler
-              .attach(
-                storeRequests.map((request) => ({
-                  request,
-                  ...(options?.signal ? { signal: options.signal } : {}),
-                })),
-                true,
-              )
-              .map(({ promise }) =>
-                promise.catch((error: unknown) => {
-                  options?.signal?.throwIfAborted();
-                  if (error instanceof CacheContractError) throw error;
-                  return asError(error);
-                }),
-              ),
-          )
-        : this.#readStore(storeRequests, options),
+      this.#readStore(storeRequests, options),
       options?.signal,
     ).catch((error: unknown) => {
       // One message PER REQUEST, not one per call, before the error
@@ -599,7 +673,7 @@ export default class Cache<
 
     // Classifying entries is synchronous, so yield between requests to keep a
     // large known set from blocking the event loop.
-    return (await timeSlicedMapNonEmpty(requests, (req, i) => {
+    return await timeSlicedMapNonEmpty(requests, (req, i) => {
       const cacheEntries = cacheEntriesForRequests[i]!;
       if (cacheEntries instanceof Error) {
         publishRead(i, { found: "read-failed", error: cacheEntries });
@@ -614,7 +688,7 @@ export default class Cache<
       );
       publishRead(i, outcome);
       return result;
-    })) as GetManyResults<Reqs, RT, Validators, Params>;
+    });
   }
 
   /**
@@ -827,7 +901,7 @@ export default class Cache<
    * CacheLookupResult and the {@link CacheReadOutcome} that describes it for
    * the read channel. Shared entry helpers own classification and selection,
    * including the selected entry and diagnostic outcome. This method adds
-   * request-scoped logging for get() and getMany(). Pending-write lookups use
+   * request-scoped logging for get() and getUnbatched(). Pending-write lookups use
    * the same helpers, so they cannot drift from the cache's selection rules.
    */
   #processCacheEntries<Id extends SpecOf<RT>["id"]>(
@@ -857,7 +931,7 @@ export default class Cache<
 }
 
 /**
- * {@link Cache.getMany}'s return type: one {@link CacheLookupResult} per
+ * {@link Cache.getUnbatched}'s return type: one {@link CacheLookupResult} per
  * request, each narrowed to the spec variants its own request's id selects.
  * Named once because it is spelled both in the signature and in the
  * empty-input early return.

@@ -95,8 +95,6 @@ export {
   type CacheReadStoreMessage,
   CACHE_READ_CHANNEL_NAME,
   cacheReadChannel,
-  type CacheReadFound,
-  type CacheReadFoundWithEntry,
   type CacheReadMessage,
   CACHE_STORE_ENTRY_CHANNEL_NAME,
   cacheStoreEntryChannel,

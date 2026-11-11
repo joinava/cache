@@ -492,7 +492,7 @@ describe("Cache", { concurrency: true }, () => {
       });
     });
 
-    describe("Cache.getMany", () => {
+    describe("Cache.getUnbatched", () => {
       it("should reject immediately with an already-aborted signal", async () => {
         const cache = cacheOver(memoryStore);
         const controller = new AbortController();
@@ -500,7 +500,7 @@ describe("Cache", { concurrency: true }, () => {
 
         try {
           await cache
-            .getMany([{ id: "a", params: {}, directives: {} }], {
+            .getUnbatched([{ id: "a", params: {}, directives: {} }], {
               signal: controller.signal,
             })
             .then(throwIfAnyError);
@@ -527,7 +527,7 @@ describe("Cache", { concurrency: true }, () => {
 
         try {
           await cache
-            .getMany([{ id: "fwd-test-a", params: {}, directives: {} }], {
+            .getUnbatched([{ id: "fwd-test-a", params: {}, directives: {} }], {
               signal: controller.signal,
             })
             .then(throwIfAnyError);
@@ -553,7 +553,7 @@ describe("Cache", { concurrency: true }, () => {
 
         const controller = new AbortController();
         const results = await cache
-          .getMany(
+          .getUnbatched(
             ids.map((id) => ({ id, params: {}, directives: {} })),
             { signal: controller.signal },
           )

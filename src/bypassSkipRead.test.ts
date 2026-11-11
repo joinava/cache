@@ -78,7 +78,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
         autoBatched: false,
         trigger: "bypass",
         requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-        collapsedCallerCount: 1,
+        collapsedRequestCount: 0,
         outcome: "success",
       });
 
@@ -251,7 +251,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       const triggers = capture.produce.map((m) => m.trigger).sort();
       expect(triggers).to.deep.equal(["bypass", "miss"]);
       capture.produce.forEach((m) => {
-        expect(m.collapsedCallerCount).to.equal(1);
+        expect(m.collapsedRequestCount).to.equal(0);
       });
 
       // Only the plain request consulted the cache.
@@ -416,7 +416,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
         autoBatched: false,
         trigger: "bypass",
         requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-        collapsedCallerCount: 2,
+        collapsedRequestCount: 1,
         outcome: "success",
         minDurationMs: 50,
       });

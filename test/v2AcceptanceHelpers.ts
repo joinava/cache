@@ -373,10 +373,10 @@ export function expectCachePathFetch(
  * deep-equaled. `requests` are compared order-insensitively (batch order
  * within one bulk invocation isn't documented).
  *
- * `collapsedCallerCount` is the initiator plus every rider, and counts
- * ATTACHMENT rather than settlement dependence: a lone caller reports 1, one
- * rider makes 2, and a background revalidation with no waiting foreground
- * caller reports 1.
+ * `collapsedRequestCount` counts the requests that rode the invocation's
+ * tasks, and counts ATTACHMENT rather than settlement dependence: a lone
+ * request reports 0, one rider makes 1, and a background revalidation that
+ * rides counts like any other rider.
  */
 export function expectProduceMessage(
   msg: CapturedProduceMessage | undefined,
@@ -385,7 +385,7 @@ export function expectProduceMessage(
     autoBatched: boolean;
     trigger: "miss" | "revalidation" | "bypass";
     requests: readonly { resourceType: string; resourceId: string }[];
-    collapsedCallerCount: number;
+    collapsedRequestCount: number;
     outcome: "success" | "error";
     failedRequestCount?: number;
     minDurationMs?: number;
@@ -404,7 +404,7 @@ export function expectProduceMessage(
     autoBatched: expected.autoBatched,
     requestCount: expected.requests.length,
     trigger: expected.trigger,
-    collapsedCallerCount: expected.collapsedCallerCount,
+    collapsedRequestCount: expected.collapsedRequestCount,
     outcome: expected.outcome,
     failedRequestCount:
       expected.failedRequestCount ??

@@ -672,8 +672,8 @@ export default function wrapProducer<
   // and every ordinary lookup merges that overlay with the store's candidates.
   //
   // Each dispatch also publishes one `produce` diagnostics message when the
-  // producer settles (one message per actual invocation; collapsed callers
-  // share one).
+  // producer settles (one message per actual invocation; requests that
+  // collapse onto it share it).
   const scheduler = createRequestScheduler<Work, Produced>({
     bulk: bulk !== undefined,
     ...options.producerBatching,
@@ -780,9 +780,10 @@ export default function wrapProducer<
               resourceType: request.resourceType,
               resourceId: request.request.id,
             })),
-            collapsedCallerCount: new Set(
-              tasks.flatMap((task) => [...task.attachedCallers()]),
-            ).size,
+            collapsedRequestCount: tasks.reduce(
+              (sum, task) => sum + task.collapsedRequestCount(),
+              0,
+            ),
             failedRequestCount: tasks.length,
             outcome: "error",
             durationMs: performance.now() - startedAt,
@@ -804,9 +805,10 @@ export default function wrapProducer<
             resourceType: request.resourceType,
             resourceId: request.request.id,
           })),
-          collapsedCallerCount: new Set(
-            tasks.flatMap((task) => [...task.attachedCallers()]),
-          ).size,
+          collapsedRequestCount: tasks.reduce(
+            (sum, task) => sum + task.collapsedRequestCount(),
+            0,
+          ),
           failedRequestCount: results.filter(
             (result) => result instanceof Error,
           ).length,
@@ -897,7 +899,6 @@ export default function wrapProducer<
     startedAt = performance.now(),
   ): Promise<(ResultEntry | Error)[]> => {
     const { signal } = callOptions;
-    const caller = {};
     const batching = callOptions.autoBatch;
 
     // Classify every ID before dispatch. Contract failures never become slot errors.
@@ -984,9 +985,9 @@ export default function wrapProducer<
     // when their own Store invocation finishes, without a whole-set barrier.
     const directReads =
       batching?.store === false && eligible.length > 0
-        ? cache.getMany(
+        ? cache.getUnbatched(
             eligible.map(({ readRequest }) => readRequest),
-            { ...(signal === undefined ? {} : { signal }), autoBatch: false },
+            signal === undefined ? {} : { signal },
           )
         : undefined;
     const readByItem = new Map(
@@ -1050,7 +1051,6 @@ export default function wrapProducer<
             : ("miss" as const),
       },
       background,
-      caller,
       // No signal for a background refresh: it is fire-and-forget work, and
       // the caller has already been given a (stale) result.
       ...(background ? {} : { signal }),

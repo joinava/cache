@@ -22,6 +22,11 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
 - Rename the `@zingage/cache:read-batch` diagnostics channel to
   `@zingage/cache:read-store`, with exports `CACHE_READ_STORE_CHANNEL_NAME`,
   `cacheReadStoreChannel`, and `CacheReadStoreMessage`. No aliases are provided.
+- Replace the produce message's `collapsedCallerCount` with
+  `collapsedRequestCount`: the requests that rode the invocation's tasks
+  instead of starting producer work. A lone request reports 0, not 1. Bulk
+  producers now collapse per request, so the count stays meaningful when one
+  invocation serves several callers.
 - Remove `Cache.emitter` and its `store` event. Observe Store writes through
   `cacheStoreEntryChannel`.
 - Close producer clients before their shared Cache, then close externally

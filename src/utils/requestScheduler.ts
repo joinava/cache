@@ -33,12 +33,12 @@ export type DispatchedRequest<Request> = {
    */
   readonly request: Request;
   /**
-   * The number of distinct callers attached to this task so far (the
-   * initiator plus any riders that joined via request collapsing). Live: read
-   * it at publish time.
+   * The number of attachments that rode this task so far. Each one is a
+   * request that collapsing served without starting new work. The attachment
+   * that created the task does not count. Live: read it at publish time, so
+   * that riders that attach while the task runs count too.
    */
-  readonly attachedCallerCount: () => number;
-  readonly attachedCallers: () => ReadonlySet<object>;
+  readonly collapsedRequestCount: () => number;
   readonly queueWaitMs: number;
   /**
    * True when the scheduler dispatched this request from its automatic queue.
@@ -60,7 +60,7 @@ export type DispatchedRequest<Request> = {
  * It adds support for invocation telemetry:
  *
  * - The dispatch function receives a {@link DispatchedRequest} per task, so it
- *   can publish invocation-scoped diagnostics (attached-caller count, queue
+ *   can publish invocation-scoped diagnostics (collapsed request count, queue
  *   wait). The producer wrappers carry each request's trigger inside the
  *   request, so the creator's trigger labels the task.
  * - Each attachment says whether it `rode` an already-pending task (true) or
@@ -134,8 +134,8 @@ export function createRequestScheduler<Request, Result>(
      * its caller's context.
      */
     context: ReturnType<typeof AsyncLocalStorage.snapshot> | undefined;
-    /** Distinct callers, reported as the collapsed caller count. */
-    callers: Set<object>;
+    /** Attachments that rode this task, reported as `collapsedRequestCount`. */
+    rides: number;
     /**
      * Live foreground attachments. When this reaches 0, a task that is still
      * queued and has no background request is cancelled.
@@ -198,8 +198,7 @@ export function createRequestScheduler<Request, Result>(
         options.dispatch(
           batch.map((task) => ({
             request: task.request,
-            attachedCallerCount: () => task.callers.size,
-            attachedCallers: () => task.callers,
+            collapsedRequestCount: () => task.rides,
             queueWaitMs: task.accumulated ? now - task.enqueuedAt : 0,
             autoBatched: automatic,
           })),
@@ -260,13 +259,11 @@ export function createRequestScheduler<Request, Result>(
         request: Request;
         background?: boolean;
         signal?: AbortSignal;
-        /** Identifies the logical caller for `attachedCallers`. */
-        caller?: object;
       }[],
       automatic: boolean,
     ) {
       const attached = requests.map(
-        ({ request, background = false, signal, caller }) => {
+        ({ request, background = false, signal }) => {
           signal?.throwIfAborted();
           const key = options.makeKey?.(request) ?? Symbol();
           signal?.throwIfAborted();
@@ -291,7 +288,7 @@ export function createRequestScheduler<Request, Result>(
                   options.bulk && automatic
                     ? AsyncLocalStorage.snapshot()
                     : undefined,
-                callers: new Set<object>(),
+                rides: 0,
                 participants: 0,
                 background: false,
                 state: "queued",
@@ -308,7 +305,7 @@ export function createRequestScheduler<Request, Result>(
             void task.result.promise.catch(() => {});
           }
 
-          if (caller !== undefined) task.callers.add(caller);
+          if (rode) task.rides += 1;
           task.participants += 1;
           task.background ||= background;
 

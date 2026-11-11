@@ -26,7 +26,6 @@ it(
     const attached = scheduler.attach(
       ["a", "b", "c"].map((request) => ({
         request,
-        caller: {},
         ...(request === "b" ? { signal: controller.signal } : {}),
       })),
       true,
@@ -65,7 +64,6 @@ it(
     const attached = scheduler.attach(
       ["a", "b", "c"].map((request) => ({
         request,
-        caller: {},
       })),
       true,
     );
@@ -98,7 +96,7 @@ it(
     });
     const requests = Array.from({ length: 21 }, (_, index) => index);
     const attached = scheduler.attach(
-      requests.map((request) => ({ request, caller: {} })),
+      requests.map((request) => ({ request })),
       true,
     );
     (await scheduled.promise)();
@@ -127,7 +125,7 @@ it(
       },
     });
     const attached = scheduler.attach(
-      ["a", "a"].map((request) => ({ request, caller: {} })),
+      ["a", "a"].map((request) => ({ request })),
       true,
     );
     (await scheduled.promise)();

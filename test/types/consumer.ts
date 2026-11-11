@@ -29,7 +29,7 @@ const cache = new Cache({
   resourceTypes: registry,
 });
 const cached = throwIfAnyError(
-  await cache.getMany([
+  await cache.getUnbatched([
     { id: "user:a", params: {}, directives: {} },
     { id: "count:a", params: {}, directives: {} },
   ] as const),

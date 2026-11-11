@@ -75,10 +75,10 @@ describe("Cache read batching", suiteOptions, () => {
         ]),
       );
 
-      // The same lookups with `autoBatch: false` on each call: one
+      // The same lookups through getUnbatched, one call each: one
       // single-request getMany call each, and the same results.
       const directResults = await Promise.all(
-        requests.map(async (req) => cache.get(req, { autoBatch: false })),
+        requests.map(async (req) => (await cache.getUnbatched([req]))[0]),
       );
       assert.deepEqual(getManyRequestCounts(), [10, ...Array(10).fill(1)]);
       assert.deepEqual(batchedResults, directResults);
@@ -423,7 +423,7 @@ describe(
   },
 );
 
-describe("autoBatch: false (direct Store reads)", suiteOptions, () => {
+describe("getUnbatched (direct Store reads)", suiteOptions, () => {
   it("dispatches a direct known set without waiting for the automatic queue", async (t) => {
     const { store, getManyRequestCounts } = spiedStore();
     const scheduled: (() => void)[] = [];
@@ -433,7 +433,7 @@ describe("autoBatch: false (direct Store reads)", suiteOptions, () => {
     });
     t.after(async () => await cache.close());
     const queued = cache.get(lookup("queued"));
-    await cache.getMany([lookup("a"), lookup("b")], { autoBatch: false });
+    await cache.getUnbatched([lookup("a"), lookup("b")]);
     assert.deepEqual(getManyRequestCounts(), [2]);
     scheduled.forEach((run) => run());
     await queued;
@@ -448,9 +448,9 @@ describe("autoBatch: false (direct Store reads)", suiteOptions, () => {
     });
     t.after(async () => await cache.close());
     const ids = ["a", "b", "c", "d", "e"].map((id) => lookup(id));
-    await cache.getMany(ids, { autoBatch: false });
+    await cache.getUnbatched(ids);
     assert.deepEqual(getManyRequestCounts(), [5]);
-    await cache.getMany(ids);
+    await Promise.all(ids.map(async (id) => cache.get(id)));
     assert.deepEqual(getManyRequestCounts(), [5, 2, 2, 1]);
     const client = wrapProducer({
       cache,
@@ -476,7 +476,9 @@ describe("autoBatch: false (direct Store reads)", suiteOptions, () => {
       readBatching: { batchScheduleFn: schedule },
     });
     t.after(async () => await cache.close());
-    await cache.getMany([lookup("a"), lookup("b")]);
+    await Promise.all(
+      [lookup("a"), lookup("b")].map(async (request) => cache.get(request)),
+    );
     assert.equal(read.mock.callCount(), 2);
     assert.equal(schedule.mock.callCount(), 0);
   });
@@ -516,7 +518,7 @@ describe("autoBatch: false (direct Store reads)", suiteOptions, () => {
     ]);
     const capture = captureChannels(cache.name);
     try {
-      const results = await cache.getMany([
+      const results = await cache.getUnbatched([
         lookup("hit"),
         lookup("failed"),
         lookup("miss"),
@@ -544,7 +546,7 @@ describe("autoBatch: false (direct Store reads)", suiteOptions, () => {
     );
     t.mock.method(store, "getMany", async () => []);
     await assert.rejects(
-      cache.getMany([lookup("hit")]),
+      cache.getUnbatched([lookup("hit")]),
       /one entry array or Error/,
     );
   });

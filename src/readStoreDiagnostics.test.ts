@@ -34,7 +34,9 @@ describe("read dispatch diagnostics", () => {
       capture.stop();
       await cache.close();
     });
-    const pending = cache.getMany([lookup("a"), lookup("b")]);
+    const pending = Promise.all(
+      [lookup("a"), lookup("b")].map(async (request) => cache.get(request)),
+    );
     clock.now = 70;
     scheduled.forEach((run) => run());
     await started.promise;
@@ -65,9 +67,7 @@ describe("read dispatch diagnostics", () => {
       capture.stop();
       await cache.close();
     });
-    const results = await cache.getMany([lookup("a"), lookup("b")], {
-      autoBatch: false,
-    });
+    const results = await cache.getUnbatched([lookup("a"), lookup("b")]);
     assert.equal(results[0], results[1]);
     assert.equal(capture.readStore.length, 1);
     assert.equal(capture.readStore[0]?.outcome, "failure");
@@ -102,8 +102,7 @@ describe("read-store channel", suiteOptions, () => {
         await cache.close();
       });
       const controller = new AbortController();
-      const read = cache.get(lookup("a"), {
-        autoBatch: false,
+      const read = cache.getUnbatched([lookup("a")], {
         signal: controller.signal,
       });
       const rejected = assert.rejects(read);
@@ -124,8 +123,8 @@ describe("read-store channel", suiteOptions, () => {
     });
   }
 
-  for (const autoBatch of [undefined, false] as const) {
-    it(`reports partial slots as failure for ${autoBatch === false ? "direct" : "automatic"} reads`, async (t) => {
+  for (const mode of ["automatic", "direct"] as const) {
+    it(`reports partial slots as failure for ${mode} reads`, async (t) => {
       const { store } = spiedStore({
         slotErrors: { bad: new Error("bad slot") },
       });
@@ -138,10 +137,15 @@ describe("read-store channel", suiteOptions, () => {
         capture.stop();
         await cache.close();
       });
-      const result = await cache.getMany(
-        [lookup("bad"), lookup("good")],
-        autoBatch === false ? { autoBatch } : undefined,
-      );
+      const requests = [lookup("bad"), lookup("good")];
+      const result =
+        mode === "direct"
+          ? await cache.getUnbatched(requests)
+          : await Promise.all(
+              requests.map(async (request) =>
+                cache.get(request).catch((error: unknown) => error),
+              ),
+            );
       assert.ok(result[0] instanceof Error);
       assert.equal(capture.readStore.length, 1);
       const [message] = capture.readStore;
@@ -208,7 +212,7 @@ describe("read-store channel", suiteOptions, () => {
       const cache = cacheOver(store, { name: "read-store-wire" });
       const capture = captureChannels(cache.name);
       try {
-        await cache.get(lookup("a"), { autoBatch: false });
+        await cache.getUnbatched([lookup("a")]);
         assert.equal(capture.readStore.length, 1);
       } finally {
         capture.stop();

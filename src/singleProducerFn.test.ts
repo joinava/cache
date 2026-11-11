@@ -279,7 +279,7 @@ describe("single producer function + by-id-type sugar", () => {
             { resourceType: "collection", resourceId: "collection:1" },
             { resourceType: "story", resourceId: "story:2" },
           ],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "success",
         });
 
