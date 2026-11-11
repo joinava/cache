@@ -34,7 +34,7 @@ import type {
   Vary,
   PartialReadonlyConsumerRequest,
 } from "../types/index.js";
-import { createProducerScheduler } from "./collapsedTaskCreator.js";
+import { createProducerScheduler } from "./producerScheduler.js";
 import { normalizeParams, normalizeVary } from "./normalization.js";
 import { PendingResources } from "./pendingResources.js";
 import {

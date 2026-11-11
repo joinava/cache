@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import { createProducerScheduler } from "./collapsedTaskCreator.js";
+import { createProducerScheduler } from "./producerScheduler.js";
 
 it(
   "skips a queued task that an earlier chunk's producer cancels synchronously",
