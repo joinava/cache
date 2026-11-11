@@ -80,7 +80,7 @@ To handle this, call the exported `restoreInfinityInDirectives` helper on the pa
 
 ## Store shutdown
 
-Implement `[Symbol.asyncDispose](): Promise<void>` without a timeout. Release owned resources to completion. `Cache.close()` calls it after the Cache drains its own work.
+Implement `close(): Promise<void>` without a timeout. Release owned resources to completion. `Cache.close()` calls it after the Cache drains its own work. The Store type does not require `Symbol.asyncDispose`.
 MemoryStore stops its cleanup timer. PostgresStore leaves the supplied pool open because the caller owns it.
 SQLite drains accepted worker tasks, checkpoints its writer, and terminates idle workers without a forced deadline.
 

@@ -258,7 +258,7 @@ export function bulkMemoryStore<Spec extends CacheSpec = CacheSpec>() {
     },
     store: memory.store.bind(memory),
     delete: memory.delete.bind(memory),
-    [Symbol.asyncDispose]: memory[Symbol.asyncDispose].bind(memory),
+    close: memory.close.bind(memory),
   };
 }
 

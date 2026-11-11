@@ -47,7 +47,7 @@ void [cachedType, cachedSecondType];
 const methods = {
   store: memory.store.bind(memory),
   delete: memory.delete.bind(memory),
-  [Symbol.asyncDispose]: memory[Symbol.asyncDispose].bind(memory),
+  close: memory.close.bind(memory),
 };
 // @ts-expect-error A Store cannot declare both read primitives.
 const both: Store<SpecOf<typeof registry>, {}, {}> = {

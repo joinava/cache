@@ -213,7 +213,7 @@ export type StoreOperations<
    * Cleanup releases owned resources to completion, without a deadline.
    * Await operation promises when their results or errors matter.
    */
-  [Symbol.asyncDispose](): Promise<void>;
+  close(): Promise<void>;
 };
 
 /**

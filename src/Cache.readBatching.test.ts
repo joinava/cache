@@ -280,10 +280,10 @@ describe("Cache read batching", suiteOptions, () => {
         events.push("getMany");
       },
     });
-    const dispose = store[Symbol.asyncDispose].bind(store);
-    mock.method(store, Symbol.asyncDispose, async () => {
+    const close = store.close.bind(store);
+    mock.method(store, "close", async () => {
       events.push("close");
-      return dispose();
+      return close();
     });
     const cache = cacheOver(store);
     await cache.store([{ id: "a", content: "a", directives: freshFor100 }]);
@@ -490,7 +490,7 @@ describe("autoBatch: false (direct Store reads)", suiteOptions, () => {
         await release.promise;
       },
     });
-    const cleanup = t.mock.method(store, Symbol.asyncDispose);
+    const cleanup = t.mock.method(store, "close");
     const cache = cacheOver(store);
     const controller = new AbortController();
     const read = cache.get(lookup("a"), { signal: controller.signal });

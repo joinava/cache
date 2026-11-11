@@ -738,7 +738,7 @@ export default class Cache<
     this.#readBatcher?.flushNow();
     this.#closePromise = (async () => {
       await Promise.allSettled(this.#operations);
-      await this.#dataStore[Symbol.asyncDispose]();
+      await this.#dataStore.close();
     })();
 
     return this.#closePromise;
