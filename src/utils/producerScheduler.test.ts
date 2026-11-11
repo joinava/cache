@@ -112,3 +112,32 @@ it(
     );
   },
 );
+
+it(
+  "gives every request its own task when makeKey is omitted",
+  { timeout: 5_000 },
+  async () => {
+    const scheduled = Promise.withResolvers<() => void>();
+    const calls: string[][] = [];
+    const scheduler = createProducerScheduler<string, string>({
+      bulk: true,
+      batchScheduleFn: (dispatch) => scheduled.resolve(dispatch),
+      dispatch: async (requests) => {
+        const values = requests.map(({ request }) => request);
+        calls.push(values);
+        return await Promise.resolve(values);
+      },
+    });
+    const attached = scheduler.attach(
+      ["a", "a"].map((request) => ({ request, trigger: "miss", caller: {} })),
+      true,
+    );
+    (await scheduled.promise)();
+    await scheduler.drain();
+    assert.deepEqual(calls, [["a", "a"]]);
+    assert.deepEqual(
+      attached.map(({ rode }) => rode),
+      [false, false],
+    );
+  },
+);

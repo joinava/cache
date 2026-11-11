@@ -73,11 +73,13 @@ export type PendingProduction<Request> = {
  *   microtasks, so requests from one event-loop turn share a batch.
  * @param options.collapseTasksMs As in `collapsedTaskCreator`: a new
  *   request joins a pending task with the same key only if that task started
- *   less than this many milliseconds ago.
+ *   less than this many milliseconds ago. Required with `makeKey`, and
+ *   omitted without it.
  * @param options.makeKey As in `collapsedTaskCreator`: converts a request
  *   into the key that decides which pending task it may join. Return
  *   `undefined` for a request that must not share work with any other; the
- *   scheduler then gives it a key that matches nothing.
+ *   scheduler then gives it a key that matches nothing. Omit `makeKey` when no
+ *   request may share work: then every request gets its own task.
  * @param options.retain Called when a task is created. It returns a release
  *   function that the scheduler calls once the task settles. The wrappers use
  *   it to keep a request's inputs alive while its production is pending.
@@ -86,17 +88,23 @@ export type PendingProduction<Request> = {
  *   every task in the invocation.
  * @internal
  */
-export function createProducerScheduler<Request, Result>(options: {
-  bulk: boolean;
-  maxBatchSize?: number;
-  batchScheduleFn?: (dispatch: () => void) => void;
-  collapseTasksMs: number;
-  makeKey: (request: Request) => string | undefined;
-  retain?: (request: Request) => () => void;
-  dispatch: (
-    requests: readonly PendingProduction<Request>[],
-  ) => Promise<readonly (Result | Error)[]>;
-}) {
+export function createProducerScheduler<Request, Result>(
+  options: {
+    bulk: boolean;
+    maxBatchSize?: number;
+    batchScheduleFn?: (dispatch: () => void) => void;
+    retain?: (request: Request) => () => void;
+    dispatch: (
+      requests: readonly PendingProduction<Request>[],
+    ) => Promise<readonly (Result | Error)[]>;
+  } & (
+    | {
+        collapseTasksMs: number;
+        makeKey: (request: Request) => string | undefined;
+      }
+    | { collapseTasksMs?: undefined; makeKey?: undefined }
+  ),
+) {
   type Task = {
     request: Request;
     key: string | symbol;
@@ -238,13 +246,16 @@ export function createProducerScheduler<Request, Result>(options: {
       const attached = requests.map(
         ({ request, trigger, background = false, signal, caller }) => {
           signal?.throwIfAborted();
-          const key = options.makeKey(request) ?? Symbol();
+          const key = options.makeKey?.(request) ?? Symbol();
           signal?.throwIfAborted();
 
           const existing = pending.get(key);
           const now = Date.now();
+          // Without makeKey every key is a fresh symbol, so `existing` is
+          // always undefined. The makeKey check only narrows collapseTasksMs.
           const rode =
             existing !== undefined &&
+            options.makeKey !== undefined &&
             now - existing.createdAt <= options.collapseTasksMs;
           const task: Task = rode
             ? existing
