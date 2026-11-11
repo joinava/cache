@@ -9,11 +9,15 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
 - Stores declare exactly one read capability: `get` or `getMany`. Read through
   a Cache, which adapts to either kind of Store. The package no longer exports
   `naiveGetMany`, because a Store no longer needs a fallback `getMany`.
-- Bulk Cache reads return positional results containing successes or `Error`
-  values. Handle each slot or use `throwIfAnyError` to reject partial failure.
-- Replace `batchReads` with `readBatching`. Both Cache read methods now support
-  `{ autoBatch: false }` to bypass automatic accumulation. A direct call reaches
-  the Store as one call, whatever the batch limit.
+- Replace `Cache.getMany` with two methods. `Cache.get` reads one request and
+  joins automatic accumulation, so reads from many calls share Store calls.
+  `Cache.getUnbatched` sends a known set to the Store as one call, whatever
+  the batch limit.
+- `Cache.getUnbatched` returns positional results containing successes or
+  `Error` values. Handle each slot or use `throwIfAnyError` to reject partial
+  failure.
+- Replace `batchReads` with `readBatching`, which configures automatic
+  accumulation for `Cache.get`.
 - `wrapProducer` and `wrapHashedInputProducer` return clients with `get`,
   `getMany`, and `close`, replacing callable wrappers. Declare exactly one
   top-level capability, `produce` or `produceMany`, in the options object.
@@ -22,6 +26,8 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
 - Rename the `@zingage/cache:read-batch` diagnostics channel to
   `@zingage/cache:read-store`, with exports `CACHE_READ_STORE_CHANNEL_NAME`,
   `cacheReadStoreChannel`, and `CacheReadStoreMessage`. No aliases are provided.
+- Remove the `CacheReadFound` and `CacheReadFoundWithEntry` type exports. Use
+  `CacheReadMessage["found"]` instead.
 - Replace the produce message's `collapsedCallerCount` with
   `collapsedRequestCount`: the requests that rode the invocation's tasks
   instead of starting producer work. A lone request reports 0, not 1. Bulk
