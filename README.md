@@ -146,7 +146,7 @@ const complete = throwIfAnyError(partial);
 await cache.getMany(requests, { autoBatch: false });
 ```
 
-- **Requests share one Store call, never one result.** Each `get()` still classifies its own id, evaluates freshness at its own `now`, selects its own entry, and publishes its own `read` message. So a batched `get()` that succeeds returns what an unbatched one returns. Accumulation uses DataLoader with `cache: false`, so it never caches results, even for identical requests.
+- **Requests share one Store call, never one result.** Each `get()` still classifies its own id, evaluates freshness at its own `now`, selects its own entry, and publishes its own `read` message. So a batched `get()` that succeeds returns what an unbatched one returns. Accumulation never caches or shares results, even for identical requests.
 - **Scheduling is configurable.** `batchScheduleFn` receives a dispatch callback and must invoke it in the immediate future; for example, pass `setImmediate` to gather reads until the next check phase.
 - **The Store call runs in the first caller's async context.** The batch binds the async context (for example, `AsyncLocalStorage` stores and the active tracing span) of the `get()` that opened it, with the default or a custom scheduler. So the query's span appears in that caller's trace only.
 - **One request's input can fail other requests.** For example, Postgres rejects a statement that binds an id with U+0000. When the whole Store call fails, every slot in it receives that Error, including other callers' requests.

@@ -10,6 +10,7 @@ import {
 import type { ReadonlyConsumerRequest } from "./types/03_ConsumerRequest.js";
 import {
   type Entry,
+  type EntryForId,
   type NormalizeParamName,
   type NormalizeParamValue,
 } from "./types/06_Normalization.js";
@@ -51,9 +52,10 @@ import {
   type CacheReadOutcome,
 } from "./utils/cacheHelpers.js";
 import {
-  StoreReadBatcher,
-  type ReadBatchOptions,
-} from "./utils/storeReadBatcher.js";
+  createRequestScheduler,
+  type BatchOptions,
+  type RequestScheduler,
+} from "./utils/requestScheduler.js";
 import {
   asError,
   CacheContractError,
@@ -216,7 +218,7 @@ export type CacheOptions<
    * applies only to accumulated reads. Single-only Stores dispatch promptly.
    * Per-call autoBatch: false sends the call's set as one Store call.
    */
-  readBatching?: ReadBatchOptions;
+  readBatching?: BatchOptions;
 };
 
 /**
@@ -256,8 +258,16 @@ export default class Cache<
   readonly #logger: Bind1<Logger, "cache">;
   readonly #dataStore: Store<StoreSupportedTypes, Validators, Params>;
   /** Set iff the Store has getMany. A get-only Store reads each request directly. */
-  readonly #readBatcher:
-    | StoreReadBatcher<StoreSupportedTypes, Validators, Params>
+  readonly #readScheduler:
+    | RequestScheduler<
+        StoreGetManyRequest<StoreSupportedTypes, Params>,
+        EntryForId<
+          StoreSupportedTypes,
+          Validators,
+          Params,
+          StoreSupportedTypes["id"]
+        >[]
+      >
     | undefined;
   #closed = false;
   #closePromise: Promise<void> | undefined;
@@ -297,14 +307,20 @@ export default class Cache<
     const unboundLogger = options.logger ?? defaultLoggersByComponent.cache;
     this.#logger = unboundLogger.bind(null, "cache");
     this.#dataStore = options.store;
-    this.#readBatcher =
+    // No makeKey: reads never share work (see the Store read in getMany).
+    this.#readScheduler =
       this.#dataStore.getMany === undefined
         ? undefined
-        : new StoreReadBatcher(
-            (requests, queueWaitTotalMs) =>
-              this.#readStore(requests, undefined, queueWaitTotalMs),
-            options.readBatching ?? {},
-          );
+        : createRequestScheduler({
+            bulk: true,
+            ...options.readBatching,
+            dispatch: (reads) =>
+              this.#readStore(
+                reads.map(({ request }) => request),
+                undefined,
+                reads.reduce((sum, read) => sum + read.queueWaitMs, 0),
+              ),
+          });
     this.#onGetAfterClose = options.onGetAfterClose ?? "throw";
     this.#onStoreAfterClose = options.onStoreAfterClose ?? "throw";
     this.name = options.name;
@@ -535,17 +551,23 @@ export default class Cache<
     // promise share is sound, which bounds the skew to the read's own
     // duration.
     const cacheEntriesForRequests = await raceWithSignal(
-      this.#readBatcher !== undefined && options?.autoBatch !== false
+      this.#readScheduler !== undefined && options?.autoBatch !== false
         ? Promise.all(
-            storeRequests.map((storeRequest) =>
-              this.#readBatcher!
-                .read(storeRequest, options?.signal)
-                .catch((error: unknown) => {
+            this.#readScheduler
+              .attach(
+                storeRequests.map((request) => ({
+                  request,
+                  ...(options?.signal ? { signal: options.signal } : {}),
+                })),
+                true,
+              )
+              .map(({ promise }) =>
+                promise.catch((error: unknown) => {
                   options?.signal?.throwIfAborted();
                   if (error instanceof CacheContractError) throw error;
                   return asError(error);
                 }),
-            ),
+              ),
           )
         : this.#readStore(storeRequests, options),
       options?.signal,
@@ -735,7 +757,7 @@ export default class Cache<
     // A batched read that `get()` accepted before this call still runs: start
     // the queued ones now, so that they are in flight when close() waits for
     // tracked Store calls, as unbatched reads would be.
-    this.#readBatcher?.flushNow();
+    this.#readScheduler?.flush();
     this.#closePromise = (async () => {
       await Promise.allSettled(this.#operations);
       await this.#dataStore.close();

@@ -109,8 +109,8 @@ describe("Cache read batching", suiteOptions, () => {
     const cache = cacheOver(store);
 
     const first = cache.get(lookup("a"));
-    // DataLoader dispatches after Promise continuations and before the
-    // next check phase.
+    // The default scheduler dispatches after Promise continuations and before
+    // the next check phase.
     await nextTurn();
     assert.deepEqual(getManyRequestCounts(), [1]);
 

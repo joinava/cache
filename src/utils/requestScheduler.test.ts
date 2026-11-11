@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import { createProducerScheduler } from "./producerScheduler.js";
+import { createRequestScheduler } from "./requestScheduler.js";
 
 it(
   "skips a queued task that an earlier chunk's producer cancels synchronously",
@@ -10,7 +10,7 @@ it(
     const controller = new AbortController();
     const failure = new Error("cancelled during production");
     const calls: string[] = [];
-    const scheduler = createProducerScheduler<string, string>({
+    const scheduler = createRequestScheduler<string, string>({
       bulk: true,
       maxBatchSize: 1,
       collapseTasksMs: 3_000,
@@ -26,7 +26,6 @@ it(
     const attached = scheduler.attach(
       ["a", "b", "c"].map((request) => ({
         request,
-        trigger: "miss",
         caller: {},
         ...(request === "b" ? { signal: controller.signal } : {}),
       })),
@@ -50,7 +49,7 @@ it(
   async () => {
     const scheduled = Promise.withResolvers<() => void>();
     const calls: string[] = [];
-    const scheduler = createProducerScheduler<string, string>({
+    const scheduler = createRequestScheduler<string, string>({
       bulk: true,
       maxBatchSize: 1,
       collapseTasksMs: 3_000,
@@ -66,7 +65,6 @@ it(
     const attached = scheduler.attach(
       ["a", "b", "c"].map((request) => ({
         request,
-        trigger: "miss",
         caller: {},
       })),
       true,
@@ -87,7 +85,7 @@ it(
   async () => {
     const scheduled = Promise.withResolvers<() => void>();
     const calls: number[][] = [];
-    const scheduler = createProducerScheduler<number, number>({
+    const scheduler = createRequestScheduler<number, number>({
       bulk: true,
       collapseTasksMs: 0,
       makeKey: (request) => String(request),
@@ -100,7 +98,7 @@ it(
     });
     const requests = Array.from({ length: 21 }, (_, index) => index);
     const attached = scheduler.attach(
-      requests.map((request) => ({ request, trigger: "miss", caller: {} })),
+      requests.map((request) => ({ request, caller: {} })),
       true,
     );
     (await scheduled.promise)();
@@ -119,7 +117,7 @@ it(
   async () => {
     const scheduled = Promise.withResolvers<() => void>();
     const calls: string[][] = [];
-    const scheduler = createProducerScheduler<string, string>({
+    const scheduler = createRequestScheduler<string, string>({
       bulk: true,
       batchScheduleFn: (dispatch) => scheduled.resolve(dispatch),
       dispatch: async (requests) => {
@@ -129,7 +127,7 @@ it(
       },
     });
     const attached = scheduler.attach(
-      ["a", "a"].map((request) => ({ request, trigger: "miss", caller: {} })),
+      ["a", "a"].map((request) => ({ request, caller: {} })),
       true,
     );
     (await scheduled.promise)();

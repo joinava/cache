@@ -1,5 +1,4 @@
 import type { BulkResourceTypeProducer } from "./bulkProducerByIdType.js";
-import type { ReadBatchOptions } from "./storeReadBatcher.js";
 import stableStringify from "safe-stable-stringify";
 import type { ReadonlyDeep } from "type-fest";
 import type { PublicInterface } from "type-party";
@@ -14,6 +13,7 @@ import {
   publishCacheFetch,
   publishCacheProduce,
   type CacheFetchDisposition,
+  type CacheProduceMessage,
 } from "../diagnostics.js";
 import type { SpecForId } from "../types/00_CacheSpec.js";
 import {
@@ -34,7 +34,10 @@ import type {
   Vary,
   PartialReadonlyConsumerRequest,
 } from "../types/index.js";
-import { createProducerScheduler } from "./producerScheduler.js";
+import {
+  createRequestScheduler,
+  type BatchOptions,
+} from "./requestScheduler.js";
 import { normalizeParams, normalizeVary } from "./normalization.js";
 import { PendingResources } from "./pendingResources.js";
 import {
@@ -154,7 +157,7 @@ export type WrapProducerOptions<
    * Bulk accumulation settings; default limit 20. The limit applies only to
    * accumulated work. Does not change participation.
    */
-  producerBatching?: ReadBatchOptions;
+  producerBatching?: BatchOptions;
 };
 
 /**
@@ -565,8 +568,14 @@ export default function wrapProducer<
   type Lookup = LooseLookupResultFor<RT, Validators, Params>;
   type Produced = { entry: ResultEntry; stored: Promise<void> };
   // Carries the classified type so the produce message can attribute each
-  // request to its own type without re-classifying.
-  type Work = { request: Request; resourceType: string };
+  // request to its own type without re-classifying. The scheduler keeps the
+  // Work of the attachment that creates a task, so the creator's trigger
+  // labels the invocation.
+  type Work = {
+    request: Request;
+    resourceType: string;
+    trigger: Exclude<CacheProduceMessage["trigger"], "mixed">;
+  };
 
   // Classification and coverage checks prove this erasure before dispatch.
   const produceOne = single as
@@ -665,12 +674,13 @@ export default function wrapProducer<
   // Each dispatch also publishes one `produce` diagnostics message when the
   // producer settles (one message per actual invocation; collapsed callers
   // share one).
-  const scheduler = createProducerScheduler<Work, Produced>({
+  const scheduler = createRequestScheduler<Work, Produced>({
     bulk: bulk !== undefined,
     ...options.producerBatching,
     collapseTasksMs: collapseOverlappingRequestsTime * 1000,
     // The key covers the full request (id, normalized params, directives) but
-    // not resourceType, which is derived from the id and so adds nothing.
+    // not resourceType, which is derived from the id and so adds nothing. It
+    // also omits the trigger, so a revalidation can ride a pending miss.
     makeKey: ({ request }) => {
       try {
         return stableStringify({
@@ -708,8 +718,10 @@ export default function wrapProducer<
           (sum, task) => sum + task.queueWaitMs,
           0,
         ),
-        trigger: tasks.every((task) => task.trigger === tasks[0]!.trigger)
-          ? tasks[0]!.trigger
+        trigger: tasks.every(
+          (task) => task.request.trigger === tasks[0]!.request.trigger,
+        )
+          ? tasks[0]!.request.trigger
           : ("mixed" as const),
       };
       try {
@@ -1025,15 +1037,18 @@ export default function wrapProducer<
       lookup: Lookup,
       background: boolean,
     ) => ({
-      request: { request: item.request, resourceType: item.resourceType },
-      // The trigger labels the invocation's INITIATING cause; if this call
-      // instead rides an invocation already in flight, that invocation's
-      // original trigger stands.
-      trigger: item.bypass
-        ? ("bypass" as const)
-        : lookup.usableWhileRevalidate
-          ? ("revalidation" as const)
-          : ("miss" as const),
+      request: {
+        request: item.request,
+        resourceType: item.resourceType,
+        // The trigger labels the invocation's INITIATING cause; if this call
+        // instead rides an invocation already in flight, that invocation's
+        // original trigger stands.
+        trigger: item.bypass
+          ? ("bypass" as const)
+          : lookup.usableWhileRevalidate
+            ? ("revalidation" as const)
+            : ("miss" as const),
+      },
       background,
       caller,
       // No signal for a background refresh: it is fire-and-forget work, and

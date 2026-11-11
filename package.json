@@ -37,7 +37,6 @@
   },
   "dependencies": {
     "@zingage/scheduling": "^1.1.0",
-    "dataloader": "^2.2.3",
     "debug": "^4.4.1",
     "es-toolkit": "^1.43.0",
     "kysely": "^0.28.3",

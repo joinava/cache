@@ -2,52 +2,67 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { asError, CacheContractError } from "./utils.js";
 
 /**
- * A live handle on one actual (collapsed) producer invocation, passed to the
- * task function so it can attribute its telemetry to the invocation.
- * @internal
+ * Accumulation settings for a bulk target. `Cache` exposes them as
+ * `readBatching`, and the producer wrappers as `producerBatching`.
  */
-export type CollapsedInvocation = {
+export type BatchOptions = {
   /**
-   * Why the invocation was initiated (the label its CREATOR attached). Later
-   * callers riding the invocation never re-label it.
+   * The most requests one automatic dispatch takes. Defaults to 20. A direct
+   * (non-automatic) dispatch is never split.
    */
-  readonly trigger: "miss" | "revalidation" | "bypass";
+  maxBatchSize?: number;
   /**
-   * The number of logical callers attached to this invocation so far
-   * (the initiator plus any riders that joined via request collapsing).
-   * Live: read it at publish time.
+   * Schedules the automatic queue's flush. It receives the flush callback.
+   * Defaults to the next tick after the current microtasks, so requests from
+   * one event-loop turn share a batch.
    */
-  readonly attachedCallerCount: () => number;
+  batchScheduleFn?: (dispatch: () => void) => void;
 };
 
-/** A shared request remains joinable only while its production is pending. */
-export type PendingProduction<Request> = {
+/** The scheduler that {@link createRequestScheduler} returns. */
+export type RequestScheduler<Request, Result> = ReturnType<
+  typeof createRequestScheduler<Request, Result>
+>;
+
+/** One task as the scheduler hands it to `dispatch`. */
+export type DispatchedRequest<Request> = {
+  /**
+   * The request of the attachment that CREATED the task. Later attachments
+   * that ride the task never replace it, so per-request labels such as a
+   * producer trigger keep the creator's value.
+   */
   readonly request: Request;
-  readonly trigger: CollapsedInvocation["trigger"];
+  /**
+   * The number of distinct callers attached to this task so far (the
+   * initiator plus any riders that joined via request collapsing). Live: read
+   * it at publish time.
+   */
   readonly attachedCallerCount: () => number;
   readonly attachedCallers: () => ReadonlySet<object>;
   readonly queueWaitMs: number;
   /**
    * True when the scheduler dispatched this request from its automatic queue.
-   * Reported as the produce message's `autoBatched`.
+   * Reported as the diagnostics messages' `autoBatched`.
    */
   readonly autoBatched: boolean;
 };
 
 /**
- * Schedules independent producer requests and shares compatible pending work.
- * Cancellation removes queued participation. Dispatched work always completes.
+ * Schedules independent requests into batched calls, and optionally shares
+ * compatible pending work. Cancellation removes queued participation.
+ * Dispatched work always completes.
  *
- * The producer wrappers' internal variant of `collapsedTaskCreator`. It
- * keeps the same collapse semantics: same key + pending + within
- * `collapseTasksMs` of the task's start ⇒ reuse. It adds support for
- * producer-invocation telemetry:
+ * The producer wrappers use it for producer invocations, and `Cache` uses it
+ * for Store reads. Store reads omit `makeKey`, so they never share work.
  *
- * - Each request is labeled with the trigger that motivated it. The label of
- *   the request that actually CREATES a task is fixed as that task's trigger.
- *   Riders never re-label it.
- * - The dispatch function receives a {@link PendingProduction} per task, so it
- *   can publish invocation-scoped diagnostics (trigger, attached-caller count).
+ * With `makeKey`, it keeps the collapse semantics of `collapsedTaskCreator`:
+ * same key + pending + within `collapseTasksMs` of the task's start ⇒ reuse.
+ * It adds support for invocation telemetry:
+ *
+ * - The dispatch function receives a {@link DispatchedRequest} per task, so it
+ *   can publish invocation-scoped diagnostics (attached-caller count, queue
+ *   wait). The producer wrappers carry each request's trigger inside the
+ *   request, so the creator's trigger labels the task.
  * - Each attachment says whether it `rode` an already-pending task (true) or
  *   initiated one (false). Settlements that DEPEND on the invocation
  *   (served-from-producer / producer-error / served-stale-after-error /
@@ -60,11 +75,12 @@ export type PendingProduction<Request> = {
  * Not exported from the package: the public `collapsedTaskCreator` remains
  * the general-purpose utility.
  *
- * @param options.bulk True when the producer takes many requests per call
- *   (`produceMany`). Then `dispatch` receives every request of a batch at once,
- *   and requests attached with `automatic: true` accumulate in a queue. False
- *   for a single-request producer (`produce`): each `dispatch` call receives
- *   exactly one request, and nothing accumulates.
+ * @param options.bulk True when the target takes many requests per call
+ *   (`produceMany`, `store.getMany`). Then `dispatch` receives every request
+ *   of a batch at once, and requests attached with `automatic: true`
+ *   accumulate in a queue. False for a single-request target (`produce`):
+ *   each `dispatch` call receives exactly one request, and nothing
+ *   accumulates.
  * @param options.maxBatchSize The most requests one automatic dispatch takes.
  *   Defaults to 20. A direct (non-automatic) dispatch is never split. Ignored
  *   when `bulk` is false.
@@ -83,36 +99,41 @@ export type PendingProduction<Request> = {
  * @param options.retain Called when a task is created. It returns a release
  *   function that the scheduler calls once the task settles. The wrappers use
  *   it to keep a request's inputs alive while its production is pending.
- * @param options.dispatch Runs one producer invocation for the given tasks. It
- *   resolves with one result or Error per task, in order. A rejection fails
- *   every task in the invocation.
+ * @param options.dispatch Runs one call for the given tasks. It resolves with
+ *   one result or Error per task, in order. A rejection fails every task in
+ *   the call.
  * @internal
  */
-export function createProducerScheduler<Request, Result>(
-  options: {
+export function createRequestScheduler<Request, Result>(
+  options: BatchOptions & {
     bulk: boolean;
-    maxBatchSize?: number;
-    batchScheduleFn?: (dispatch: () => void) => void;
     retain?: (request: Request) => () => void;
     dispatch: (
-      requests: readonly PendingProduction<Request>[],
+      requests: readonly DispatchedRequest<Request>[],
     ) => Promise<readonly (Result | Error)[]>;
   } & (
-    | {
-        collapseTasksMs: number;
-        makeKey: (request: Request) => string | undefined;
-      }
-    | { collapseTasksMs?: undefined; makeKey?: undefined }
-  ),
+      | {
+          collapseTasksMs: number;
+          makeKey: (request: Request) => string | undefined;
+        }
+      | { collapseTasksMs?: undefined; makeKey?: undefined }
+    ),
 ) {
   type Task = {
     request: Request;
     key: string | symbol;
-    trigger: CollapsedInvocation["trigger"];
     createdAt: number;
     enqueuedAt: number;
     /** The task waited in the automatic queue, so it reports queue wait. */
     accumulated: boolean;
+    /**
+     * The async context (AsyncLocalStorage stores, the active tracing span) of
+     * the attachment that created an accumulated task. A batch runs in its
+     * first task's context, even when close() forces the flush from another
+     * context. Undefined for a direct task, which dispatches synchronously in
+     * its caller's context.
+     */
+    context: ReturnType<typeof AsyncLocalStorage.snapshot> | undefined;
     /** Distinct callers, reported as the collapsed caller count. */
     callers: Set<object>;
     /**
@@ -137,9 +158,7 @@ export function createProducerScheduler<Request, Result>(
     maxBatchSize !== Infinity &&
     (!Number.isInteger(maxBatchSize) || maxBatchSize < 1)
   ) {
-    throw new TypeError(
-      "producerBatching.maxBatchSize must be a positive integer",
-    );
+    throw new TypeError("maxBatchSize must be a positive integer");
   }
 
   let scheduled = false;
@@ -159,11 +178,11 @@ export function createProducerScheduler<Request, Result>(
   const dispatch = (selected: readonly Task[], automatic: boolean) => {
     const tasks = selected.filter((task) => task.state === "queued");
 
-    // Single producers take one request per call. Automatic accumulation
+    // Single-request targets take one request per call. Automatic accumulation
     // splits at maxBatchSize. A direct call is never split.
     const batchSize = !options.bulk ? 1 : automatic ? maxBatchSize : Infinity;
     for (let offset = 0; offset < tasks.length; offset += batchSize) {
-      // Producer code can synchronously cancel or flush later queued tasks.
+      // Dispatch code can synchronously cancel or flush later queued tasks.
       const batch = tasks
         .slice(offset, offset + batchSize)
         .filter((task) => task.state === "queued");
@@ -175,22 +194,24 @@ export function createProducerScheduler<Request, Result>(
         queued.delete(task);
       });
 
-      const operation = Promise.try(() =>
+      const run = () =>
         options.dispatch(
           batch.map((task) => ({
             request: task.request,
-            trigger: task.trigger,
             attachedCallerCount: () => task.callers.size,
             attachedCallers: () => task.callers,
             queueWaitMs: task.accumulated ? now - task.enqueuedAt : 0,
             autoBatched: automatic,
           })),
-        ),
+        );
+      const context = batch[0]!.context;
+      const operation = Promise.try(() =>
+        context === undefined ? run() : context(run),
       )
         .then((results) => {
           if (results.length !== batch.length) {
             throw new CacheContractError(
-              "Producer result count must match request count",
+              "Result count must match request count",
             );
           }
 
@@ -218,33 +239,34 @@ export function createProducerScheduler<Request, Result>(
     if (scheduled || queued.size === 0) return;
 
     scheduled = true;
-    const callback = AsyncLocalStorage.bind(() => {
+    // Each batch restores its own first task's context (see Task.context).
+    const callback = () => {
       scheduled = false;
       dispatch([...queued], true);
-    });
+    };
     if (options.batchScheduleFn) options.batchScheduleFn(callback);
     else void Promise.resolve().then(() => process.nextTick(callback));
   };
 
   return {
     /**
-     * Attaches requests to pending or new tasks. For a bulk producer with
+     * Attaches requests to pending or new tasks. For a bulk target with
      * `automatic: false`, one call dispatches all of its queued tasks,
-     * including shared tasks it joined, as one producer invocation. A direct
-     * caller must pass all of its requests in one call to get one invocation.
+     * including shared tasks it joined, as one dispatch call. A direct caller
+     * must pass all of its requests in one call to get one dispatch call.
      */
     attach(
       requests: readonly {
         request: Request;
-        trigger: CollapsedInvocation["trigger"];
         background?: boolean;
         signal?: AbortSignal;
-        caller: object;
+        /** Identifies the logical caller for `attachedCallers`. */
+        caller?: object;
       }[],
       automatic: boolean,
     ) {
       const attached = requests.map(
-        ({ request, trigger, background = false, signal, caller }) => {
+        ({ request, background = false, signal, caller }) => {
           signal?.throwIfAborted();
           const key = options.makeKey?.(request) ?? Symbol();
           signal?.throwIfAborted();
@@ -262,10 +284,13 @@ export function createProducerScheduler<Request, Result>(
             : {
                 request,
                 key,
-                trigger,
                 createdAt: now,
                 enqueuedAt: performance.now(),
                 accumulated: options.bulk && automatic,
+                context:
+                  options.bulk && automatic
+                    ? AsyncLocalStorage.snapshot()
+                    : undefined,
                 callers: new Set<object>(),
                 participants: 0,
                 background: false,
@@ -283,7 +308,7 @@ export function createProducerScheduler<Request, Result>(
             void task.result.promise.catch(() => {});
           }
 
-          task.callers.add(caller);
+          if (caller !== undefined) task.callers.add(caller);
           task.participants += 1;
           task.background ||= background;
 
