@@ -1,3 +1,4 @@
+import { sumBy } from "es-toolkit";
 import type { BulkResourceTypeProducer } from "./bulkProducerByIdType.js";
 import stableStringify from "safe-stable-stringify";
 import type { ReadonlyDeep } from "type-fest";
@@ -711,19 +712,46 @@ export default function wrapProducer<
       const startedAt = performance.now();
       let results: readonly (Result | Error)[];
 
-      const common = {
-        autoBatched: tasks[0]!.autoBatched,
-        requestCount: tasks.length,
-        queueWaitTotalMs: tasks.reduce(
-          (sum, task) => sum + task.queueWaitMs,
-          0,
-        ),
-        trigger: tasks.every(
-          (task) => task.request.trigger === tasks[0]!.request.trigger,
-        )
-          ? tasks[0]!.request.trigger
-          : ("mixed" as const),
+      // Publishes this invocation's one `produce` message once the producer
+      // settles. `results` is undefined when the producer call rejected,
+      // which fails every request.
+      //
+      // `publish` would discard the message, but not before the argument was
+      // built -- so the test has to be here, not left to the channel. The
+      // argument is O(batch-size), so it is especially worth not building
+      // when nobody is listening. Same reasoning as `Cache.store`.
+      // `collapsedRequestCount` is read here, at settlement, so that riders
+      // that joined while the producer ran count too.
+      const publishProduce = (
+        results: readonly (Result | Error)[] | undefined,
+      ) => {
+        if (!cacheProduceChannel.hasSubscribers) return;
+
+        const trigger = tasks[0]!.request.trigger;
+        publishCacheProduce({
+          cache: cache.name,
+          autoBatched: tasks[0]!.autoBatched,
+          requestCount: tasks.length,
+          queueWaitTotalMs: sumBy(tasks, (task) => task.queueWaitMs),
+          trigger: tasks.every((task) => task.request.trigger === trigger)
+            ? trigger
+            : "mixed",
+          requests: tasks.map(({ request }) => ({
+            resourceType: request.resourceType,
+            resourceId: request.request.id,
+          })),
+          collapsedRequestCount: sumBy(tasks, (task) =>
+            task.collapsedRequestCount(),
+          ),
+          failedRequestCount:
+            results === undefined
+              ? tasks.length
+              : results.filter((result) => result instanceof Error).length,
+          outcome: results === undefined ? "error" : "success",
+          durationMs: performance.now() - startedAt,
+        });
       };
+
       try {
         results =
           produceMany !== undefined
@@ -767,28 +795,7 @@ export default function wrapProducer<
         // A rejected producer call fails every request in the invocation.
         // (A bulk producer should return Error elements for per-request
         // failures instead.)
-        //
-        // `publish` would discard the message, but not before the argument was
-        // built -- so the test has to be here, not left to the channel. The
-        // argument is O(batch-size), so it is especially worth not building
-        // when nobody is listening. Same reasoning as `Cache.store`.
-        if (cacheProduceChannel.hasSubscribers) {
-          publishCacheProduce({
-            cache: cache.name,
-            ...common,
-            requests: tasks.map(({ request }) => ({
-              resourceType: request.resourceType,
-              resourceId: request.request.id,
-            })),
-            collapsedRequestCount: tasks.reduce(
-              (sum, task) => sum + task.collapsedRequestCount(),
-              0,
-            ),
-            failedRequestCount: tasks.length,
-            outcome: "error",
-            durationMs: performance.now() - startedAt,
-          });
-        }
+        publishProduce(undefined);
 
         // A by-id-type producer routes ids itself and may throw a special
         // UnroutableIdError if the id can't be classified to a covered type.
@@ -797,25 +804,7 @@ export default function wrapProducer<
         rethrowUnroutableWithCacheName(cache.name, error);
       }
 
-      if (cacheProduceChannel.hasSubscribers) {
-        publishCacheProduce({
-          cache: cache.name,
-          ...common,
-          requests: tasks.map(({ request }) => ({
-            resourceType: request.resourceType,
-            resourceId: request.request.id,
-          })),
-          collapsedRequestCount: tasks.reduce(
-            (sum, task) => sum + task.collapsedRequestCount(),
-            0,
-          ),
-          failedRequestCount: results.filter(
-            (result) => result instanceof Error,
-          ).length,
-          outcome: "success",
-          durationMs: performance.now() - startedAt,
-        });
-      }
+      publishProduce(results);
 
       // One physical write retains batching for a producer invocation's resources.
       //

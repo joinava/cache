@@ -59,6 +59,10 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
   identify automatic batching.
 - Client and Cache shutdown drain accepted reads, production, background
   refreshes, and persistence before cleanup.
+- `collapsedTaskCreator` rejects with `CacheContractError` when its task
+  creator synchronously calls it again with the same key, instead of
+  recursing without end. Its trace log also reports the completion of a task
+  that a newer task replaced.
 
 See the [v3 migration guide](README.md#migrating-from-v3),
 [Store implementation guide](docs/implementing-a-store.md), and

@@ -241,7 +241,7 @@ export type CacheOptions<
  * names each kind of resource the cache can hold and pairs it with a runtime
  * classifier for its id sub-space plus a (phantom) content type. The cache's
  * {@link CacheSpec} union is derived from the registry via {@link SpecOf}:
- * the get/store/getMany methods narrow the content type based on the id of
+ * the get/getUnbatched/store methods narrow the content type based on the id of
  * each request, and reject mismatched (id, content) pairs at compile time.
  * At runtime, every id the cache sees (requests, stored entries -- primary
  * and supplemental -- and deletes) is classified against the registry, and
@@ -438,6 +438,14 @@ export default class Cache<
    * A bulk-capable Store accumulates reads from many `get` calls into shared
    * Store calls. Use {@link Cache.getUnbatched} to send a known set as one
    * Store call instead.
+   *
+   * This is a hot path. A wrapped client's `getMany` calls `get` once per
+   * item, in a loop, and lets the read scheduler batch the Store calls. So
+   * `get` keeps per-call work small: one request, no per-call arrays, and no
+   * time slicing or awaits beyond the Store read. That is why it does not
+   * share `getUnbatched`'s pipeline, even though the two repeat the same
+   * diagnostics and closed-cache steps. A change to one of those steps must
+   * be made in both methods.
    * If Store.getMany returns an Error in this request's slot, only this caller
    * rejects. Other callers in the automatic batch retain their hits or misses.
    * A rejected store promise rejects every non-cancelled caller in the batch.
@@ -586,10 +594,10 @@ export default class Cache<
   >(
     requests: Reqs,
     options?: ReadOptions,
-  ): Promise<GetManyResults<Reqs, RT, Validators, Params>> {
+  ): Promise<GetUnbatchedResults<Reqs, RT, Validators, Params>> {
     options?.signal?.throwIfAborted();
     if (!isNonEmptyArray(requests)) {
-      return [] as GetManyResults<Reqs, RT, Validators, Params>;
+      return [] as GetUnbatchedResults<Reqs, RT, Validators, Params>;
     }
 
     // Classify every request id up front: a classification failure rejects
@@ -625,7 +633,7 @@ export default class Cache<
       return mapNonEmpty(requests, (_req, i) => {
         publishRead(i, { found: "none" });
         return { validatable: [] };
-      }) as GetManyResults<Reqs, RT, Validators, Params>;
+      }) as GetUnbatchedResults<Reqs, RT, Validators, Params>;
     }
 
     const now = new Date();
@@ -933,10 +941,10 @@ export default class Cache<
 /**
  * {@link Cache.getUnbatched}'s return type: one {@link CacheLookupResult} per
  * request, each narrowed to the spec variants its own request's id selects.
- * Named once because it is spelled both in the signature and in the
- * empty-input early return.
+ * Named because the signature and both early returns (empty input, closed
+ * cache) spell it.
  */
-export type GetManyResults<
+export type GetUnbatchedResults<
   Reqs extends readonly { id: string }[],
   RT extends ResourceTypes,
   Validators extends AnyValidators,
