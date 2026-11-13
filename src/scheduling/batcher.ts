@@ -174,7 +174,7 @@ export type Enqueued<Input, Result> = {
 export const DEFAULT_PRODUCER_BATCH_SIZE = 20;
 
 /**
- * Queues work and dispatches it in batches. `requestScheduler` composes it
+ * Queues work and dispatches it in batches. `BulkProducerScheduler` composes it
  * with `TaskSharer`, which shares work. The batcher does not share work, and
  * it knows nothing of `TaskSharer`. To share work, a sharer's `schedule`
  * enqueues one item per started task, for example
@@ -193,10 +193,6 @@ export const DEFAULT_PRODUCER_BATCH_SIZE = 20;
  * handles of queued entries it also waits for, such as entries from other
  * callers' enqueues. That dispatch is never split, and its new items never
  * wait in a batch.
- *
- * A single-request target (`produce`) has nothing to batch. Its owner calls
- * `dispatchNow` with one item per call, so the batcher still tracks that
- * work for `close`.
  *
  * Cancellation removes a queued entry: when its item's signal aborts, the
  * entry leaves the queue and its result rejects with the signal's reason.

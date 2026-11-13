@@ -2,7 +2,8 @@
  * @fileoverview The errors both producer wrappers raise, and the mapping that
  * puts a cache's name back on a cache-free one.
  *
- * Extracted so `wrapProducer` and `producerByIdType` can
+ * Extracted so the shared producer client (producerClient.ts) and
+ * `producerByIdType` can
  * each raise or map them without importing one another for it: the routing
  * errors are thrown by the by-id-type helpers, and re-thrown named by whichever
  * wrapper the producer was handed to.
