@@ -5,7 +5,6 @@ import { SingleProducerScheduler } from "./wrapSingleProducer.js";
 
 const defaults = {
   logger: undefined,
-  retain: () => () => {},
   collapseTasksMs: 1_000,
   makeKey: (request: string) => request,
 };
@@ -62,26 +61,6 @@ it("rejects a task whose slot is an Error, and wraps a non-Error rejection", asy
     assert.ok(error instanceof Error);
     return true;
   });
-  await scheduler.close();
-});
-
-it("ends each task's lease once the task settles", async () => {
-  const events: string[] = [];
-  const release = Promise.withResolvers<string[]>();
-  const scheduler = new SingleProducerScheduler<string, string>({
-    ...defaults,
-    retain: (request) => {
-      events.push(`retain ${request}`);
-      return () => events.push(`release ${request}`);
-    },
-    dispatch: async () => release.promise,
-  });
-  const [outcome] = scheduler.startOrRideTasks([{ request: "a" }]);
-
-  assert.deepEqual(events, ["retain a"]);
-  release.resolve(["a"]);
-  assert.equal(await outcome!.promise, "a");
-  assert.deepEqual(events, ["retain a", "release a"]);
   await scheduler.close();
 });
 

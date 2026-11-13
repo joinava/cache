@@ -10,7 +10,7 @@ const sharing = {
 };
 
 /** The options every test leaves at their defaults. */
-const defaults = { logger: undefined, retain: () => () => {} };
+const defaults = { logger: undefined };
 
 it(
   "skips a queued task that an earlier chunk's producer cancels synchronously",

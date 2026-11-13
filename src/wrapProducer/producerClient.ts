@@ -46,6 +46,7 @@ import {
 } from "../cacheWithPendingResources/CacheWithPendingResources.js";
 import {
   completeRequest,
+  type ReachesProducerAsIs,
   primaryNormalizedResultResourceFromRequestPairedProducerResult,
   requestPairedProducerResultToResources,
 } from "./requestPairedProducerUtils.js";
@@ -155,15 +156,6 @@ export function rethrowUnroutableWithCacheName(
  */
 export const wrappedReadStartedAt: unique symbol = Symbol(
   "wrappedReadStartedAt",
-);
-/**
- * An optional method on a producer function. The client calls it with the
- * request's id when a task starts, and calls the release function it returns
- * once the task settles. The hashed-input wrappers use it to keep a request's
- * inputs alive while its production is pending.
- */
-export const producerRequestLease: unique symbol = Symbol(
-  "producerRequestLease",
 );
 
 /** Observe foreground persistence without delaying the produced result. */
@@ -284,12 +276,6 @@ export type ProducerSchedulerOptions<Work, Produced> = {
    */
   makeKey: (work: Work) => string | undefined;
   /**
-   * Called when a task starts. It returns a release function that the
-   * scheduler calls once the task settles, with {@link releaseOnSettle}. It
-   * keeps a request's inputs alive while its production is pending.
-   */
-  retain: (work: Work) => () => void;
-  /**
    * Runs one producer invocation for the given tasks. Its `info` describes
    * the whole invocation. It resolves with one result or Error per task, in
    * order. A rejection fails every task in the invocation.
@@ -342,40 +328,22 @@ export type ProducerBinding<
 > = {
   /**
    * The wrapped producer function, as the caller passed it. The client reads
-   * its declared covered set ({@link coveredTypes}) and its optional
-   * {@link producerRequestLease}.
+   * its declared covered set ({@link coveredTypes}).
    */
   producer: object & { readonly [coveredTypes]?: readonly string[] };
   /**
    * Calls the producer once for the given requests. It resolves with one
-   * result or Error per request, in order.
+   * result or Error per request, in order. It must pass each request object
+   * to the producer as is, never a copy; see {@link ReachesProducerAsIs}.
    */
   call: (
-    requests: readonly LooseRequestFor<RT, Params>[],
+    requests: readonly ReachesProducerAsIs<LooseRequestFor<RT, Params>>[],
   ) => Promise<readonly (LooseResultFor<RT, Validators, Params> | Error)[]>;
   /** Builds the scheduler that shares and sends this producer's work. */
   makeScheduler: <Work, Produced>(
     options: ProducerSchedulerOptions<Work, Produced>,
   ) => ProducerScheduler<Work, Produced>;
 };
-
-/** The release function of a task whose producer takes no lease. */
-const noRelease = () => {};
-
-/**
- * Ends a task's `retain` lease once its result settles. The lease is taken
- * before the task's work starts. Every result settles, including a
- * cancelled one, so the lease always ends.
- */
-export function releaseOnSettle<Result>(
-  release: () => void,
-  result: Promise<Result>,
-): Promise<Result> {
-  const held = result.finally(release);
-  // Cancellation can reject the result before anyone awaits it.
-  void held.catch(() => {});
-  return held;
-}
 
 /**
  * Builds the client that `wrapProducer` returns, for the producer that
@@ -400,7 +368,9 @@ export function createProducerClient<
   // entries whose write is still in flight; see CacheWithPendingResources.
   const cache = new CacheWithPendingResources(options.cache, logger);
 
-  type Request = LooseRequestFor<RT, Params>;
+  // The client holds and sends each request as the object that
+  // completeRequest returned; see ReachesProducerAsIs.
+  type Request = ReachesProducerAsIs<LooseRequestFor<RT, Params>>;
   type Result = LooseResultFor<RT, Validators, Params>;
   type ResultEntry = LooseEntryFor<RT, Validators, Params>;
   type Lookup = LookupFor<RT, Validators, Params>;
@@ -408,7 +378,10 @@ export function createProducerClient<
   // Carries the classified type so the produce message can attribute each
   // request to its own type without re-classifying. The scheduler keeps the
   // Work of the request that starts a task, so the starting request's trigger
-  // labels the invocation.
+  // labels the invocation. It also keeps the starting request object alive
+  // until the task settles, which a producer keyed by that object relies on
+  // (see ReachesProducerAsIs). Riders reach the producer only through the
+  // starter's object; an equal key means an equal request.
   type Work = {
     request: Request;
     resourceType: string;
@@ -498,23 +471,20 @@ export function createProducerClient<
   // Each dispatch also publishes one `produce` diagnostics message when the
   // producer settles (one message per actual invocation; requests that
   // collapse onto it share it).
-  // Read once: the producer is fixed for the client's life.
-  const lease =
-    producerRequestLease in producer &&
-    typeof producer[producerRequestLease] === "function"
-      ? producer[producerRequestLease]
-      : undefined;
   const scheduler = makeScheduler<Work, Produced>({
     logger: options.logger,
     collapseTasksMs: collapseOverlappingRequestsTime * 1000,
     // The key covers the full request (id, normalized params, directives) but
     // not resourceType, which is derived from the id and so adds nothing. It
-    // also omits the trigger, so a revalidation can ride a pending miss.
+    // also omits the trigger, so a revalidation can ride a pending miss. It
+    // names the request's fields, because the request is the caller's own
+    // object (see ReachesProducerAsIs) and may carry other properties.
     makeKey: ({ request }) => {
       try {
         return stableStringify({
-          ...request,
+          id: request.id,
           params: cache.normalizeParams(request.params),
+          directives: request.directives,
         });
       } catch {
         // Failed normalization cannot prove compatibility. Preserve production
@@ -522,7 +492,6 @@ export function createProducerClient<
         return undefined;
       }
     },
-    retain: ({ request }) => lease?.(request.id) ?? noRelease,
     dispatch: async (tasks, { autoBatched }) => {
       const startedAt = performance.now();
       let results: readonly (Result | Error)[];
@@ -691,8 +660,7 @@ export function createProducerClient<
     // stamps `resourceType` on the fetch/produce messages, so dispatch and
     // telemetry cannot disagree.
     const items = requests.map((input) => {
-      const complete = completeRequest(input) as Request;
-      const request = complete;
+      const request: Request = completeRequest(input);
       const resourceType = cache.classify(request.id);
       // A classified type outside this wrapper's DECLARED coverage throws
       // BEFORE any cache read (see NoProducerForResourceTypeError's docs).
@@ -704,7 +672,6 @@ export function createProducerClient<
 
       return {
         request,
-        readRequest: complete,
         resourceType,
         bypass,
       };
@@ -732,7 +699,7 @@ export function createProducerClient<
     const directReads =
       batching?.store === false && eligible.length > 0
         ? cache.getUnbatched(
-            eligible.map(({ readRequest }) => readRequest),
+            eligible.map(({ request }) => request),
             { signal },
           )
         : undefined;
@@ -740,7 +707,7 @@ export function createProducerClient<
       eligible.map((item, index) => [
         item,
         directReads === undefined
-          ? cache.get(item.readRequest, { signal })
+          ? cache.get(item.request, { signal })
           : directReads.then((results) => {
               const result = results[index]!;
               if (result instanceof Error) throw result;

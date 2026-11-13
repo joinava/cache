@@ -1,6 +1,5 @@
 import {
   wrappedReadStartedAt,
-  producerRequestLease,
   type WrappedReadOptions,
 } from "./wrapProducer.js";
 import pLimit from "p-limit";
@@ -455,8 +454,8 @@ function branchEntriesFor(
  *
  * Each input's result must remain valid when requests are added, removed,
  * reordered, split, or deduplicated. Branch coverage, minted-ID checks, and
- * supplemental routing remain enforced. Queued and dispatched production hold
- * input leases independently of caller cancellation and stale returns.
+ * supplemental routing remain enforced. Queued and dispatched production keep
+ * their inputs independently of caller cancellation and stale returns.
  *
  * Scheduling, partial results, persistence, and shutdown follow wrapProducer.
  * Call options also accept directives, which apply to every supplied input.
@@ -581,7 +580,28 @@ export function wrapHashedInputProducer(
       : undefined,
   );
 
-  const registry = new InputRegistry<never>();
+  // Maps each request object that `run` passes to `wrapped.getMany` to the
+  // input it was hashed from, so the internal producer can recover the input
+  // from the request it receives. The client passes that same object to the
+  // producer (see ReachesProducerAsIs), and its production task holds the
+  // object until the task settles. So an entry lives exactly as long as some
+  // caller or task can still need it, with no reference counting: a caller
+  // that is cancelled or returns stale data drops only its own reference.
+  // A request that rides another's task reaches the producer as the starting
+  // request's object; its input is equal because its id is equal. The input
+  // is boxed because an input may itself be `undefined`.
+  const inputByRequest = new WeakMap<object, { input: never }>();
+  const inputFor = (request: { readonly id: string }): never => {
+    const entry = inputByRequest.get(request);
+    if (entry === undefined) {
+      throw new CacheContractError(
+        `wrapHashedInputProducer: no input is registered for the request with cache id "${request.id}". ` +
+          "The producer received a request object that this wrapper did not create, " +
+          "which should be impossible (it would indicate that the request was copied on its way to the producer, or a bug).",
+      );
+    }
+    return entry.input;
+  };
   const hashingTasks = new Set<Promise<unknown>>();
   const ownHashing = <T>(promise: Promise<T>): Promise<T> => {
     hashingTasks.add(promise);
@@ -598,18 +618,12 @@ export function wrapHashedInputProducer(
   // Bound concurrent input hashing (see HASH_CONCURRENCY); shared across calls.
   const hashLimit = pLimit(HASH_CONCURRENCY);
 
-  const retain = (id: string) => {
-    registry.acquire(id, registry.get(id));
-    return () => registry.release(id);
-  };
-
   // The internal producer for a branch recovers that branch's inputs from the
-  // registry and hands them to the branch's `produce`. Each production task
-  // holds its own lease (see `retain`), so the inputs stay registered until
-  // production settles.
+  // request objects it receives (see `inputByRequest`) and hands them to the
+  // branch's `produce`.
   const internalSingle =
     (branch: LooseBranch<never>) => async (request: { readonly id: string }) =>
-      hashSupplementals(await branch.produce(registry.get(request.id)));
+      hashSupplementals(await branch.produce(inputFor(request)));
 
   const internalBulk =
     (branch: LooseBranch<never>) =>
@@ -629,9 +643,7 @@ export function wrapHashedInputProducer(
         )[]
       >;
 
-      const results = await producer(
-        requests.map(({ id }) => registry.get(id)),
-      );
+      const results = await producer(requests.map(inputFor));
       if (!Array.isArray(results) || results.length !== requests.length) {
         throw new CacheContractError(
           "Producer result count must match request count",
@@ -667,7 +679,7 @@ export function wrapHashedInputProducer(
         ...producerOptions,
         ...(producerBatching === undefined ? {} : { producerBatching }),
         cache,
-        produceMany: Object.assign(
+        produceMany:
           descriptor === undefined
             ? internalBulk(branchEntries[0]![1])
             : bulkProducerByIdType(
@@ -685,13 +697,11 @@ export function wrapHashedInputProducer(
                   Error
                 >,
               ),
-          { [producerRequestLease]: retain },
-        ),
       })
     : wrapProducer({
         ...producerOptions,
         cache,
-        produce: Object.assign(
+        produce:
           descriptor === undefined
             ? internalSingle(branchEntries[0]![1])
             : producerByIdType(
@@ -708,8 +718,6 @@ export function wrapHashedInputProducer(
                   AnyParams
                 >,
               ),
-          { [producerRequestLease]: retain },
-        ),
       });
 
   const calls = new Set<Promise<unknown>>();
@@ -745,31 +753,27 @@ export function wrapHashedInputProducer(
       checkMintedId(cache, routed[index]!.branch[0], id),
     );
 
-    // Acquire only after every mint check succeeds, so failed checks retain no input.
-    ids.forEach((id, index) => registry.acquire(id, inputs[index]!));
-
-    try {
-      const wrappedOptions = {
-        ...callOptions,
-        [wrappedReadStartedAt]: startedAt,
+    // The call-level directives apply to every element. Each request is
+    // complete (it has params and directives), so the client passes this
+    // same object to the producer instead of a filled-in copy; the producer
+    // finds the input by it (see `inputByRequest`).
+    const requests = ids.map((id, index) => {
+      const request = {
+        id,
+        params: {},
+        directives: callOptions?.directives ?? {},
       };
-      const result = wrapped.getMany(
-        // The call-level directives apply to every element. The conditional
-        // spread avoids `directives: undefined`, which
-        // `exactOptionalPropertyTypes` rejects.
-        ids.map((id) => ({
-          id,
-          ...(callOptions?.directives === undefined
-            ? {}
-            : { directives: callOptions.directives }),
-        })),
-        wrappedOptions,
-      );
-      admitted();
-      return await result;
-    } finally {
-      ids.forEach((id) => registry.release(id));
-    }
+      inputByRequest.set(request, { input: inputs[index]! });
+      return request;
+    });
+
+    const wrappedOptions = {
+      ...callOptions,
+      [wrappedReadStartedAt]: startedAt,
+    };
+    const result = wrapped.getMany(requests, wrappedOptions);
+    admitted();
+    return await result;
   };
 
   const getMany = (
@@ -912,64 +916,4 @@ function makeSupplementalHasher<Input>(
       AnyParams
     >;
   };
-}
-
-/**
- * A reference-counted registry mapping a derived cache id back to the input it
- * was hashed from, so the internal producer can recover the input on a miss.
- *
- * Reference counting (rather than a plain set/delete) is required because of
- * request collapsing: several concurrent calls for the same input derive the
- * same id and may share a single producer call. If the first caller to settle
- * deleted the entry, a still-in-flight caller (or the shared producer call)
- * could find it missing. Each call `acquire`s on the way in and `release`s in a
- * `finally`; the entry is dropped only when the last holder releases it. This
- * keeps the map bounded (unlike a process-lifetime map), since nothing is
- * retained past the calls that need it.
- *
- * Each queued production task holds a separate lease. A caller can release its
- * lease after cancellation or a stale return without losing queued input.
- * Production releases its lease after settlement, or after queued cancellation
- * removes its last foreground participant and no background obligation remains.
- */
-class InputRegistry<Input> {
-  private readonly entries = new Map<
-    string,
-    { input: Input; refCount: number }
-  >();
-
-  acquire(id: string, input: Input): void {
-    const existing = this.entries.get(id);
-    if (existing) {
-      existing.refCount += 1;
-      // Keep the latest input. For a given id the inputs are equal (barring an
-      // astronomically unlikely hash collision), so this is a no-op in practice.
-      existing.input = input;
-    } else {
-      this.entries.set(id, { input, refCount: 1 });
-    }
-  }
-
-  get(id: string): Input {
-    const entry = this.entries.get(id);
-    if (entry === undefined) {
-      throw new CacheContractError(
-        `wrapHashedInputProducer: no input is registered for cache id "${id}". ` +
-          "The producer was invoked for a key this wrapper did not produce, " +
-          "which should be impossible (it would indicate a hash collision or a bug).",
-      );
-    }
-    return entry.input;
-  }
-
-  release(id: string): void {
-    const entry = this.entries.get(id);
-    if (entry === undefined) {
-      return;
-    }
-    entry.refCount -= 1;
-    if (entry.refCount <= 0) {
-      this.entries.delete(id);
-    }
-  }
 }

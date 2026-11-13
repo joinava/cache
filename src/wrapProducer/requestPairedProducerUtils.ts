@@ -14,17 +14,61 @@ import type {
 import { normalizeProducerResultResource } from "../utils/normalization.js";
 
 /**
- * Replace undefined params + directives w/ empty objects
+ * The brand of {@link ReachesProducerAsIs}. It has no runtime value: no object
+ * is ever an instance. A `#private` member is used, not a `Tagged` tag,
+ * because TypeScript drops `#private` members from a spread's type, while it
+ * keeps a tag. So `{ ...request }` and `{ ...request, params }` lose the brand,
+ * as does copying properties one by one.
+ */
+export declare class ReachesProducerAsIsBrand {
+  // oxlint-disable-next-line no-unused-private-class-members -- a type-only brand; nothing reads it.
+  #reachesProducerAsIs: true;
+}
+
+/**
+ * A request object that the producer client passes to the producer as the
+ * same object, never as a copy. Only {@link completeRequest} creates one.
+ *
+ * The hashed-input wrapper depends on this: it keys each request object to its
+ * input in a `WeakMap`, and its producer looks the input up by the object it
+ * receives. The client holds the object in the production task until the task
+ * settles, so the input stays reachable exactly as long as the task needs it.
+ * A copy anywhere between `completeRequest` and the producer call would make
+ * that lookup miss at runtime. The brand turns the copy into a type error
+ * instead, wherever the client requires this type.
+ */
+export type ReachesProducerAsIs<Request extends object> = Request &
+  ReachesProducerAsIsBrand;
+
+function isCompleteRequest<Params extends AnyParams, Id extends string>(
+  req: PartialReadonlyConsumerRequest<Params, Id>,
+): req is ReadonlyConsumerRequest<Params, Id> {
+  return req.params !== undefined && req.directives !== undefined;
+}
+
+/**
+ * Fills in missing params and directives with empty objects. A request that
+ * already has both is returned as the same object, so that it reaches the
+ * producer unchanged (see {@link ReachesProducerAsIs}).
  */
 export function completeRequest<Params extends AnyParams, Id extends string>(
   req: PartialReadonlyConsumerRequest<Params, Id>,
-): ReadonlyConsumerRequest<Params, Id> {
-  const {
-    id,
-    params = {} satisfies Partial<Params> as ReadonlyDeep<Partial<Params>>,
-    directives = {} satisfies ConsumerDirectives as ReadonlyDeep<ConsumerDirectives>,
-  } = req;
-  return { id, params, directives };
+): ReachesProducerAsIs<ReadonlyConsumerRequest<Params, Id>> {
+  const complete: ReadonlyConsumerRequest<Params, Id> = isCompleteRequest(req)
+    ? req
+    : {
+        id: req.id,
+        params:
+          req.params ??
+          ({} satisfies Partial<Params> as ReadonlyDeep<Partial<Params>>),
+        directives:
+          req.directives ??
+          ({} satisfies ConsumerDirectives as ReadonlyDeep<ConsumerDirectives>),
+      };
+  // SAFETY: this is the one place the brand is created. The object is either
+  // the caller's own complete request or a fresh copy, and from here on the
+  // client passes it to the producer without copying it (the brand's purpose).
+  return complete as ReachesProducerAsIs<ReadonlyConsumerRequest<Params, Id>>;
 }
 
 /**

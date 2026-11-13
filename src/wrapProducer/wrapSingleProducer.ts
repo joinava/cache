@@ -19,7 +19,6 @@ import type {
 import type { LooseProducer } from "../types/05_Producer.js";
 import {
   createProducerClient,
-  releaseOnSettle,
   type ProducerScheduler,
   type ProducerSchedulerOptions,
 } from "./producerClient.js";
@@ -74,20 +73,18 @@ export class SingleProducerScheduler<
   constructor({
     collapseTasksMs,
     makeKey,
-    retain,
     dispatch,
   }: ProducerSchedulerOptions<Work, Produced>) {
     this.#sharer = new TaskSharer({
       collapseTasksMs,
       makeKey,
-      // Takes each task's lease, then sends the task. The sharer passes only
+      // Sends each task. The sharer passes only
       // tasks whose requests were not cancelled, and sends them in this same
       // turn, so no task needs a cancellation check here. Like the bulk
       // scheduler's `Batcher`, it rejects a task whose slot is an Error, and
       // wraps a non-Error rejection.
       schedule: (toStart) =>
         toStart.map((view) => {
-          const release = retain(view.input);
           const result = Promise.try(() =>
             dispatch(
               [
@@ -111,7 +108,7 @@ export class SingleProducerScheduler<
             },
           );
           return {
-            result: releaseOnSettle(release, result),
+            result,
             handle: undefined,
           };
         }),

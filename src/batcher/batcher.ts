@@ -211,9 +211,9 @@ export const DEFAULT_PRODUCER_BATCH_SIZE = 20;
  *    work still runs.
  *
  * Every entry's result settles, including on cancellation. So a caller that
- * must hold a resource for an item's whole life, such as a lease on the
- * item's inputs, acquires it before `enqueue` and releases it in a
- * `.finally` on the item's result. The batcher has no hook for this.
+ * must hold a resource for an item's whole life acquires it before `enqueue`
+ * and releases it in a `.finally` on the item's result. The batcher has no
+ * hook for this.
  *
  * @internal
  */

@@ -8,7 +8,6 @@
 import { pick } from "es-toolkit";
 import {
   Batcher,
-  settleResult,
   type BatchHandle,
   type BatchItem,
   type BatchOptions,
@@ -26,7 +25,6 @@ import type {
 import type { LooseBulkProducer } from "../types/05_Producer.js";
 import {
   createProducerClient,
-  releaseOnSettle,
   type DispatchedRequest,
   type ProducerScheduler,
   type ProducerSchedulerOptions,
@@ -119,7 +117,7 @@ export class BulkProducerScheduler<Work, Produced> implements ProducerScheduler<
       batching: BatchOptions;
     },
   ) {
-    const { batching, logger, dispatch, retain } = options;
+    const { batching, logger, dispatch } = options;
     this.#batcher = new Batcher({
       ...pick(batching, [
         "maxBatchSize",
@@ -143,23 +141,18 @@ export class BulkProducerScheduler<Work, Produced> implements ProducerScheduler<
     this.#sharer = new TaskSharer({
       collapseTasksMs: options.collapseTasksMs,
       makeKey: options.makeKey,
-      // Takes each task's lease, then starts the task. A direct call
-      // passes a list as the context, and collects its new tasks there to
-      // send itself. Any other call passes none, and its new tasks queue.
+      // Starts each task. A direct call passes a list as the context, and
+      // collects its new tasks there to send itself. Any other call passes
+      // none, and its new tasks queue.
       schedule: (toStart, directStarts) => {
-        const leases = toStart.map((view) => retain(view.input));
         const items = toStart.map((it) => ({ input: it, signal: it.signal }));
-        const started = directStarts
+        return directStarts
           ? items.map((item) => {
               const result = Promise.withResolvers<Produced>();
               directStarts.push({ item, result });
               return { result: result.promise, handle: undefined };
             })
           : this.#batcher.enqueue(items);
-        return started.map(({ result, handle }, index) => ({
-          result: releaseOnSettle(leases[index]!, result),
-          handle,
-        }));
       },
     });
   }
@@ -202,20 +195,12 @@ export class BulkProducerScheduler<Work, Produced> implements ProducerScheduler<
       ? undefined
       : [];
 
-    let outcomes;
-    try {
-      outcomes = this.#sharer.startOrRideTasks(
-        requests.map(({ request, signal }) => ({ input: request, signal })),
-        newDirectStarts,
-      );
-    } catch (error) {
-      // The sharer kept none of the new tasks, so no caller waits for them.
-      // Rejecting them still ends their leases.
-      newDirectStarts?.forEach(({ result }) => {
-        settleResult(result, { ok: false, error });
-      });
-      throw error;
-    }
+    // If this throws, the sharer kept none of the new tasks, so no caller
+    // waits for their results.
+    const outcomes = this.#sharer.startOrRideTasks(
+      requests.map(({ request, signal }) => ({ input: request, signal })),
+      newDirectStarts,
+    );
 
     if (newDirectStarts) {
       // A direct call also dispatches the queued tasks it rode, so they

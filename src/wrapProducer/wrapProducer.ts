@@ -35,7 +35,6 @@ export {
   isRequestingCacheBypass,
   notifyStore,
   PRODUCER_ERROR_FALLBACK_WARNING,
-  producerRequestLease,
   wrappedReadStartedAt,
   type OnStore,
 } from "./producerClient.js";
