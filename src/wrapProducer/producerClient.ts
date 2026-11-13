@@ -1162,15 +1162,9 @@ export function createProducerClient<
       );
     }
 
-    // Register admission before user hooks or producer callbacks can close the client.
     const startedAt = callOptions?.[wrappedReadStartedAt] ?? performanceNow();
-    const promise = Promise.resolve().then(() =>
-      run(requests, callOptions, startedAt),
-    );
-
-    void calls.track(promise);
-
-    return promise;
+    // Register admission before user hooks or producer callbacks can close the client.
+    return calls.run(() => run(requests, callOptions, startedAt));
   };
 
   // SAFETY: the runtime client is id-erased internally (see LooseProducer in types/05_Producer.ts),
