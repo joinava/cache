@@ -111,17 +111,17 @@ export class PendingResources<
   ): void {
     const normalizeVary = this.#normalizeVary;
     const tracked = resources.map((resource) => {
-      const normalized: { entry?: Entry<Spec, Validators, Params> } = {};
+      let normalizedEntry: Entry<Spec, Validators, Params>;
       return {
         id: resource.id,
         writtenAt: now,
         stored,
         get entry(): Entry<Spec, Validators, Params> {
-          normalized.entry ??= normalizeProducerResultResource(
+          normalizedEntry ??= normalizeProducerResultResource(
             normalizeVary,
             resource,
           );
-          return normalized.entry;
+          return normalizedEntry;
         },
       };
     });
