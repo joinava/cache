@@ -64,6 +64,11 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
   count these slots in `failedRequestCount`, and the invocation's `outcome`
   stays `"success"`. A wrong result count for the whole invocation still
   rejects every caller.
+- `Cache.get` and `Cache.getUnbatched` also find the resources of every
+  `Cache.store` call whose write has not settled. Before, only the producer
+  client that started a write found it, so a second client over the same
+  cache could run its producer again. Every read still reaches the Store.
+  `Cache.store` settles after its resources leave the pending set.
 - Compatible pending requests share producer work across calls. Producers
   receive original parameters; normalized parameters determine compatibility.
 - Postgres and SQLite preserve successful request slots when another request
