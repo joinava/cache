@@ -275,11 +275,11 @@ export default class Cache<
   }
 
   // Create this as an instance member to get `this` binding
-  public normalizeParams = (params: ReadonlyDeep<Partial<Params>>) =>
+  public readonly normalizeParams = (params: ReadonlyDeep<Partial<Params>>) =>
     normalizeParams(this.normalizeParamName, this.normalizeParamValue, params);
 
   // Create this as an instance member to get `this` binding
-  public normalizeVary = (vary: Vary<Params>) =>
+  public readonly normalizeVary = (vary: Vary<Params>) =>
     normalizeVary(this.normalizeParamName, this.normalizeParamValue, vary);
 
   /**

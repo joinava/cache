@@ -49,9 +49,7 @@ type CoveringStore<
   // would satisfy a registry of several.
   ([RequiredSpec] extends [StoreSupportedTypes]
     ? unknown
-    : {
-        readonly __storeMustSupportAtLeast: RequiredSpec;
-      });
+    : { readonly __storeMustSupportAtLeast: RequiredSpec });
 
 /**
  * Everything a `Cache` needs, as one bag. The store is a field rather

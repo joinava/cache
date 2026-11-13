@@ -383,6 +383,7 @@ async function readSingleStore<
   options?.signal?.throwIfAborted();
 
   const res = settled.map((result) => {
+    // The only rejections should be CacheContractErrors.
     if (result.status === "rejected") throw result.reason;
     return result.value;
   });
