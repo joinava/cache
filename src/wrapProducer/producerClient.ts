@@ -41,13 +41,11 @@ import type {
   Entry,
   Logger,
   PartialReadonlyConsumerRequest,
+  ProducerResultResource,
 } from "../types/index.js";
+import type { CacheLookupResult } from "../utils/cacheHelpers.js";
 import type { DispatchInfo } from "../scheduling/batcher.js";
 import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
-import {
-  CacheWithPendingResources,
-  type LookupFor,
-} from "../cache/CacheWithPendingResources.js";
 import {
   completeRequest,
   type ReachesProducerAsIs,
@@ -674,16 +672,20 @@ export function createProducerClient<
     logger = defaultLoggersByComponent["wrap-producer"],
   } = options;
   const covered = coveredTypeSet(producer);
-  // The client reads and writes only through this view, which overlays the
-  // entries whose write is still in flight; see CacheWithPendingResources.
-  const cache = new CacheWithPendingResources(options.cache, logger);
+  // The cache's reads also find the entries whose write is still in flight;
+  // see `Cache.store`.
+  const { cache } = options;
 
   // The client holds and sends each request as the object that
   // completeRequest returned; see ReachesProducerAsIs.
   type Request = ReachesProducerAsIs<LooseRequestFor<RT, Params>>;
   type Result = LooseResultFor<RT, Validators, Params>;
   type ResultEntry = LooseEntryFor<RT, Validators, Params>;
-  type Lookup = LookupFor<RT, Validators, Params>;
+  type Lookup = CacheLookupResult<
+    SpecForId<SpecOf<RT>, SpecOf<RT>["id"]>,
+    Validators,
+    Params
+  >;
   type Produced = { entry: ResultEntry; stored: Promise<void> };
   // Carries the classified type so the produce message can attribute each
   // request to its own type without re-classifying. The scheduler keeps the
@@ -699,11 +701,38 @@ export function createProducerClient<
   };
 
   // In-flight work that close() drains, in this order: accepted calls, their
-  // per-slot pipelines, the producer scheduler, then cache writes (which
-  // `cache.drain()` covers). Writes come last because they outlive the call
-  // that started them.
+  // per-slot pipelines, the producer scheduler, then cache writes. Writes come
+  // last because they outlive the call that started them. The client tracks
+  // its own writes, because it does not own the cache, so it cannot close it.
   const calls = new PendingPromisesTracker();
   const pipelines = new PendingPromisesTracker();
+  const writes = new PendingPromisesTracker();
+
+  // Starts writing `resources`. Returns the write, which never rejects
+  // unobserved: a failure is logged here.
+  const store = (
+    resources: readonly ProducerResultResource<
+      SpecOf<RT>,
+      Validators,
+      Params
+    >[],
+  ): Promise<void> => {
+    const stored =
+      resources.length === 0
+        ? Promise.resolve()
+        : Promise.try(() => cache.store(resources)).then(() => {});
+    void writes
+      .track(stored)
+      .catch((error: unknown) =>
+        logger(
+          "wrap-producer",
+          "trace",
+          "error storing producer's response",
+          error,
+        ),
+      );
+    return stored;
+  };
   // `closed` rejects new calls from the first close(). `closing` lets a
   // repeated close() share one drain.
   let closed = false;
@@ -774,9 +803,9 @@ export function createProducerClient<
   // Because the store is not awaited, the pending-task map alone leaves a
   // window -- from the producer resolving until the write lands -- in which an
   // identical call would read the store, miss, and run the producer again.
-  // `cache` is therefore a CacheWithPendingResources: it holds the entries
-  // handed to store() until that write settles, and every ordinary lookup
-  // merges them with the Store's candidates.
+  // The cache therefore holds the entries handed to store() until that write
+  // settles, and every ordinary lookup merges them with the Store's
+  // candidates.
   //
   // Each dispatch also publishes one `produce` diagnostics message when the
   // producer settles (one message per actual invocation; requests that
@@ -855,7 +884,7 @@ export function createProducerClient<
       const resources = prepared.flatMap((result) =>
         result instanceof Error ? [] : result.resources,
       );
-      const stored = cache.store(resources);
+      const stored = store(resources);
 
       return prepared.map((result) =>
         result instanceof Error ? result : { entry: result.entry, stored },
@@ -1186,7 +1215,7 @@ export function createProducerClient<
         await calls.drain();
         await pipelines.drain();
         await scheduler.close();
-        await cache.drain();
+        await writes.drain();
       })();
 
       return closing;

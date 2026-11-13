@@ -24,8 +24,7 @@ type PendingEntry<
 };
 
 /**
- * The producer wrappers' overlay of entries whose `cache.store()` is still in
- * flight.
+ * The cache's overlay of entries whose `cache.store()` is still in flight.
  *
  * ## Why it exists
  *
@@ -41,8 +40,8 @@ type PendingEntry<
  * for the producer twice.
  *
  * This overlay closes that window: every entry handed to `cache.store()` is
- * held here until that store call settles. `CacheWithPendingResources` takes a
- * snapshot of the overlay before each Store read, keeps it across the read,
+ * held here until that store call settles. `Cache` takes a snapshot of the
+ * overlay before each Store read, keeps it across the read,
  * and merges it with the stored candidates. Both sources use the
  * same freshness classification and selection rules.
  *
@@ -62,8 +61,8 @@ type PendingEntry<
  *   store, misses, and runs the producer again, exactly as if the overlay
  *   did not exist. An already-running lookup can retain its own snapshot
  *   after settlement; its persistence promise still reports the write result.
- * - It is per wrapper instance and in-process. Two wrappers over the same
- *   cache do not share it, and neither does another process.
+ * - It is per `Cache` instance and in-process. Every client of one cache
+ *   shares it, but another process does not.
  *
  * Variants are honored: an entry only matches a request whose (normalized)
  * params agree with the entry's `vary`, by the same rule the stores apply.
@@ -96,7 +95,7 @@ export class PendingResources<
    * Holds `resources` in the overlay until `stored` settles, then drops them
    * (whether it resolved or rejected -- see the class docs). `stored`'s
    * rejection is observed here but not swallowed for other holders of the
-   * promise: the wrapper still attaches its own logging handlers.
+   * promise: the caller of `Cache.store` still gets the rejection.
    *
    * Retain raw resources and their write-time date. Normalize a resource only
    * on its first pending lookup, and reuse that normalized entry afterward.

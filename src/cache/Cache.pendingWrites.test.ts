@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it, mock } from "node:test";
-import { setTimeout as sleep } from "node:timers/promises";
+import {
+  setImmediate as nextTurn,
+  setTimeout as sleep,
+} from "node:timers/promises";
 
 import Cache from "./Cache.js";
 import {
@@ -16,9 +19,6 @@ import {
   freshFor100,
   uniqueCacheName,
 } from "../../test/v2AcceptanceHelpers.js";
-import { CacheWithPendingResources } from "./CacheWithPendingResources.js";
-
-const noLog = () => {};
 
 const resource = (id: string, content: string) => ({
   id,
@@ -38,7 +38,7 @@ function gatedWriteStore(writeGate: Promise<void>) {
   return store;
 }
 
-describe("CacheWithPendingResources", suiteOptions, () => {
+describe("Cache pending writes", suiteOptions, () => {
   it("takes the pending snapshot before the Store read starts", async (t) => {
     const writeGate = Promise.withResolvers<void>();
     const readGate = Promise.withResolvers<void>();
@@ -53,10 +53,9 @@ describe("CacheWithPendingResources", suiteOptions, () => {
     });
     const cache = cacheOver(store);
     t.after(() => cache.close());
-    const overlay = new CacheWithPendingResources(cache, noLog);
 
-    const write = overlay.store([resource("a", "pending")]);
-    const lookupResult = overlay.get(lookup("a"));
+    const write = cache.store([resource("a", "pending")]);
+    const lookupResult = cache.get(lookup("a"));
     // The Store has read a miss. Now the write lands and leaves the overlay,
     // before the read returns.
     await storeAnswered.promise;
@@ -74,32 +73,66 @@ describe("CacheWithPendingResources", suiteOptions, () => {
       writeGate.resolve();
       await cache.close();
     });
-    const overlay = new CacheWithPendingResources(cache, noLog);
 
-    void overlay.store([
+    void cache.store([
       { id: "a", content: "pending", directives: { freshUntilAge: 0.05 } },
     ]);
     // Past the 50 ms freshness lifetime, while the write is still pending.
     await sleep(100);
 
-    assert.equal((await overlay.get(lookup("a"))).usable, undefined);
+    assert.equal((await cache.get(lookup("a"))).usable, undefined);
   });
 
   it("reports the write behind a pending entry, also after the write settles", async (t) => {
-    const cache = cacheOver();
+    const writeGate = Promise.withResolvers<void>();
+    const store = bulkMemoryStore<Spec>();
+    const cache = cacheOver(store);
     t.after(() => cache.close());
     await cache.store([resource("persisted", "stored")]);
-    const overlay = new CacheWithPendingResources(cache, noLog);
+    const write = store.store.bind(store);
+    mock.method(store, "store", async (...args: Parameters<typeof write>) => {
+      await writeGate.promise;
+      return await write(...args);
+    });
 
-    const write = overlay.store([resource("a", "pending")]);
+    const stored = cache.store([resource("a", "pending")]);
     const [pending, persisted] = await Promise.all([
-      overlay.get(lookup("a")),
-      overlay.get(lookup("persisted")),
+      cache.get(lookup("a")),
+      cache.get(lookup("persisted")),
     ]);
-    await write;
+    const reported = cache.writeFor(pending.usable!);
+    let settled = false;
+    void reported?.then(() => {
+      settled = true;
+    });
+    await nextTurn();
+    assert.equal(settled, false);
 
-    assert.equal(overlay.writeFor(pending.usable!), write);
-    assert.equal(overlay.writeFor(persisted.usable!), undefined);
+    writeGate.resolve();
+    await stored;
+    await reported;
+    assert.equal(settled, true);
+    assert.equal(cache.writeFor(pending.usable!), reported);
+    assert.equal(cache.writeFor(persisted.usable!), undefined);
+  });
+
+  it("does not serve a pending write after close starts", async (t) => {
+    const writeGate = Promise.withResolvers<void>();
+    const cache = new Cache({
+      store: gatedWriteStore(writeGate.promise),
+      name: uniqueCacheName("closed-pending"),
+      resourceTypes: ACCEPT_ANY_REGISTRY,
+      onGetAfterClose: "act-empty",
+    });
+    const write = cache.store([resource("a", "pending")]);
+    // close() waits for the write, so the entry stays pending while closed.
+    const closing = cache.close();
+    t.after(async () => {
+      writeGate.resolve();
+      await Promise.all([write, closing]);
+    });
+
+    assert.deepEqual(await cache.get(lookup("a")), { validatable: [] });
   });
 
   it("fails only the getUnbatched slot whose params cannot be normalized, and leaves it out of the Store call", async (t) => {
@@ -120,11 +153,10 @@ describe("CacheWithPendingResources", suiteOptions, () => {
       await writeGate.promise;
       return await write(...args);
     });
-    const overlay = new CacheWithPendingResources(cache, noLog);
     // Only an id with pending resources needs its params normalized.
-    const pendingWrite = overlay.store([resource("a", "pending")]);
+    const pendingWrite = cache.store([resource("a", "pending")]);
 
-    const [failed, read] = await overlay.getUnbatched([
+    const [failed, read] = await cache.getUnbatched([
       lookup("a", { language: "bad" }),
       lookup("b"),
     ]);
@@ -136,26 +168,5 @@ describe("CacheWithPendingResources", suiteOptions, () => {
     assert.ok(!(read instanceof Error));
     assert.equal(read?.usable, undefined);
     assert.deepEqual(getManyRequestCounts(), [1]);
-  });
-
-  it("drain waits for started writes and leaves the cache open", async (t) => {
-    const writeGate = Promise.withResolvers<void>();
-    const cache = cacheOver(gatedWriteStore(writeGate.promise));
-    t.after(() => cache.close());
-    const overlay = new CacheWithPendingResources(cache, noLog);
-
-    void overlay.store([resource("a", "pending")]);
-    const drained = overlay.drain();
-    assert.equal(
-      await Promise.race([
-        drained.then(() => "drained"),
-        sleep(20).then(() => "waiting"),
-      ]),
-      "waiting",
-    );
-
-    writeGate.resolve();
-    await drained;
-    assert.equal(cache.closed, false);
   });
 });

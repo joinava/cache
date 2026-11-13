@@ -4,12 +4,12 @@ This folder holds the parts that decide when work runs, which callers share it,
 and when an owner can close. None of them knows about caches, Stores or
 producers. Their owners supply that knowledge through callbacks.
 
-| Module                                                  | What it does                                                             | Who uses it                                                                                |
-| ------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
-| [`Batcher`](./batcher.ts)                               | Collects items and sends them to one `dispatch` function in batches.     | `Cache`, for Store reads. `BulkProducerScheduler`, for bulk producer calls.                |
-| [`TaskSharer`](./taskSharer.ts)                         | Lets requests with the same key share one pending task.                  | Both producer schedulers. `collapsedTaskCreator`.                                          |
-| [`collapsedTaskCreator`](./collapsedTaskCreator.ts)     | Wraps a task-starting function so that equal calls share a pending task. | Package users. It is the only public export here.                                          |
-| [`PendingPromisesTracker`](./pendingPromisesTracker.ts) | Tracks promises until they settle, so that `close` can wait for them.    | `Cache`, `Batcher`, `SqliteStore`, `CacheWithPendingResources`, and the producer wrappers. |
+| Module                                                  | What it does                                                             | Who uses it                                                                 |
+| ------------------------------------------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| [`Batcher`](./batcher.ts)                               | Collects items and sends them to one `dispatch` function in batches.     | `Cache`, for Store reads. `BulkProducerScheduler`, for bulk producer calls. |
+| [`TaskSharer`](./taskSharer.ts)                         | Lets requests with the same key share one pending task.                  | Both producer schedulers. `collapsedTaskCreator`.                           |
+| [`collapsedTaskCreator`](./collapsedTaskCreator.ts)     | Wraps a task-starting function so that equal calls share a pending task. | Package users. It is the only public export here.                           |
+| [`PendingPromisesTracker`](./pendingPromisesTracker.ts) | Tracks promises until they settle, so that `close` can wait for them.    | `Cache`, `Batcher`, `SqliteStore`, and the producer wrappers.               |
 
 The pieces compose like this:
 

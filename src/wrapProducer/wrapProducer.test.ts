@@ -1496,7 +1496,7 @@ describe("wrapProducer", () => {
       assert.equal(second.date.valueOf(), now + 20_000);
     });
 
-    it("the overlay is per wrapper: a second wrapper over the same cache reads the store", async () => {
+    it("the overlay is per cache: a second wrapper over the same cache finds the first wrapper's pending write", async () => {
       const otherProducer = mock.fn(async () => ({
         content: "other",
         directives: { freshUntilAge: 100 },
@@ -1510,10 +1510,10 @@ describe("wrapProducer", () => {
       await gatedSut({ id: "x" });
       expect(producer.mock.callCount()).to.eq(1);
 
-      // The first wrapper's write is still parked, and the second wrapper
-      // has no view of it: it misses and produces.
-      await otherSut.get({ id: "x" });
-      expect(otherProducer.mock.callCount()).to.eq(1);
+      // The first wrapper's write is still parked. The second wrapper reads
+      // the same cache, so it finds the pending entry and does not produce.
+      expect((await otherSut.get({ id: "x" })).content).to.not.eq("other");
+      expect(otherProducer.mock.callCount()).to.eq(0);
     });
   });
 });

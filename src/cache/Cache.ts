@@ -49,12 +49,15 @@ import {
 import * as entryUtils from "../utils/normalizedProducerResultResourceHelpers.js";
 import {
   classifyCacheEntries,
+  mergeCacheLookups,
   type CacheLookupResult,
 } from "../utils/cacheHelpers.js";
 import type { CacheOptions } from "./CacheOptions.js";
+import { PendingResources } from "./pendingResources.js";
 import { Batcher } from "../scheduling/batcher.js";
 import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
 import {
+  asError,
   readStoreObserved,
   raceWithSignal,
   assertUnreachable,
@@ -142,6 +145,45 @@ export default class Cache<
    * dispatches, and close() drains it first.
    */
   readonly #operations = new PendingPromisesTracker();
+  /**
+   * The resources of each `store` call whose write has not settled. The
+   * public `get` and `getUnbatched` merge them with the Store's candidates.
+   * See {@link PendingResources} for why the overlay exists and for its rules.
+   *
+   * ## Read order
+   *
+   * Each read takes its pending snapshot synchronously, BEFORE it starts the
+   * Store read. A write can land, and leave the overlay, while the Store read
+   * is running. If the snapshot came after the read, a call could then miss
+   * in both places and run the producer again. The snapshot is classified at
+   * snapshot time, like the Store's candidates are classified at read time.
+   *
+   * ## Every read also reaches the Store
+   *
+   * The overlay adds candidates; it never answers a request alone. `get` and
+   * `getUnbatched` read the Store for every request, also when a pending
+   * entry already matches, because the Store can hold a better candidate:
+   *
+   * - a newer persisted entry, from another client or process, which wins
+   *   under the canonical selection rules;
+   * - a fresh `usable` entry where the pending one is only usable while
+   *   revalidating or on error;
+   * - more `validatable` entries.
+   *
+   * Each read also emits its `read` diagnostics message. Skipping the read
+   * when the pending lookup has a fresh `usable` entry would be correct for
+   * the caller's directives, but a newer persisted entry would then lose.
+   * That saves a round trip only while a write is in flight, so the cache
+   * does not do it.
+   */
+  readonly #pending: PendingResources<SpecOf<RT>, Validators, Params>;
+  /**
+   * The write behind each pending entry that a read returned. Filled at
+   * snapshot time, because the overlay drops an entry once its write settles,
+   * and a caller may ask after that. Weak, so an entry that nobody holds any
+   * longer drops out on its own.
+   */
+  readonly #writeByEntry = new WeakMap<object, Promise<void>>();
   readonly #onGetAfterClose: "throw" | "act-empty";
   readonly #onStoreAfterClose: "throw" | "no-op";
   readonly #resourceTypeEntries: ResourceTypesEntries<RT>;
@@ -215,14 +257,15 @@ export default class Cache<
       options.normalizeParamValue ??
       (<K extends keyof Params>(_name: K, v: AnyParamValue) =>
         v as Params[K] & AnyParamValue);
+    this.#pending = new PendingResources(this.normalizeVary);
   }
 
   // Create this as an instance member to get `this` binding
-  private normalizeParams = (params: ReadonlyDeep<Partial<Params>>) =>
+  public normalizeParams = (params: ReadonlyDeep<Partial<Params>>) =>
     normalizeParams(this.normalizeParamName, this.normalizeParamValue, params);
 
   // Create this as an instance member to get `this` binding
-  private normalizeVary = (vary: Vary<Params>) =>
+  public normalizeVary = (vary: Vary<Params>) =>
     normalizeVary(this.normalizeParamName, this.normalizeParamValue, vary);
 
   /**
@@ -332,8 +375,30 @@ export default class Cache<
    * If Store.getMany returns an Error in this request's slot, only this caller
    * rejects. Other callers in the automatic batch retain their hits or misses.
    * A rejected store promise rejects every non-cancelled caller in the batch.
+   *
+   * The result also considers the entries of every `store` call whose write
+   * has not settled. The Store is read even when a pending entry matches (see
+   * `#pending`). Rejects without reading the Store if the request's
+   * parameters cannot be normalized for the pending match.
    */
   public async get<Id extends SpecOf<RT>["id"]>(
+    req: ReadonlyConsumerRequest<Params, Id>,
+    options?: ReadOptions,
+  ): Promise<CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>> {
+    options?.signal?.throwIfAborted();
+    // Synchronous, so it runs before the Store read starts (see "Read order"
+    // on `#pending`).
+    const pending = this.#pendingLookup(req);
+    const stored = await this.#getWithoutPending(req, options);
+    // Stored candidates precede pending candidates. The canonical selector
+    // chooses the later pending candidate when birth dates are equal.
+    return pending === undefined
+      ? stored
+      : mergeCacheLookups([stored, pending]);
+  }
+
+  /** {@link Cache.get} without the pending writes: the Store read alone. */
+  async #getWithoutPending<Id extends SpecOf<RT>["id"]>(
     req: ReadonlyConsumerRequest<Params, Id>,
     options?: ReadOptions,
   ): Promise<CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>> {
@@ -446,11 +511,65 @@ export default class Cache<
    * a classification failure rejects the whole call before touching the store,
    * emitting nothing.
    *
+   * Like {@link Cache.get}, each result also considers the pending writes.
+   * Every request whose pending snapshot succeeds is read from the Store,
+   * also when a pending entry matches. A request whose parameters cannot be
+   * normalized for the pending match gets that error in its slot and is left
+   * out of the Store call.
+   *
    * @param requests Array of consumer requests to process
    * @returns Promise that resolves to one CacheLookupResult or Error per
    * request, in the same order as the input requests
    */
   public async getUnbatched<
+    const Reqs extends readonly ReadonlyConsumerRequest<
+      Params,
+      SpecOf<RT>["id"]
+    >[],
+  >(
+    requests: Reqs,
+    options?: ReadOptions,
+  ): Promise<GetUnbatchedResults<Reqs, RT, Validators, Params>> {
+    options?.signal?.throwIfAborted();
+    // All snapshots precede the one Store read (see "Read order" on
+    // `#pending`).
+    const pending = requests.map((request) => {
+      try {
+        return this.#pendingLookup(request);
+      } catch (error) {
+        return asError(error);
+      }
+    });
+    const readIndexes = pending.flatMap((lookup, index) =>
+      lookup instanceof Error ? [] : [index],
+    );
+    const stored =
+      readIndexes.length === 0
+        ? []
+        : await this.#getUnbatchedWithoutPending(
+            readIndexes.map((index) => requests[index]!),
+            options,
+          );
+    const storedByIndex = new Map(
+      readIndexes.map((requestIndex, readIndex) => [
+        requestIndex,
+        stored[readIndex]!,
+      ]),
+    );
+
+    // SAFETY: slot i holds request i's lookup, or an Error. The mapped type
+    // narrows each slot by its own request's id, which a `map` cannot express.
+    return pending.map((lookup, index) => {
+      if (lookup instanceof Error) return lookup;
+      const storedLookup = storedByIndex.get(index)!;
+      return storedLookup instanceof Error || lookup === undefined
+        ? storedLookup
+        : mergeCacheLookups([storedLookup, lookup]);
+    }) as GetUnbatchedResults<Reqs, RT, Validators, Params>;
+  }
+
+  /** {@link Cache.getUnbatched} without the pending writes. */
+  async #getUnbatchedWithoutPending<
     const Reqs extends readonly ReadonlyConsumerRequest<
       Params,
       SpecOf<RT>["id"]
@@ -578,15 +697,38 @@ export default class Cache<
    *
    * Emits one `store-entry` diagnostics message PER entry (see
    * `CACHE_STORE_ENTRY_CHANNEL_NAME`).
+   *
+   * Until the write settles, `get` and `getUnbatched` also find `data` (see
+   * `#pending`). A resource without a `date` gets one write time, which both
+   * the Store and the pending lookup use, so the two agree on its age.
    */
-  public async store(
+  public store(
     data: readonly ProducerResultResource<SpecOf<RT>, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
-    return await this.#operations.run(() => this.#store(data));
+    const now = new Date();
+    const stored = this.#operations.run(() => this.#store(data, now));
+    const write = stored.then(() => {});
+    this.#pending.track(data, write, now);
+    // Settle only after the overlay drops `data`. A caller that awaits this
+    // call and then reads must find the entries once, in the Store, and not
+    // a second time in the overlay.
+    return write.then(() => stored);
+  }
+
+  /**
+   * The unfinished write behind an entry that `get` or `getUnbatched`
+   * returned from the pending writes. `undefined` for an entry that came from
+   * the Store, which is already persisted.
+   *
+   * @internal
+   */
+  public writeFor(entry: object): Promise<void> | undefined {
+    return this.#writeByEntry.get(entry);
   }
 
   async #store(
     data: readonly ProducerResultResource<SpecOf<RT>, Validators, Params>[],
+    now: Date,
   ): Promise<readonly StoreEntryResult[]> {
     // Classify all entry ids up front -- any failure rejects before we
     // normalize, emit events, or persist anything.
@@ -594,7 +736,6 @@ export default class Cache<
 
     if (this.#actEmptyBecauseClosed("store")) return [];
 
-    const now = new Date();
     const entriesWithTimes = data.map((it) => {
       const entry = normalizeProducerResultResource(
         this.normalizeVary,
@@ -685,7 +826,7 @@ export default class Cache<
     return true;
   }
 
-  /** Whether close has started; pending-write overlays must not bypass closure. */
+  /** Whether close has started. */
   public get closed(): boolean {
     return this.#closed;
   }
@@ -709,6 +850,38 @@ export default class Cache<
 
   public async [Symbol.asyncDispose]() {
     return this.close();
+  }
+
+  /**
+   * The pending candidates for one request, classified now, or `undefined`
+   * when no pending entry matches. Throws if the request's parameters cannot
+   * be normalized. Records each candidate's write for {@link Cache.writeFor}.
+   */
+  #pendingLookup<Id extends SpecOf<RT>["id"]>(
+    request: ReadonlyConsumerRequest<Params, Id>,
+  ):
+    | CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>
+    | undefined {
+    if (this.#closed || !this.#pending.has(request.id)) return undefined;
+    const pending = this.#pending.matching(
+      request.id,
+      this.normalizeParams(request.params),
+    );
+    if (pending.length === 0) return undefined;
+    pending.forEach(({ entry, stored }) => {
+      this.#writeByEntry.set(entry, stored);
+    });
+    return classifyCacheEntries(
+      // SAFETY: the overlay holds entries by id, so these are entries for
+      // `request.id`.
+      pending.map(({ entry }) => entry) as Entry<
+        SpecForId<SpecOf<RT>, Id>,
+        Validators,
+        Params
+      >[],
+      request.directives,
+      new Date(),
+    ).result;
   }
 
   #readStore<
