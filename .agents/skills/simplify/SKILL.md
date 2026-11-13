@@ -1,15 +1,15 @@
 ---
 name: simplify
-description: "Review the changed code for reuse, simplification, efficiency, altitude, state/docs-auditability, and the structure of the modules it touches, then apply the fixes and repeat until a pass changes nothing. Quality only — it does not hunt for bugs; use /code-review for that. Invoke with /simplify, and run it before every commit, including pure moves and renames."
+description: "Review the changed code for reuse, simplification, efficiency, altitude, state/docs-auditability, baseline and naming, and the structure of the modules it touches, then apply the fixes and repeat until a pass changes nothing. Quality only — it does not hunt for bugs; use /code-review for that. Invoke with /simplify, and run it before every commit, including pure moves and renames."
 ---
 
 # Simplify
 
-`/simplify → 6 cleanup agents in parallel → apply the fixes → repeat until a pass changes nothing`
+`/simplify → 7 cleanup agents in parallel → apply the fixes → repeat until a pass changes nothing`
 
 You are improving the quality of the changed code, not hunting for bugs. Review
-it for reuse, simplification, efficiency, altitude, state/documentation, and
-module-structure issues, then fix what you find. Do not look for correctness
+it for reuse, simplification, efficiency, altitude, state/documentation,
+baseline and naming, and module-structure issues, then fix what you find. Do not look for correctness
 bugs — that is what `/code-review` is for.
 
 Run it before every commit, including a commit that only moves or renames code.
@@ -21,6 +21,11 @@ flag, a dropped count check, dead paths, and duplicate mechanisms. In the next
 segment the agent skipped it on every commit, and the user had to find a
 780-line function, wrong-direction imports, and misplaced files.)
 
+This skill is the reviewer's side of the `design-iteration` skill. That skill
+holds the questions an author asks while writing the code. This skill checks
+the result. Run both: a review does not replace asking the questions while you
+design.
+
 ## Phase 0 — Gather the diff
 
 Run `git diff @{upstream}...HEAD` (or `git diff main...HEAD` / `git diff HEAD~1`
@@ -28,17 +33,17 @@ if there's no upstream) to get the unified diff under review. If there are
 uncommitted changes, or the range diff is empty, also run `git diff HEAD` and
 include the working-tree changes in scope — the review often runs before the
 commit. If a PR number, branch name, or file path was passed as an argument,
-review that target instead. Treat this diff as the review scope for the first
-five angles. The Structure angle reviews the whole files, classes, and folders
-that the diff touches.
+review that target instead. Treat this diff as the review scope for every
+angle except Structure. The Structure angle reviews the whole files, classes,
+and folders that the diff touches.
 
 Record the line count of each touched file (`wc -l`). Phase 3 reports the
 change against it.
 
-## Phase 1 — Review (6 cleanup agents in parallel)
+## Phase 1 — Review (7 cleanup agents in parallel)
 
-Launch **6 independent review agents** via the Agent tool, all in a single
-message so they run concurrently. Pass each agent the diff and one of the six
+Launch **7 independent review agents** via the Agent tool, all in a single
+message so they run concurrently. Pass each agent the diff and one of the seven
 angles below. Each returns its findings with `file`, `line`, a one-line
 `summary`, and the concrete cost (what is duplicated, wasted, or harder to
 maintain).
@@ -114,6 +119,34 @@ whether a type (a brand, a `#private` class) can carry it. Verify a brand
 with a type probe before you rely on it: a `type-fest` `Tagged` brand
 survives an object spread, so it cannot prove object identity.
 
+Also flag **call-order rules and "impossible" throws.** An API that works only
+if the caller calls A before B, and a field made optional with a throw for the
+case that "cannot happen", both let the code express a wrong state. Ask for one
+operation that does both steps, a hold or refcount that makes the wrong order
+impossible, or a union at the point where the paths meet.
+
+### Baseline & naming
+
+Compare the change with its base branch, and check its vocabulary.
+
+- **Losses from a rewrite.** For each name, log, comment, helper, `async`, or
+  test assertion that the diff removes, confirm that the change needs it gone.
+  When a refactor onto a new abstraction drops an output that callers had,
+  such as a log field, flag it. Do not accept it as a "behavior change" when
+  the new abstraction could expose the missing fact. (Real case: a rewrite
+  onto `TaskSharer` dropped the task key and the start reason from every log.
+  The agent reported this as a behavior change. One small return field
+  restored them.)
+- **One concept, several names.** List the nouns that the diff adds or
+  touches. Flag a value whose name changes as it passes through layers, a name
+  used for two concepts, and a wrapper that names an operation differently
+  from the component it wraps. (Real case: one boolean was `automatic`,
+  `accumulated`, `autoBatch`, and `autoBatched` in four layers.)
+- **Names by mechanism or first use.** Flag a name that describes one call
+  site or how something works, not what it is. Flag a function name that does
+  not cover all of the function's effects, such as a `flush` that also makes a
+  permanent mode change.
+
 ### Structure (the touched modules, not the diff)
 
 A diff can be clean while the module it lands in has outgrown its shape.
@@ -139,7 +172,19 @@ Review each file, class, and folder that the diff touches as a whole. Check:
 - **Dependency direction.** List each import that crosses a folder. Ask
   whether the lower layer should know about the higher one. "There is no
   cycle" and "it is type-only" do not answer that question. Move a type that
-  both sides need to the layer that both sides already depend on.
+  both sides need to the layer that both sides already depend on. Also flag a
+  generic component that encodes one caller's modes, such as an
+  `"automatic" | "direct"` parameter.
+- **Caller policy in the callee.** Flag a flag or parameter that repeats a
+  decision the caller already expresses through another input. (Real case: a
+  `background` flag only dropped the signal, and the caller already passed no
+  signal.)
+- **Caller workarounds.** Read each caller of a changed API. A pre-filter, a
+  `[0]!`, an inferred value that the callee knows, or two settings that
+  express one intent is evidence of a callee defect. Name the callee change
+  that removes the workaround. (Real case: a bulk call failed when one
+  request's signal had aborted, so its caller pre-filtered the requests. A
+  test even named the behavior as intended.)
 - **Repeated idioms.** Grep the repository, not only the diff, for the idiom
   the change uses: a set of promises plus a drain, a closed-state check, an
   adapter shim. At 3 or more copies, propose one named abstraction and
@@ -162,7 +207,9 @@ Review each file, class, and folder that the diff touches as a whole. Check:
 - **The smallest mechanism.** For each new option, field, or protocol, check
   whether callers can compose a tool they already have instead (wrapping a
   producer in `pLimit`, or keying a `WeakMap` on an object that already
-  exists). Prefer no new surface plus a doc note. (Real case: a proposed
+  exists). Prefer no new surface plus a doc note. The same holds for a new
+  flag, mode, sentinel, hook, or backstop: check whether reshaping an existing
+  operation or type gives the same guarantee. (Real case: a proposed
   `maxConcurrentBatches` option was dropped, because callers can wrap their
   own producer in `pLimit`. A proposed request-context field was replaced by
   a `WeakMap` from the request object to its input.)
@@ -232,12 +279,14 @@ replacement.
 
 ## Phase 2 — Apply the fixes
 
-Wait for all six agents to complete, dedup findings that point at the same
+Wait for all seven agents to complete, dedup findings that point at the same
 line or mechanism, and fix each remaining one directly. Skip any finding whose
 fix would change intended behavior, require changes well outside the reviewed
 diff, or that you judge to be a false positive — note the skip rather than
-arguing with it. For derived-state deletions, the existing test suite must
-pass unchanged — if behavior shifts, the state was load-bearing and the right
+arguing with it. A structural finding is not a reason to skip on its own. Skip
+it as conflicting with the user's choices only when it contradicts a decision
+the user stated, and name that decision. For derived-state deletions, the
+existing test suite must pass unchanged — if behavior shifts, the state was load-bearing and the right
 fix is upgrading its docs instead.
 
 Structure findings are often larger than the diff. Use these rules for them:
