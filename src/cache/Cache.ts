@@ -391,7 +391,18 @@ export default class Cache<
 
     const cacheEntries = await raceWithSignal(read, options?.signal).catch(
       (error: unknown) => {
-        this.#publishReadFailed([target], readStartedAt, error, options);
+        // An *aborted* read is not a failed read: the caller cancelled, and
+        // aborts already emit nothing (the `throwIfAborted` at the top of this
+        // method rejects before any message), so staying silent keeps that
+        // consistent instead of inflating read-failure rates with client
+        // cancellations.
+        if (options?.signal?.aborted !== true) {
+          this.#publishRead(target, readStartedAt, {
+            found: "read-failed",
+            error,
+          });
+        }
+
         throw error;
       },
     );
@@ -499,7 +510,20 @@ export default class Cache<
       // use it as a total denominator. A failed known-set read is N lookups
       // that all failed together. One message for the set would make a
       // subscriber's per-id read counts disagree with the successful path.
-      this.#publishReadFailed(targets, readStartedAt, error, options);
+      // An *aborted* read is not a failed read: the caller cancelled, and
+      // aborts already emit nothing (the `throwIfAborted` at the top of this
+      // method rejects before any message), so staying silent keeps that
+      // consistent instead of inflating read-failure rates with client
+      // cancellations.
+      if (options?.signal?.aborted !== true) {
+        targets.forEach((target) => {
+          this.#publishRead(target, readStartedAt, {
+            found: "read-failed",
+            error,
+          });
+        });
+      }
+
       throw error;
     });
 
@@ -756,26 +780,6 @@ export default class Cache<
       resourceId: target.id,
       durationMs: performance.now() - readStartedAt,
       ...outcome,
-    });
-  }
-
-  /**
-   * Publishes `found: "read-failed"` for each request of a failed Store read.
-   * An *aborted* read is not a failed read: the caller cancelled, and aborts
-   * already emit nothing (the `throwIfAborted` at the top of each read method
-   * rejects before any message), so staying silent keeps that consistent
-   * instead of inflating read-failure rates with client cancellations.
-   */
-  #publishReadFailed(
-    targets: readonly ReadTarget[],
-    readStartedAt: number,
-    error: unknown,
-    options: ReadOptions | undefined,
-  ): void {
-    if (options?.signal?.aborted === true) return;
-
-    targets.forEach((target) => {
-      this.#publishRead(target, readStartedAt, { found: "read-failed", error });
     });
   }
 }
