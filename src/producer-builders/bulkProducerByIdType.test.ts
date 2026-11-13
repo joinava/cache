@@ -15,7 +15,7 @@ import {
 } from "../index.js";
 import { bulkProducerByIdType } from "./bulkProducerByIdType.js";
 import { CacheContractError } from "../utils/utils.js";
-import wrapProducer from "./wrapProducer.js";
+import wrapProducer from "../wrapProducer/wrapProducer.js";
 
 /**
  * `bulkProducerByIdType`'s own contract, driven CACHE-FREE. That is the only

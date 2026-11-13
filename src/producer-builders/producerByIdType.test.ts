@@ -17,7 +17,7 @@ import {
   type ResourceTypes,
 } from "../index.js";
 import { producerByIdType } from "./producerByIdType.js";
-import wrapProducer from "./wrapProducer.js";
+import wrapProducer from "../wrapProducer/wrapProducer.js";
 
 /**
  * `producerByIdType` owns two contracts of its own, independent of the wrapper

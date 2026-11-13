@@ -24,7 +24,7 @@ import {
 import {
   UnroutableIdError,
   type UnroutableIdReason,
-} from "./producer-errors.js";
+} from "../wrapProducer/producer-errors.js";
 import { assertUnreachable } from "../utils/utils.js";
 import {
   coveredTypes,
@@ -33,7 +33,10 @@ import {
   type CoveringProducer,
   type ResourceTypeProducer,
 } from "../types/index.js";
-import type { LooseProducer, LooseRequestFor } from "./producerClient.js";
+import type {
+  LooseProducer,
+  LooseRequestFor,
+} from "../wrapProducer/producerClient.js";
 
 /**
  * Classifies `id` against the registry a by-id-type helper was built from and
@@ -95,7 +98,7 @@ export function resolveCoveredSubProducer<SubProducer>(
  * The write side of the coverage contract: what `producerByIdType` and
  * `bulkProducerByIdType` throw when handed an empty record. Shared so the two
  * helpers can't word the same refusal differently. The read side is
- * `coveredTypeSet` in producerClient.ts.
+ * `coveredTypeSet` in wrapProducer/producerClient.ts.
  */
 export function emptyProducersRecordMessage(
   helper: "producerByIdType" | "bulkProducerByIdType",

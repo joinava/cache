@@ -21,7 +21,7 @@ import {
   bulkHashedInputProducerByInputType,
   hashedInputProducerByInputType,
   type HashedInputVariant,
-} from "./hashedInputProducerByInputType.js";
+} from "../producer-builders/hashedInputProducerByInputType.js";
 import {
   MintedIdResourceTypeMismatchError,
   wrapHashedInputProducer,

@@ -56,15 +56,15 @@ export {
   type HashedInputProducer,
   type HashedInputProducerBuilder,
   type HashedInputVariant,
-} from "./wrapProducer/hashedInputProducerByInputType.js";
+} from "./producer-builders/hashedInputProducerByInputType.js";
 export {
   producerByIdType,
   type ProducersFor,
-} from "./wrapProducer/producerByIdType.js";
+} from "./producer-builders/producerByIdType.js";
 export {
   bulkProducerByIdType,
   type BulkProducersFor,
-} from "./wrapProducer/bulkProducerByIdType.js";
+} from "./producer-builders/bulkProducerByIdType.js";
 
 export {
   MintedIdResourceTypeMismatchError,

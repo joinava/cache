@@ -37,7 +37,7 @@ import type {
   LooseBulkProducer,
   LooseRequestFor,
   LooseResultFor,
-} from "./producerClient.js";
+} from "../wrapProducer/producerClient.js";
 
 /**
  * {@link bulkProducerByIdType}'s argument: one entry per covered resource
@@ -117,10 +117,11 @@ export function bulkProducerByIdType<
   resourceTypes: RT,
   producers: BulkProducersFor<RT, Covered, Validators, Params, ErrorType>,
 ): CoveringBulkProducer<RT, Covered, Validators, Params, ErrorType> {
-  // SAFETY: see LooseProducer in producerClient.ts. A value is only read out of
-  // this record after classification succeeds and the key is confirmed to be
-  // the record's own, so each sub-producer's slice holds exactly the ids it
-  // declared. Snapshotted for the reason given on `coveredTypeSet`.
+  // SAFETY: see LooseProducer in wrapProducer/producerClient.ts. A value is
+  // only read out of this record after classification succeeds and the key is
+  // confirmed to be the record's own, so each sub-producer's slice holds
+  // exactly the ids it declared. Snapshotted for the reason given on
+  // `coveredTypeSet`.
   const looseProducers = { ...producers } as unknown as Readonly<
     Record<string, LooseBulkProducer<RT, Validators, Params, ErrorType>>
   >;
@@ -235,9 +236,9 @@ export function bulkProducerByIdType<
   };
 
   // SAFETY: the dispatching function is id-erased internally (see
-  // LooseProducer in producerClient.ts), and the covered names are the record's
-  // own keys, so the declared set and the reachable sub-producers cannot
-  // disagree.
+  // LooseProducer in wrapProducer/producerClient.ts), and the covered names
+  // are the record's own keys, so the declared set and the reachable
+  // sub-producers cannot disagree.
   return Object.assign(dispatchingProducer, {
     [coveredTypes]: coveredResourceTypes,
   }) as unknown as CoveringBulkProducer<

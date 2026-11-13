@@ -28,12 +28,15 @@ import {
   type HashedInputProducer,
   type HashedInputProducerMeta,
   type LooseBranch,
-} from "./hashedInputProducerByInputType.js";
+} from "../producer-builders/hashedInputProducerByInputType.js";
 import {
   bulkProducerByIdType,
   type BulkProducersFor,
-} from "./bulkProducerByIdType.js";
-import { producerByIdType, type ProducersFor } from "./producerByIdType.js";
+} from "../producer-builders/bulkProducerByIdType.js";
+import {
+  producerByIdType,
+  type ProducersFor,
+} from "../producer-builders/producerByIdType.js";
 import { asError, CacheContractError } from "../utils/utils.js";
 import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
 

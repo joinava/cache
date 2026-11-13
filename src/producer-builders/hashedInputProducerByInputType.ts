@@ -19,7 +19,7 @@ import type {
   ProducerResultResource,
   RequestPairedProducerResult,
 } from "../types/index.js";
-import type { HashedInputProducerResult } from "./wrapHashedInputProducer.js";
+import type { HashedInputProducerResult } from "../wrapProducer/wrapHashedInputProducer.js";
 
 /**
  * One variant of a hashed-input cache: the `input` a resource type's values are
