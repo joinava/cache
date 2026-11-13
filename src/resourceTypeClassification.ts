@@ -7,7 +7,8 @@
  * that directory's contract says. This file holds the values: the two entry
  * constructors (`resourceType`, `idStartsWith`) and classification itself
  * (`resourceTypesEntries`, `classifyIdAgainst`), plus the two types that exist purely
- * as their result shapes.
+ * as their result shapes, and the two errors that report a failed classification
+ * (`UnclassifiableIdError`, `AmbiguousResourceTypeError`).
  *
  * ## Classification contract
  *
@@ -39,6 +40,7 @@
  *
  * @module
  */
+import { CacheContractError } from "./utils/utils.js";
 import type {
   ResourceTypeName,
   ResourceTypes,
@@ -170,4 +172,64 @@ export function classifyIdAgainst<RT extends ResourceTypes>(
   return extraMatches === undefined
     ? { matched: "one", name: firstMatch }
     : { matched: "many", names: [firstMatch, ...extraMatches] };
+}
+
+/**
+ * Thrown when an id matches zero resource types in the cache's registry.
+ * See the classification contract in {@link ResourceTypes}' module docs.
+ */
+export class UnclassifiableIdError extends CacheContractError {
+  override readonly name = "UnclassifiableIdError";
+  readonly cacheName: string;
+  readonly id: string;
+
+  constructor(args: {
+    cacheName: string;
+    id: string;
+    message?: string;
+    /**
+     * When one or more registry guards THREW on this id (rather than
+     * returning false), the error(s) land here (an `AggregateError` when
+     * more than one threw) so the underlying parse failure stays
+     * debuggable from the log line. See `Cache.classify`.
+     */
+    cause?: unknown;
+  }) {
+    super(
+      args.message ??
+        `Cache "${args.cacheName}": id ${JSON.stringify(args.id)} matches no resource type in the registry`,
+      args.cause === undefined ? undefined : { cause: args.cause },
+    );
+    this.cacheName = args.cacheName;
+    this.id = args.id;
+  }
+}
+
+/**
+ * Thrown when an id matches more than one resource type in the cache's
+ * registry. Registries must partition the id space, so this always indicates
+ * a bug in the registry's `matches` guards; classification fails loud (over
+ * first-match-wins) so the overlap is caught the first time it occurs rather
+ * than silently resolved by object-key order.
+ */
+export class AmbiguousResourceTypeError extends CacheContractError {
+  override readonly name = "AmbiguousResourceTypeError";
+  readonly cacheName: string;
+  readonly id: string;
+  readonly matchedResourceTypes: readonly string[];
+
+  constructor(args: {
+    cacheName: string;
+    id: string;
+    matchedResourceTypes: readonly string[];
+    message?: string;
+  }) {
+    super(
+      args.message ??
+        `Cache "${args.cacheName}": id ${JSON.stringify(args.id)} matches more than one resource type in the registry (${args.matchedResourceTypes.join(", ")})`,
+    );
+    this.cacheName = args.cacheName;
+    this.id = args.id;
+    this.matchedResourceTypes = args.matchedResourceTypes;
+  }
 }

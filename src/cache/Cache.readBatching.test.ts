@@ -19,7 +19,8 @@ import {
   uniqueCacheName,
   waitUntil,
 } from "../../test/v2AcceptanceHelpers.js";
-import Cache, { singleTypeCacheOptions } from "./Cache.js";
+import Cache from "./Cache.js";
+import { singleTypeCacheOptions } from "./singleTypeCacheOptions.js";
 import MemoryStore from "../stores/MemoryStore/MemoryStore.js";
 import wrapProducer from "../wrapProducer/wrapProducer.js";
 

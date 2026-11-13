@@ -20,7 +20,7 @@ import type { ReadonlyDeep } from "type-fest";
 import {
   AmbiguousResourceTypeError,
   UnclassifiableIdError,
-} from "../cache/Cache.js";
+} from "../resourceTypeClassification.js";
 import { UnroutableIdError } from "../producer-builders/producerByIdType.js";
 import {
   cacheProduceChannel,

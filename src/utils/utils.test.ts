@@ -4,7 +4,8 @@ import {
   getOne,
   lookup,
 } from "../../test/fixtures.js";
-import Cache, { singleTypeCacheOptions } from "../cache/Cache.js";
+import Cache from "../cache/Cache.js";
+import { singleTypeCacheOptions } from "../cache/singleTypeCacheOptions.js";
 import MemoryStore from "../stores/MemoryStore/MemoryStore.js";
 import type { CacheSpec } from "../types/00_CacheSpec.js";
 import { normalizeParams } from "./normalization.js";

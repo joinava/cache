@@ -5,16 +5,12 @@ import {
   isValidatable,
 } from "./utils/normalizedProducerResultResourceHelpers.js";
 
+export { default as Cache, type ReadOptions } from "./cache/Cache.js";
 export {
-  AmbiguousResourceTypeError,
-  default as Cache,
   singleTypeCacheOptions,
-  UnclassifiableIdError,
-  type CacheOptions,
-  type ReadOptions,
   type SingleTypeCacheOptionsBuilder,
   type SingleTypeRegistry,
-} from "./cache/Cache.js";
+} from "./cache/singleTypeCacheOptions.js";
 export type { CacheLookupResult } from "./utils/cacheHelpers.js";
 export { default as MemoryStore } from "./stores/MemoryStore/MemoryStore.js";
 export { default as PostgresStore } from "./stores/PostgresStore/PostgresStore.js";
@@ -28,10 +24,12 @@ export {
   type SqliteStoreSupportedParams,
 } from "./stores/SqliteStore/SqliteStore.js";
 export {
+  AmbiguousResourceTypeError,
   classifyIdAgainst,
   idStartsWith,
   resourceType,
   resourceTypesEntries,
+  UnclassifiableIdError,
   type IdClassification,
   type ResourceTypesEntries,
 } from "./resourceTypeClassification.js";

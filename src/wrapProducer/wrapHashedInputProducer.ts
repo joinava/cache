@@ -9,7 +9,7 @@ import type { ReadonlyDeep } from "type-fest";
 import {
   AmbiguousResourceTypeError,
   UnclassifiableIdError,
-} from "../cache/Cache.js";
+} from "../resourceTypeClassification.js";
 import type { CacheSpec, SpecForId } from "../types/00_CacheSpec.js";
 import type {
   ContentOfResourceType,
