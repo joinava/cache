@@ -73,6 +73,16 @@ import { PendingResources } from "./pendingResources.js";
  * share pending writes. It does not own the underlying cache, which other
  * clients may share, so it has {@link drain} instead of a `close`.
  *
+ * TODO: Move this overlay into `Cache`, so that every client of one cache,
+ * and direct `Cache.get` callers, share one set of pending writes. A pending
+ * write is a fact about the cache, not about one client: today a client can
+ * miss a write that a sibling client has in flight, and run its producer
+ * again. `Cache.store` would track the write, `Cache.get` and
+ * `Cache.getUnbatched` would merge the pending entries, and `Cache.close`
+ * already drains writes. This class would then reduce to a pass-through, or
+ * go away. The `PendingResources` docs, which say two wrappers do not share
+ * the overlay, would change too.
+ *
  * @internal
  */
 export class CacheWithPendingResources<
