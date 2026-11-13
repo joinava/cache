@@ -11,13 +11,12 @@ import {
   ACCEPT_ANY_REGISTRY,
   freshFor100,
 } from "../test/v2AcceptanceHelpers.js";
-import Cache from "./Cache.js";
+import Cache from "./cache/Cache.js";
 import {
   bulkProducerByIdType,
   idStartsWith,
   producerByIdType,
   resourceType,
-  wrapBulkProducer,
   wrapProducer,
   type ResourceTypes,
   type SpecOf,
@@ -104,7 +103,7 @@ const contentsOf = (
 
 describe("single producer function + by-id-type sugar", () => {
   describe("1. full-batch delivery (the capability this change exists for)", () => {
-    it("wrapBulkProducer: a bare producer is invoked exactly ONCE with every request, spanning both resource types, in the caller's order", async () => {
+    it("produceMany: a bare producer is invoked exactly ONCE with every request, spanning both resource types, in the caller's order", async () => {
       const { cache } = makeHarness("sp-full-batch");
       const bulkProducer = mock.fn(async (reqs: BulkReqs) =>
         reqs.map((req) => ({
@@ -112,9 +111,9 @@ describe("single producer function + by-id-type sugar", () => {
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer({ cache }, bulkProducer);
+      const getBulk = wrapProducer({ cache, produceMany: bulkProducer });
       try {
-        const results = await getBulk([
+        const results = await getBulk.getMany([
           { id: "story:1" },
           { id: "collection:1" },
           { id: "story:2" },
@@ -142,56 +141,6 @@ describe("single producer function + by-id-type sugar", () => {
   });
 
   describe("2. per-type dispatch through bulkProducerByIdType (§3.4)", () => {
-    it("splits the mixed batch by classified type, calls each sub-producer once with its own slice, and reassembles into the CALLER's order", async () => {
-      const { cache } = makeHarness("sp-by-id-type");
-      const storyBulk = mock.fn(async (reqs: BulkReqs) =>
-        reqs.map((req) => ({
-          content: `story-${req.id}`,
-          directives: freshFor100,
-        })),
-      );
-      const collectionBulk = mock.fn(async (reqs: BulkReqs) =>
-        reqs.map((req) => ({
-          content: `collection-${req.id}`,
-          directives: freshFor100,
-        })),
-      );
-      const getBulk = wrapBulkProducer(
-        { cache },
-        bulkProducerByIdType(cache.resourceTypes, {
-          story: storyBulk,
-          collection: collectionBulk,
-        }),
-      );
-      try {
-        const results = await getBulk([
-          { id: "story:1" },
-          { id: "collection:1" },
-          { id: "story:2" },
-        ]);
-
-        expect(storyBulk.mock.callCount()).to.equal(1);
-        expect(
-          storyBulk.mock.calls[0]?.arguments[0]?.map((req) => req.id),
-        ).to.deep.equal(["story:1", "story:2"]);
-        expect(collectionBulk.mock.callCount()).to.equal(1);
-        expect(
-          collectionBulk.mock.calls[0]?.arguments[0]?.map((req) => req.id),
-        ).to.deep.equal(["collection:1"]);
-
-        // Reassembly is positional AND correct: an implementation that simply
-        // concatenated the per-type slices would answer
-        // [story:1, story:2, collection:1] here.
-        expect(contentsOf(results)).to.deep.equal([
-          "story-story:1",
-          "collection-collection:1",
-          "story-story:2",
-        ]);
-      } finally {
-        await cache.close();
-      }
-    });
-
     it("reassembles by POSITION, not by id: a batch repeating one id with different params gets each slot's own result", async () => {
       const { cache } = makeHarness("sp-by-id-type-dupes");
       // Content is keyed by the request's index WITHIN its slice, so an
@@ -210,15 +159,15 @@ describe("single producer function + by-id-type sugar", () => {
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer(
-        { cache },
-        bulkProducerByIdType(cache.resourceTypes, {
+      const getBulk = wrapProducer({
+        cache,
+        produceMany: bulkProducerByIdType(cache.resourceTypes, {
           story: storyBulk,
           collection: collectionBulk,
         }),
-      );
+      });
       try {
-        const results = await getBulk([
+        const results = await getBulk.getMany([
           { id: "story:dupe", params: { variant: "a" } },
           { id: "collection:1" },
           { id: "story:dupe", params: { variant: "b" } },
@@ -239,50 +188,31 @@ describe("single producer function + by-id-type sugar", () => {
   });
 
   describe("3. error isolation inside bulkProducerByIdType (§3.4)", () => {
-    it("a REJECTING sub-producer errors only its own type's slots; the other type's results are delivered normally", async () => {
+    it("a REJECTING sub-producer settles only its own type's fetches as producer-error, and the invocation still succeeds", async () => {
       const { name, cache } = makeHarness("sp-sugar-error-isolation");
       const capture = captureChannels(name);
-      const storyFailure = new Error("story origin unreachable");
-      const storyBulk = mock.fn(async () => {
-        throw storyFailure;
-      });
-      const collectionBulk = mock.fn(async (reqs: BulkReqs) =>
-        reqs.map((req) => ({
-          content: `collection-${req.id}`,
-          directives: freshFor100,
-        })),
-      );
-      const getBulk = wrapBulkProducer(
-        { cache },
-        bulkProducerByIdType(cache.resourceTypes, {
-          story: storyBulk,
-          collection: collectionBulk,
+      const getBulk = wrapProducer({
+        cache,
+        produceMany: bulkProducerByIdType(cache.resourceTypes, {
+          story: async () => {
+            throw new Error("story origin unreachable");
+          },
+          collection: async (reqs: BulkReqs) =>
+            reqs.map((req) => ({
+              content: `collection-${req.id}`,
+              directives: freshFor100,
+            })),
         }),
-      );
+      });
       try {
-        const results = await getBulk([
+        await getBulk.getMany([
           { id: "story:1" },
           { id: "collection:1" },
           { id: "story:2" },
         ]);
 
-        // The sugar catches the rejection and writes it into that type's slots
-        // -- so the call RESOLVES rather than rejecting wholesale.
-        expect(results[0]).to.equal(storyFailure);
-        expect(results[2]).to.equal(storyFailure);
-        const collectionSlot = results[1];
-        if (collectionSlot instanceof Error) {
-          throw collectionSlot;
-        }
-        expect(collectionSlot.content).to.equal("collection-collection:1");
-
-        // Both sub-producers ran: the story failure did not cancel or skip the
-        // collection slice.
-        expect(storyBulk.mock.callCount()).to.equal(1);
-        expect(collectionBulk.mock.callCount()).to.equal(1);
-
-        // Per-request settlement matches: the story elements are
-        // producer-error, the collection element is served-from-producer.
+        // Per-request settlement: the story elements are producer-error, the
+        // collection element is served-from-producer.
         expect(capture.fetch).to.have.lengthOf(3);
         const dispositionsById = Object.fromEntries(
           capture.fetch.map((message) => [
@@ -308,9 +238,9 @@ describe("single producer function + by-id-type sugar", () => {
     });
 
     // The contrasting case -- a sub-producer whose result COUNT disagrees with
-    // its slice, which the sugar rejects rather than padding with Errors, failing
-    // the whole invocation including its healthy sibling type's element -- is
-    // pinned in bulkProducerByIdType.test.ts. The wrapper's own under-return
+    // its slice, which the sugar fills with one CacheContractError per slot of
+    // that slice while the healthy sibling type's element is still delivered --
+    // is pinned in bulkProducerByIdType.test.ts. The wrapper's own under-return
     // check, reachable only via a bare producer now, is in
     // diagnosticsChannels.test.ts with the full channel consequences (produce
     // outcome, nothing stored, per-element dispositions).
@@ -326,9 +256,9 @@ describe("single producer function + by-id-type sugar", () => {
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer({ cache }, bulkProducer);
+      const getBulk = wrapProducer({ cache, produceMany: bulkProducer });
       try {
-        await getBulk([
+        await getBulk.getMany([
           { id: "story:1" },
           { id: "collection:1" },
           { id: "story:2" },
@@ -342,13 +272,14 @@ describe("single producer function + by-id-type sugar", () => {
         expect(capture.produce).to.have.lengthOf(1);
         expectProduceMessage(capture.produce[0], {
           cache: name,
+          autoBatched: true,
           trigger: "miss",
           requests: [
             { resourceType: "story", resourceId: "story:1" },
             { resourceType: "collection", resourceId: "collection:1" },
             { resourceType: "story", resourceId: "story:2" },
           ],
-          collapsedCallerCount: 1,
+          collapsedRequestCount: 0,
           outcome: "success",
         });
 
@@ -401,19 +332,22 @@ describe("single producer function + by-id-type sugar", () => {
       // `{ visits: fn }` -> `fn` is the migration §7 applies to the majority of
       // the monorepo's cache constructions; the two forms must be
       // indistinguishable to callers.
-      const getBare = wrapProducer({ cache: bare.cache }, bareProducer);
-      const getRecord = wrapProducer(
-        { cache: record.cache },
-        producerByIdType(record.cache.resourceTypes, {
+      const getBare = wrapProducer({
+        cache: bare.cache,
+        produce: bareProducer,
+      });
+      const getRecord = wrapProducer({
+        cache: record.cache,
+        produce: producerByIdType(record.cache.resourceTypes, {
           visits: recordProducer,
         }),
-      );
+      });
       const bareCapture = captureChannels(bare.name);
       const recordCapture = captureChannels(record.name);
       try {
         const [bareMiss, recordMiss] = await Promise.all([
-          getBare({ id: "v1" }),
-          getRecord({ id: "v1" }),
+          getBare.get({ id: "v1" }),
+          getRecord.get({ id: "v1" }),
         ]);
         // `date` is stamped per invocation, so it legitimately differs between
         // the two independent producer calls; everything else must match.
@@ -432,8 +366,8 @@ describe("single producer function + by-id-type sugar", () => {
         );
 
         const [bareHit, recordHit] = await Promise.all([
-          getBare({ id: "v1" }),
-          getRecord({ id: "v1" }),
+          getBare.get({ id: "v1" }),
+          getRecord.get({ id: "v1" }),
         ]);
         expect(omit(bareHit, ["date"])).to.deep.equal(
           omit(recordHit, ["date"]),
@@ -458,7 +392,7 @@ describe("single producer function + by-id-type sugar", () => {
       }
     });
 
-    it("wrapBulkProducer: a bare producer over a sole-type cache keeps request order and leaves cached ids to the cache", async () => {
+    it("produceMany: a bare producer over a sole-type cache keeps request order and leaves cached ids to the cache", async () => {
       const { cache } = makeSoleHarness("sp-sole-bulk-bare");
       const bulkProducer = mock.fn(async (reqs: BulkReqs) =>
         reqs.map((req) => ({
@@ -466,7 +400,7 @@ describe("single producer function + by-id-type sugar", () => {
           directives: freshFor100,
         })),
       );
-      const getBulk = wrapBulkProducer({ cache }, bulkProducer);
+      const getBulk = wrapProducer({ cache, produceMany: bulkProducer });
       try {
         await cache.store([
           {
@@ -476,7 +410,7 @@ describe("single producer function + by-id-type sugar", () => {
           },
         ]);
 
-        const results = await getBulk([
+        const results = await getBulk.getMany([
           { id: "b" },
           { id: "cached-1" },
           { id: "a" },

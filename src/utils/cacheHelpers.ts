@@ -6,7 +6,6 @@ import type {
   CacheSpec,
   ConsumerDirectives,
   Entry,
-  Vary,
 } from "../types/index.js";
 import {
   birthDate,
@@ -30,43 +29,6 @@ export type CacheLookupResult<
   validatable: Entry<MatchingSpecs, Validators, Params>[];
 };
 
-/**
- * What a *completed* lookup contributes to its read message: the `found`
- * value paired with the variant it identifies, if any.
- *
- * Exported because `Cache`'s lookup evaluation returns one and spreads it into
- * the message -- the same reason `CacheFetchDisposition` is exported for
- * the wrappers. Pairing the two fields in one value is what keeps "which
- * `found` values carry a `vary`" stated once instead of re-derived at each of
- * the four publish sites.
- */
-export type CacheReadOutcome =
-  | {
-      found: "usable" | "usable-while-revalidate" | "usable-if-error";
-      /**
-       * The SELECTED entry's (normalized) vary -- identifying the
-       * `(resourceId, vary)` variant this lookup matched, which is the same
-       * key `store-entry` reports for the write that put the value there (see
-       * `CacheStoreEntryMessage.vary` in diagnostics.ts). Reads and stores can therefore
-       * be joined per variant rather than per id, which is the only way to
-       * get correct per-variant counts out of a varying producer.
-       *
-       * When more than one entry qualified, this is the one the lookup
-       * actually chose (the freshest), matching the entry handed back in the
-       * lookup result.
-       */
-      vary: Vary<AnyParams>;
-    }
-  | {
-      found: "none";
-      /**
-       * No entry was selected, so there is no variant to identify. Absent
-       * rather than `{}`, which identifies a real variant (see the diagnostics
-       * module overview).
-       */
-      vary?: undefined;
-    };
-
 /** Select the newest suitable entry; equal birth dates select the later candidate. */
 function bestEntry<
   Spec extends CacheSpec,
@@ -88,36 +50,18 @@ function selectCacheLookup<
   usableWhileRevalidate: readonly Entry<Spec, Validators, Params>[];
   usableIfError: readonly Entry<Spec, Validators, Params>[];
   validatable: readonly Entry<Spec, Validators, Params>[];
-}): {
-  result: CacheLookupResult<Spec, Validators, Params>;
-  outcome: CacheReadOutcome;
-} {
+}): CacheLookupResult<Spec, Validators, Params> {
+  // `readOutcomeOf` in diagnostics.ts checks the slots in this same order to
+  // name the selected entry. Keep the two orders the same.
   const usable = bestEntry(candidates.usable);
-  if (usable !== undefined)
-    return {
-      result: { usable, validatable: [] },
-      outcome: { found: "usable", vary: usable.vary },
-    };
+  if (usable !== undefined) return { usable, validatable: [] };
   const validatable = [...candidates.validatable];
   const usableWhileRevalidate = bestEntry(candidates.usableWhileRevalidate);
   if (usableWhileRevalidate !== undefined)
-    return {
-      result: { usableWhileRevalidate, validatable },
-      outcome: {
-        found: "usable-while-revalidate",
-        vary: usableWhileRevalidate.vary,
-      },
-    };
+    return { usableWhileRevalidate, validatable };
   const usableIfError = bestEntry(candidates.usableIfError);
-  if (usableIfError !== undefined)
-    return {
-      result: { usableIfError, validatable },
-      outcome: { found: "usable-if-error", vary: usableIfError.vary },
-    };
-  return {
-    result: { usableIfError: undefined, validatable },
-    outcome: { found: "none" },
-  };
+  if (usableIfError !== undefined) return { usableIfError, validatable };
+  return { usableIfError: undefined, validatable };
 }
 
 /** Canonical freshness classification and selection for stored or pending entries. */
@@ -134,7 +78,7 @@ export function classifyCacheEntries<
     classify(entry, directives, now),
   );
   return {
-    ...selectCacheLookup({
+    result: selectCacheLookup({
       usable: classifiedEntries[EntryClassification.Usable] ?? [],
       usableWhileRevalidate:
         classifiedEntries[EntryClassification.UsableWhileRevalidate] ?? [],
@@ -164,5 +108,5 @@ export function mergeCacheLookups<
       .map((lookup) => lookup.usableIfError)
       .filter((entry) => entry !== undefined),
     validatable: lookups.flatMap((lookup) => lookup.validatable),
-  }).result;
+  });
 }

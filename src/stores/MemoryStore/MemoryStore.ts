@@ -1,16 +1,15 @@
-import { timeSlicedMap, timeSlicedMapFromEntries } from "../../utils/time-slicing.js";
+import { timeSlicedMap, timeSlicedMapFromEntries } from "@zingage/scheduling";
 import type { CacheSpec, SpecForId } from "../../types/00_CacheSpec.js";
 import type {
   StoreEntryResult,
-  StoreGetManyResult,
-} from "../../types/06_Store.js";
+  StoreOperations,
+  SingleStoreReader,
+} from "../../types/07_Store.js";
 import {
   type AnyParams,
   type AnyValidators,
   type Entry,
   type EntryForId,
-  type NormalizedParams,
-  type Store,
   type StoreEntryInput,
   type StoreGetManyRequest,
 } from "../../types/index.js";
@@ -49,7 +48,11 @@ export default class MemoryStore<
   Spec extends CacheSpec = CacheSpec,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
-> implements Store<Spec, Validators, Params> {
+>
+  implements
+    StoreOperations<Spec, Validators, Params>,
+    SingleStoreReader<Spec, Validators, Params>
+{
   /**
    * This map stores metadata about each distinct `ResourceId` (i.e., primary
    * cache key) that's stored. Specifically...
@@ -149,30 +152,12 @@ export default class MemoryStore<
   }
 
   public async get<Id extends Spec["id"]>(
-    id: Id,
-    normalizedParams: NormalizedParams<Params>,
+    request: StoreGetManyRequest<Spec, Params> & { readonly id: Id },
     options?: { signal?: AbortSignal },
   ): Promise<Entry<SpecForId<Spec, Id>, Validators, Params>[]> {
     options?.signal?.throwIfAborted();
-    return this.#getOneSync(id, normalizedParams);
-  }
 
-  public async getMany<
-    const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
-  >(
-    requests: Reqs,
-    options?: { signal?: AbortSignal },
-  ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params, never>> {
-    options?.signal?.throwIfAborted();
-    return (await timeSlicedMap(requests, (it) =>
-      this.#getOneSync(it.id, it.params),
-    )) as StoreGetManyResult<Spec, Reqs, Validators, Params, never>;
-  }
-
-  #getOneSync<Id extends Spec["id"]>(
-    id: Id,
-    normalizedParams: NormalizedParams<Params>,
-  ): EntryForId<Spec, Validators, Params, Id>[] {
+    const { id, params: normalizedParams } = request;
     const resourceMetadata = this.resourceMetadataMap.get(id);
 
     if (!resourceMetadata) {
@@ -201,18 +186,15 @@ export default class MemoryStore<
     entriesWithTimes: readonly StoreEntryInput<Spec, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
     // Derive each input's slot (variant + full cache key) once, up front.
-    const prepared = await timeSlicedMap(
-      entriesWithTimes,
-      (input, index) => {
-        const variantKey = resultVariantKey(input.entry.vary);
-        return {
-          input,
-          index,
-          variantKey,
-          cacheKey: makeCacheKey(input.entry.id, variantKey),
-        };
-      },
-    );
+    const prepared = await timeSlicedMap(entriesWithTimes, (input, index) => {
+      const variantKey = resultVariantKey(input.entry.vary);
+      return {
+        input,
+        index,
+        variantKey,
+        cacheKey: makeCacheKey(input.entry.id, variantKey),
+      };
+    });
 
     // Dedupe within the call per the contract's uniform rule: for each slot,
     // only the entry with the newest birth date persists (the same rule the
@@ -238,8 +220,9 @@ export default class MemoryStore<
     // Each slot's winner reports how its validators relate to that slot's
     // entry immediately before persistence; every other input (a dropped
     // within-call duplicate) is omitted.
-    return await timeSlicedMap(prepared, ({ index }) =>
-      resultByInputIndex.get(index) ?? {},
+    return await timeSlicedMap(
+      prepared,
+      ({ index }) => resultByInputIndex.get(index) ?? {},
     );
   }
 

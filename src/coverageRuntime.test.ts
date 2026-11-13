@@ -8,7 +8,7 @@ import {
   freshFor100,
   uniqueCacheName,
 } from "../test/v2AcceptanceHelpers.js";
-import Cache from "./Cache.js";
+import Cache from "./cache/Cache.js";
 import {
   bulkProducerByIdType,
   idStartsWith,
@@ -19,17 +19,15 @@ import {
   UnclassifiableIdError,
   bulkHashedInputProducerByInputType,
   hashedInputProducerByInputType,
-  wrapBulkHashedInputProducer,
-  wrapBulkProducer,
   wrapHashedInputProducer,
+  wrapProducer,
   type HashedInputVariant,
   type ResourceTypes,
 } from "./index.js";
-import wrapProducer from "./utils/wrapProducer.js";
 
 /**
  * Runtime coverage contract (§6.3, §6.4, as amended by the 2026-07-30
- * single-producer design): the by-id-type helpers and the hashed-input wrappers
+ * single-producer design): the by-id-type helpers and the hashed-input builders
  * throw at construction on keyless records; an id classifying outside a
  * wrapper's DECLARED coverage throws NoProducerForResourceTypeError BEFORE any
  * store read; two partial wrappers over one cache serve their own types
@@ -50,34 +48,18 @@ const threeTypeRegistry = {
 
 describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
   describe("construction throws on a keyless producers/branches record", () => {
-    it("wrapHashedInputProducer / wrapBulkHashedInputProducer: empty record and bare function both throw at construction time", async () => {
-      const cache = new Cache({
-        // These tests inject or count individual store.get calls.
-        batchReads: false,
-        store: new MemoryStore(),
-        name: uniqueCacheName("construct-computing"),
-        resourceTypes: registry,
-      });
-      try {
-        // Neither form supplied.
-        // @ts-expect-error deliberately reaching the runtime guard
-        expect(() => wrapHashedInputProducer({ cache })).to.throw();
-        // @ts-expect-error deliberately reaching the runtime guard
-        expect(() => wrapBulkHashedInputProducer({ cache })).to.throw();
-        // A builder with no `.when` branches could never produce anything.
-        expect(() =>
-          hashedInputProducerByInputType<{
-            site_day: HashedInputVariant<{ key: string }, string>;
-          }>().build(),
-        ).to.throw();
-        expect(() =>
-          bulkHashedInputProducerByInputType<{
-            site_day: HashedInputVariant<{ key: string }, string>;
-          }>().build(),
-        ).to.throw();
-      } finally {
-        await cache.close();
-      }
+    it("hashed-input producer builders with no branches throw at build time", () => {
+      // A builder with no `.when` branches could never produce anything.
+      expect(() =>
+        hashedInputProducerByInputType<{
+          site_day: HashedInputVariant<{ key: string }, string>;
+        }>().build(),
+      ).to.throw();
+      expect(() =>
+        bulkHashedInputProducerByInputType<{
+          site_day: HashedInputVariant<{ key: string }, string>;
+        }>().build(),
+      ).to.throw();
     });
   });
 
@@ -85,11 +67,9 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     it("wrapProducer: throws (with the documented §6.2 fields) BEFORE any store read", async () => {
       const name = uniqueCacheName("noproducer-single");
       const store = new MemoryStore();
+      // MemoryStore has only get(), so get() calls are every Store read.
       const getSpy = mock.method(store, "get");
-      const getManySpy = mock.method(store, "getMany");
       const cache = new Cache({
-        // These tests inject or count individual store.get calls.
-        batchReads: false,
         store: store,
         name,
         resourceTypes: threeTypeRegistry,
@@ -102,19 +82,19 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         content: `biz-${req.id}`,
         directives: freshFor100,
       }));
-      const getCovered = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, {
+      const getCovered = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, {
           site_day: siteProducer,
           business_slice: bizProducer,
         }),
-      );
+      });
       const capture = captureChannels(name);
       try {
         // Reachable only via a cast / loosely-typed id -- the compiler bans
         // typed covered-set violations.
         const thrown = await expectRejection(() =>
-          getCovered({ id: "extra:1" as string as `site:${string}` }),
+          getCovered.get({ id: "extra:1" as string as `site:${string}` }),
         );
         assert.ok(thrown instanceof NoProducerForResourceTypeError);
         expect(thrown.name).to.equal("NoProducerForResourceTypeError");
@@ -129,7 +109,6 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         // Thrown BEFORE reading the cache: serving a hit for an uncovered
         // type would smuggle serve-if-present back in through the cast.
         expect(getSpy.mock.callCount()).to.equal(0);
-        expect(getManySpy.mock.callCount()).to.equal(0);
         expect(siteProducer.mock.callCount()).to.equal(0);
         expect(bizProducer.mock.callCount()).to.equal(0);
         // ...and, as a pre-dispatch validation failure, it emits NO channel
@@ -139,7 +118,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         expect(capture.produce).to.deep.equal([]);
 
         // Positive control for the spy: a covered request does read.
-        await getCovered({ id: "site:1" });
+        await getCovered.get({ id: "site:1" });
         expect(getSpy.mock.callCount()).to.equal(1);
       } finally {
         capture.stop();
@@ -147,14 +126,12 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       }
     });
 
-    it("wrapBulkProducer: an uncovered element rejects the call before any store read", async () => {
+    it("produceMany: an uncovered element rejects the call before any store read", async () => {
       const name = uniqueCacheName("noproducer-bulk");
       const store = new MemoryStore();
+      // MemoryStore has only get(), so get() calls are every Store read.
       const getSpy = mock.method(store, "get");
-      const getManySpy = mock.method(store, "getMany");
       const cache = new Cache({
-        // These tests inject or count individual store.get calls.
-        batchReads: false,
         store: store,
         name,
         resourceTypes: registry,
@@ -166,13 +143,15 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
             directives: freshFor100,
           })),
       );
-      const getBulk = wrapBulkProducer(
-        { cache },
-        bulkProducerByIdType(cache.resourceTypes, { site_day: siteBulk }),
-      );
+      const getBulk = wrapProducer({
+        cache,
+        produceMany: bulkProducerByIdType(cache.resourceTypes, {
+          site_day: siteBulk,
+        }),
+      });
       try {
         const thrown = await expectRejection(() =>
-          getBulk([
+          getBulk.getMany([
             { id: "site:ok" },
             { id: "biz:1" as string as `site:${string}` },
           ]),
@@ -185,14 +164,11 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         // The whole call is rejected before any read: the covered element is
         // not quietly served either.
         expect(getSpy.mock.callCount()).to.equal(0);
-        expect(getManySpy.mock.callCount()).to.equal(0);
         expect(siteBulk.mock.callCount()).to.equal(0);
 
-        // Positive control for the spies: an all-covered batch does read.
-        await getBulk([{ id: "site:ok" }]);
-        expect(
-          getSpy.mock.callCount() + getManySpy.mock.callCount(),
-        ).to.be.at.least(1);
+        // Positive control for the spy: an all-covered batch does read.
+        await getBulk.getMany([{ id: "site:ok" }]);
+        expect(getSpy.mock.callCount()).to.be.at.least(1);
       } finally {
         await cache.close();
       }
@@ -203,8 +179,6 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     it("each wrapper serves only its own types; entries written by one (supplementals) are served by the other without producer contact", async () => {
       const name = uniqueCacheName("partial-wrappers");
       const cache = new Cache({
-        // These tests inject or count individual store.get calls.
-        batchReads: false,
         store: new MemoryStore(),
         name,
         resourceTypes: registry,
@@ -228,27 +202,31 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
       // Two wrappers, each covering a different non-empty subset of the one
       // cache's registry (the well-sky site-persons shape).
-      const getSite = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { site_day: siteProducer }),
-      );
-      const getBiz = wrapProducer(
-        { cache },
-        producerByIdType(cache.resourceTypes, { business_slice: bizProducer }),
-      );
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, {
+          site_day: siteProducer,
+        }),
+      });
+      const getBiz = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, {
+          business_slice: bizProducer,
+        }),
+      });
       try {
-        const siteRes = await getSite({ id: "site:1" });
+        const siteRes = await getSite.get({ id: "site:1" });
         expect(siteRes.content).to.equal("site-content-site:1");
         expect(siteProducer.mock.callCount()).to.equal(1);
         expect(bizProducer.mock.callCount()).to.equal(0);
 
-        const bizRes = await getBiz({ id: "biz:1" });
+        const bizRes = await getBiz.get({ id: "biz:1" });
         expect(bizRes.content).to.equal("biz-content-biz:1");
         expect(bizProducer.mock.callCount()).to.equal(1);
 
         // The site wrapper's supplemental write is served by the OTHER
         // wrapper straight from the cache: no bizProducer invocation.
-        const derived = await getBiz({ id: "biz:derived" });
+        const derived = await getBiz.get({ id: "biz:derived" });
         expect(derived.content).to.equal("slice-derived-from-site");
         expect(bizProducer.mock.callCount()).to.equal(1);
 
@@ -283,8 +261,6 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("single-branch: no matchesInput required; caches by the branch's hashInput", async () => {
       const cache = new Cache({
-        // These tests inject or count individual store.get calls.
-        batchReads: false,
         store: new MemoryStore(),
         name: uniqueCacheName("computing-single"),
         resourceTypes: registry,
@@ -299,9 +275,9 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
         produce,
       });
       try {
-        const first = await compute({ key: "a" });
+        const first = await compute.get({ key: "a" });
         expect(first.content).to.equal("computed-a");
-        const second = await compute({ key: "a" });
+        const second = await compute.get({ key: "a" });
         expect(second.content).to.equal("computed-a");
         expect(produce.mock.callCount()).to.equal(1);
 
@@ -332,8 +308,6 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("multi-branch: dispatches by matchesInput; each branch mints and serves its own type's ids", async () => {
       const cache = new Cache({
-        // These tests inject or count individual store.get calls.
-        batchReads: false,
         store: new MemoryStore(),
         name: uniqueCacheName("computing-multi"),
         resourceTypes: registry,
@@ -348,7 +322,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       }));
       const compute = wrapHashedInputProducer({
         cache,
-        hashedInputProducer: hashedInputProducerByInputType<BranchedVariants>()
+        produce: hashedInputProducerByInputType<BranchedVariants>()
           .when(isSiteInput, {
             name: "site_day",
             hashInput: (input): `site:${string}` => `site:${input.key}`,
@@ -362,16 +336,16 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
           .build(),
       });
       try {
-        const siteRes = await compute({ kind: "site", key: "1" });
+        const siteRes = await compute.get({ kind: "site", key: "1" });
         expect(siteRes.content).to.equal("site-computed-1");
-        const bizRes = await compute({ kind: "biz", key: "2" });
+        const bizRes = await compute.get({ kind: "biz", key: "2" });
         expect(bizRes.content).to.equal("biz-computed-2");
         expect(siteProduce.mock.callCount()).to.equal(1);
         expect(bizProduce.mock.callCount()).to.equal(1);
 
         // Cached per branch-minted id: repeats hit.
-        await compute({ kind: "site", key: "1" });
-        await compute({ kind: "biz", key: "2" });
+        await compute.get({ kind: "site", key: "1" });
+        await compute.get({ kind: "biz", key: "2" });
         expect(siteProduce.mock.callCount()).to.equal(1);
         expect(bizProduce.mock.callCount()).to.equal(1);
       } finally {
@@ -384,15 +358,13 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("an input that no covered branch's matchesInput accepts rejects", async () => {
       const cache = new Cache({
-        // These tests inject or count individual store.get calls.
-        batchReads: false,
         store: new MemoryStore(),
         name: uniqueCacheName("computing-unmatched"),
         resourceTypes: registry,
       });
       const compute = wrapHashedInputProducer({
         cache,
-        hashedInputProducer: hashedInputProducerByInputType<BranchedVariants>()
+        produce: hashedInputProducerByInputType<BranchedVariants>()
           .when(isSiteInput, {
             name: "site_day",
             hashInput: (input): `site:${string}` => `site:${input.key}`,
@@ -414,7 +386,10 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
       try {
         await assert.rejects(
           () =>
-            compute({ kind: "neither", key: "x" } as unknown as BranchedInput),
+            compute.get({
+              kind: "neither",
+              key: "x",
+            } as unknown as BranchedInput),
           Error,
         );
       } finally {
@@ -425,15 +400,13 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
     it("a branch whose hashInput mints an unclassifiable id throws UnclassifiableIdError naming the branch", async () => {
       const name = uniqueCacheName("computing-bad-hash");
       const cache = new Cache({
-        // These tests inject or count individual store.get calls.
-        batchReads: false,
         store: new MemoryStore(),
         name,
         resourceTypes: registry,
       });
       const compute = wrapHashedInputProducer({
         cache,
-        hashedInputProducer: hashedInputProducerByInputType<SoleVariants>()
+        produce: hashedInputProducerByInputType<SoleVariants>()
           .when(isSoleInput, {
             name: "site_day",
             // Mints ids that match NO registry guard: violates the §6.4
@@ -448,7 +421,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
           .build(),
       });
       try {
-        const thrown = await expectRejection(() => compute({ key: "a" }));
+        const thrown = await expectRejection(() => compute.get({ key: "a" }));
         assert.ok(thrown instanceof UnclassifiableIdError);
         expect(thrown.cacheName).to.equal(name);
         expect(thrown.id).to.equal("unregistered:a");
@@ -461,15 +434,13 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
 
     it("a branch whose hashInput mints ANOTHER type's id (its own guard rejects it) throws", async () => {
       const cache = new Cache({
-        // These tests inject or count individual store.get calls.
-        batchReads: false,
         store: new MemoryStore(),
         name: uniqueCacheName("computing-cross-type-hash"),
         resourceTypes: registry,
       });
       const compute = wrapHashedInputProducer({
         cache,
-        hashedInputProducer: hashedInputProducerByInputType<SoleVariants>()
+        produce: hashedInputProducerByInputType<SoleVariants>()
           .when(isSoleInput, {
             name: "site_day",
             // Classifiable -- but to business_slice, not this branch's type, so
@@ -485,7 +456,7 @@ describe("wrapper coverage -- runtime (§6.3, §6.4)", () => {
           .build(),
       });
       try {
-        await assert.rejects(() => compute({ key: "a" }), Error);
+        await assert.rejects(() => compute.get({ key: "a" }), Error);
       } finally {
         await cache.close();
       }

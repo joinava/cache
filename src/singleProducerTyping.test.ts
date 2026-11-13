@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import type { IsEqual } from "type-fest";
 
 import { expectType, uniqueCacheName } from "../test/v2AcceptanceHelpers.js";
-import Cache from "./Cache.js";
+import Cache from "./cache/Cache.js";
 import {
   bulkProducerByIdType,
   coveredTypes,
@@ -11,7 +11,6 @@ import {
   MemoryStore,
   producerByIdType,
   resourceType,
-  wrapBulkProducer,
   wrapProducer,
   type ResourceTypes,
 } from "./index.js";
@@ -82,64 +81,15 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
     it("accepts every registry type's id, sees the full id union in `req`, and keeps per-id content narrowing", async () => {
       const cache = makeCache("sp-typing-bare");
       try {
-        const fetchAny = wrapProducer({ cache }, async (req) => {
-          // `Covered` took its default, so the producer sees -- and must
-          // handle -- every registry id. Not narrowed to one type, not `any`.
-          expectType<
-            IsEqual<typeof req.id, StoryId | CollectionId | ExtraId>
-          >();
-          return req.id.startsWith("story:")
-            ? {
-                content: { title: `t-${req.id}` } satisfies Story,
-                directives: freshFor1,
-              }
-            : req.id.startsWith("collection:")
-              ? {
-                  content: { storyTitles: [] } satisfies Collection,
-                  directives: freshFor1,
-                }
-              : {
-                  content: { blob: `b-${req.id}` } satisfies Extra,
-                  directives: freshFor1,
-                };
-        });
-
-        // Every registry type's id is accepted by the wrapped function, and
-        // each answer's content is narrowed to that id's own content type.
-        const story = await fetchAny({ id: "story:1" });
-        expectType<IsEqual<typeof story.content, Story>>();
-        expect(story.content).to.deep.equal({ title: "t-story:1" });
-
-        const collection = await fetchAny({ id: "collection:1" });
-        expectType<IsEqual<typeof collection.content, Collection>>();
-        expect(collection.content).to.deep.equal({ storyTitles: [] });
-
-        const extra = await fetchAny({ id: "extra:1" });
-        expectType<IsEqual<typeof extra.content, Extra>>();
-        expect(extra.content).to.deep.equal({ blob: "b-extra:1" });
-
-        if (false as boolean) {
-          const looseId = "anything" as string;
-          // @ts-expect-error a plain string is not an id of any registry type
-          void fetchAny({ id: looseId });
-        }
-      } finally {
-        await cache.close();
-      }
-    });
-
-    it("wrapBulkProducer: a bare bulk producer accepts request elements of every registry type", async () => {
-      const cache = makeCache("sp-typing-bare-bulk");
-      try {
-        const getBulk = wrapBulkProducer({ cache }, async (reqs) => {
-          expectType<
-            IsEqual<
-              (typeof reqs)[number]["id"],
-              StoryId | CollectionId | ExtraId
-            >
-          >();
-          return reqs.map((req) =>
-            req.id.startsWith("story:")
+        const fetchAny = wrapProducer({
+          cache,
+          produce: async (req) => {
+            // `Covered` took its default, so the producer sees -- and must
+            // handle -- every registry id. Not narrowed to one type, not `any`.
+            expectType<
+              IsEqual<typeof req.id, StoryId | CollectionId | ExtraId>
+            >();
+            return req.id.startsWith("story:")
               ? {
                   content: { title: `t-${req.id}` } satisfies Story,
                   directives: freshFor1,
@@ -152,11 +102,66 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
                 : {
                     content: { blob: `b-${req.id}` } satisfies Extra,
                     directives: freshFor1,
-                  },
-          );
+                  };
+          },
         });
 
-        const results = await getBulk([
+        // Every registry type's id is accepted by the wrapped function, and
+        // each answer's content is narrowed to that id's own content type.
+        const story = await fetchAny.get({ id: "story:1" });
+        expectType<IsEqual<typeof story.content, Story>>();
+        expect(story.content).to.deep.equal({ title: "t-story:1" });
+
+        const collection = await fetchAny.get({ id: "collection:1" });
+        expectType<IsEqual<typeof collection.content, Collection>>();
+        expect(collection.content).to.deep.equal({ storyTitles: [] });
+
+        const extra = await fetchAny.get({ id: "extra:1" });
+        expectType<IsEqual<typeof extra.content, Extra>>();
+        expect(extra.content).to.deep.equal({ blob: "b-extra:1" });
+
+        if (false as boolean) {
+          const looseId = "anything" as string;
+          // @ts-expect-error a plain string is not an id of any registry type
+          void fetchAny.get({ id: looseId });
+        }
+      } finally {
+        await cache.close();
+      }
+    });
+
+    it("produceMany: a bare bulk producer accepts request elements of every registry type", async () => {
+      const cache = makeCache("sp-typing-bare-bulk");
+      try {
+        const getBulk = wrapProducer({
+          cache,
+          produceMany: async (reqs) => {
+            expectType<
+              IsEqual<
+                (typeof reqs)[number]["id"],
+                StoryId | CollectionId | ExtraId
+              >
+            >();
+            return reqs.map((req) =>
+              req.id.startsWith("story:")
+                ? {
+                    content: { title: `t-${req.id}` } satisfies Story,
+                    directives: freshFor1,
+                  }
+                : req.id.startsWith("collection:")
+                  ? {
+                      content: { storyTitles: [] } satisfies Collection,
+                      directives: freshFor1,
+                    }
+                  : {
+                      content: { blob: `b-${req.id}` } satisfies Extra,
+                      directives: freshFor1,
+                    },
+            );
+          },
+        });
+
+        const results = await getBulk.getMany([
           { id: "story:1" },
           { id: "collection:1" },
           { id: "extra:1" },
@@ -186,22 +191,22 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
           // coverage must go through a helper instead.
           // prettier-ignore
           // @ts-expect-error a story-only producer cannot satisfy the whole-registry default
-          void wrapProducer({ cache }, storyOnlyProducer);
+          void wrapProducer({cache, produce: storyOnlyProducer});
 
           // prettier-ignore
           // @ts-expect-error same for the bulk wrapper
-          void wrapBulkProducer({ cache }, storyOnlyBulkProducer);
+          void wrapProducer({cache, produceMany: storyOnlyBulkProducer});
 
           // A record is the *helper's* parameter, not a producer. (A record
           // overload here would be exactly the compatibility layer this
           // design avoids.)
           // prettier-ignore
           // @ts-expect-error a per-resource-type record is not a function; records go through producerByIdType
-          void wrapProducer({ cache }, { story: storyOnlyProducer });
+          void wrapProducer({cache, produce: { story: storyOnlyProducer }});
 
           // prettier-ignore
-          // @ts-expect-error likewise for wrapBulkProducer / bulkProducerByIdType
-          void wrapBulkProducer({ cache }, { story: storyOnlyBulkProducer });
+          // @ts-expect-error likewise for produceMany / bulkProducerByIdType
+          void wrapProducer({cache, produceMany: { story: storyOnlyBulkProducer }});
         }
       } finally {
         await cache.close();
@@ -213,9 +218,9 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
     it("producerByIdType: covered ids are accepted with per-id narrowing; an uncovered id is an error at the WRAPPED function's call site", async () => {
       const cache = makeCache("sp-typing-helper-single");
       try {
-        const fetchStoryOrCollection = wrapProducer(
-          { cache },
-          producerByIdType(cache.resourceTypes, {
+        const fetchStoryOrCollection = wrapProducer({
+          cache,
+          produce: producerByIdType(cache.resourceTypes, {
             story: async (req) => {
               // Contextually narrowed per key, exactly as under the 2.0 record.
               expectType<IsEqual<typeof req.id, StoryId>>();
@@ -232,13 +237,15 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
               };
             },
           }),
-        );
+        });
 
-        const story = await fetchStoryOrCollection({ id: "story:1" });
+        const story = await fetchStoryOrCollection.get({ id: "story:1" });
         expectType<IsEqual<typeof story.content, Story>>();
         expect(story.content).to.deep.equal({ title: "t-story:1" });
 
-        const collection = await fetchStoryOrCollection({ id: "collection:1" });
+        const collection = await fetchStoryOrCollection.get({
+          id: "collection:1",
+        });
         expectType<IsEqual<typeof collection.content, Collection>>();
         expect(collection.content).to.deep.equal({
           storyTitles: ["collection:1"],
@@ -247,7 +254,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
         if (false as boolean) {
           const extraId = "extra:1" as ExtraId;
           // @ts-expect-error `extra` is outside the helper's record, so Covered excludes it
-          void fetchStoryOrCollection({ id: extraId });
+          void fetchStoryOrCollection.get({ id: extraId });
         }
       } finally {
         await cache.close();
@@ -257,9 +264,9 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
     it("bulkProducerByIdType: covered ids mix freely in one batch; an uncovered element is an error", async () => {
       const cache = makeCache("sp-typing-helper-bulk");
       try {
-        const getBulk = wrapBulkProducer(
-          { cache },
-          bulkProducerByIdType(cache.resourceTypes, {
+        const getBulk = wrapProducer({
+          cache,
+          produceMany: bulkProducerByIdType(cache.resourceTypes, {
             story: async (reqs) => {
               expectType<IsEqual<(typeof reqs)[number]["id"], StoryId>>();
               return reqs.map((req) => ({
@@ -275,9 +282,9 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
               }));
             },
           }),
-        );
+        });
 
-        const results = await getBulk([
+        const results = await getBulk.getMany([
           { id: "story:1" },
           { id: "collection:1" },
         ]);
@@ -290,7 +297,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
         if (false as boolean) {
           // prettier-ignore
           // @ts-expect-error `extra` is uncovered, so it is rejected element-wise
-          void getBulk([{ id: "story:1" }, { id: "extra:1" as ExtraId }]);
+          void getBulk.getMany([{ id: "story:1" }, { id: "extra:1" as ExtraId }]);
         }
       } finally {
         await cache.close();
@@ -310,7 +317,7 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
           // throwing NoProducerForResourceTypeError.
           // prettier-ignore
           // @ts-expect-error narrowing Covered requires the [coveredTypes] runtime value
-          void wrapProducer<typeof registry, "story">({ cache }, storyOnlyProducer);
+          void wrapProducer<typeof registry, "story">({cache, produce: storyOnlyProducer});
         }
 
         // CONTROL isolating the cause: attach the carrier and the exact same
@@ -319,19 +326,19 @@ describe("single producer function -- typing (§3.1, §3.2, §5.2)", () => {
         const storyOnlyWithCoverage = Object.assign(storyOnlyProducer, {
           [coveredTypes]: ["story"] as const,
         });
-        const fetchStoryOnly = wrapProducer<typeof registry, "story">(
-          { cache },
-          storyOnlyWithCoverage,
-        );
+        const fetchStoryOnly = wrapProducer<typeof registry, "story">({
+          cache,
+          produce: storyOnlyWithCoverage,
+        });
 
-        const story = await fetchStoryOnly({ id: "story:1" });
+        const story = await fetchStoryOnly.get({ id: "story:1" });
         expectType<IsEqual<typeof story.content, Story>>();
         expect(story.content).to.deep.equal({ title: "t-story:1" });
 
         if (false as boolean) {
           const collectionId = "collection:1" as CollectionId;
           // @ts-expect-error only `story` is covered by the explicit type argument
-          void fetchStoryOnly({ id: collectionId });
+          void fetchStoryOnly.get({ id: collectionId });
         }
       } finally {
         await cache.close();

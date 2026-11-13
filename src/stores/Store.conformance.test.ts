@@ -1,4 +1,16 @@
-import { sortBy } from "es-toolkit";
+import { throwIfAnyError } from "../utils/utils.js";
+import { getMany, getOne } from "../../test/fixtures.js";
+import { sortBy, isEqual } from "es-toolkit";
+import { setTimeout as sleep } from "node:timers/promises";
+import { AnyValidatorsArb } from "../../test/arbitraries/02_Validators.js";
+// The change-detection result types are the source of truth in 07_Store.ts per
+// the shared contract; import them from there directly so this suite compiles
+// against the contract regardless of whether they're also re-exported from the
+// public barrel.
+import type {
+  StoreEntryRelationship,
+  StoreEntryResult,
+} from "../types/07_Store.js";
 import fc from "fast-check";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -10,7 +22,7 @@ import {
   NormalizedParamsArb,
   NormalizedProducerDirectivesArb,
 } from "../../test/arbitraries/06_Normalization.js";
-import { StoreEntryInputArb } from "../../test/arbitraries/06_Store.js";
+import { StoreEntryInputArb } from "../../test/arbitraries/07_Store.js";
 import {
   postgresEnvironmentIsConfigured,
   postgresStoreFixture,
@@ -41,6 +53,8 @@ type TestParams = PostgresStoreSupportedParams & {
 };
 type TestStore = Store<TestSpec, AnyValidators, TestParams>;
 
+type StoreName = "MemoryStore" | "SqliteStore" | "PostgresStore";
+
 type StoreFixture = {
   store: TestStore;
   cleanup: () => Promise<void>;
@@ -68,9 +82,9 @@ const varyOnAudience = { audience: "public" } as NormalizedVary<TestParams>;
 const varyOnMissingFormat = { format: null } as NormalizedVary<TestParams>;
 const directives = { freshUntilAge: 60 } as NormalizedProducerDirectives;
 
-describe("Store conformance", () => {
+describe("Store conformance and common behavior", () => {
   describe("MemoryStore", () => {
-    defineStoreConformance(async () => {
+    defineStoreConformance("MemoryStore", async () => {
       const store = new MemoryStore<TestSpec, AnyValidators, TestParams>();
       return {
         store,
@@ -80,7 +94,7 @@ describe("Store conformance", () => {
   });
 
   describe("SqliteStore", () => {
-    defineStoreConformance(async () => {
+    defineStoreConformance("SqliteStore", async () => {
       const directory = await mkdtemp(join(tmpdir(), "cache-sqlite-store-"));
       const store = new SqliteStore<TestSpec, AnyValidators, TestParams>({
         databasePath: join(directory, "cache.sqlite"),
@@ -103,7 +117,7 @@ describe("Store conformance", () => {
       ? {}
       : { skip: "Postgres environment variables are not configured" },
     () => {
-      defineStoreConformance(async () => {
+      defineStoreConformance("PostgresStore", async () => {
         const fixture = postgresStoreFixture();
         return {
           store: fixture.postgresStore as unknown as TestStore,
@@ -114,49 +128,265 @@ describe("Store conformance", () => {
   );
 });
 
-function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
+function defineStoreConformance(
+  storeName: StoreName,
+  createFixture: () => Promise<StoreFixture>,
+) {
+  describe("Common behavior (not required by Store)", () => {
+    defineCommonStoreBehavior(storeName, createFixture);
+  });
+
+  describe("Change detection", () => {
+    defineChangeDetectionConformance(createFixture);
+  });
+
+  it("does not mutate entries passed to store", async () => {
+    await withStore(createFixture, async (store) => {
+      const entry = makeEntry("id", "value", varyOnFormat, {
+        content: { value: "value", nested: { count: 2, labels: ["a", "b"] } },
+        validators: { etag: "original" },
+      });
+      const before = structuredClone(entry);
+      await store.store([{ entry, maxStoreForSeconds: 60 }]);
+      assert.deepEqual(entry, before);
+    });
+  });
+
   it("returns empty results for misses and empty getMany requests", async () => {
     await withStore(createFixture, async (store) => {
       await store.store([]);
       await store.delete("missing");
 
-      assert.deepEqual(await store.get("missing", matchingParams), []);
-      assert.deepEqual(await store.getMany([] as const), []);
+      assert.deepEqual(
+        await getOne(store, { id: "missing", params: matchingParams }),
+        [],
+      );
+      assert.deepEqual(
+        await getMany(store, [] as const).then(throwIfAnyError),
+        [],
+      );
     });
   });
 
-  it("roundtrips stored entry data without mutating input", async () => {
+  it("keeps returned entries valid while stores and deletes overlap", async () => {
     await withStore(createFixture, async (store) => {
-      const entry = makeEntry("id", "first", varyOnFormat, {
-        content: { value: "first", nested: { count: 2, labels: ["a", "b"] } },
-        validators: { etag: "abc" },
-        directives: {
-          freshUntilAge: 60,
-          maxStale: {
-            withoutRevalidation: 10,
-            whileRevalidate: 20,
-            ifError: 30,
+      await store.store(
+        Array.from({ length: 12 }, (_, i) => ({
+          entry: makeEntry(`id:${i}`, `initial:${i}`),
+          maxStoreForSeconds: 60,
+        })),
+      );
+
+      const operations: Promise<unknown>[] = [];
+      for (let i = 0; i < 12; i += 1) {
+        const id = `id:${i}`;
+        operations.push(
+          store.store([
+            {
+              entry: makeEntry(id, `updated:${i}`),
+              maxStoreForSeconds: 60,
+            },
+          ]),
+          getOne(store, { id: id, params: matchingParams }).then((entries) => {
+            for (const entry of entries) {
+              assert.equal(entry.id, id);
+              assert.deepEqual(entry.vary, varyOnFormat);
+            }
+          }),
+        );
+        if (i % 3 === 0) {
+          operations.push(store.delete(id));
+        }
+      }
+
+      await Promise.all(operations);
+    });
+  });
+}
+
+// Shared implementation policies, separate from the Store interface contract.
+// Mixed cases also live here when their positive controls require retention.
+// Each case lists stores that do not implement that policy. An empty list runs
+// the case against every configured Store.
+function defineCommonStoreBehavior(
+  storeName: StoreName,
+  createFixture: () => Promise<StoreFixture>,
+) {
+  const commonBehavior = (
+    name: string,
+    unsupportedStores: readonly StoreName[],
+    run: (store: TestStore) => Promise<void>,
+  ) => {
+    it(
+      name,
+      {
+        skip: unsupportedStores.includes(storeName)
+          ? `${storeName} does not support this implementation policy`
+          : false,
+      },
+      async () => {
+        await withStore(createFixture, run);
+      },
+    );
+  };
+
+  commonBehavior(
+    "keeps one complete entry after concurrent writes to one variant",
+    [],
+    async (store) => {
+      const writes = Array.from({ length: 20 }, (_, i) =>
+        store.store([
+          {
+            entry: makeEntry("id", `value:${i}`, varyOnFormat),
+            maxStoreForSeconds: 60,
           },
-        } as NormalizedProducerDirectives,
-      });
-      const originalEntry = snapshotEntry(entry);
+        ]),
+      );
 
-      await store.store([{ entry, maxStoreForSeconds: 60 }]);
-      const result = await store.get("id", matchingParams);
+      await Promise.all(writes);
 
-      assert.deepEqual(snapshotEntry(entry), originalEntry);
+      const result = await getOne(store, { id: "id", params: matchingParams });
+
       assert.equal(result.length, 1);
-      assert.deepEqual(result[0]?.content, entry.content);
-      assert.deepEqual(result[0]?.vary, entry.vary);
-      assert.deepEqual(result[0]?.validators, entry.validators);
-      assert.deepEqual(result[0]?.directives, entry.directives);
-      assert.equal(result[0]?.initialAge, entry.initialAge);
-      assert.equal(result[0]?.date.getTime(), entry.date.getTime());
-    });
-  });
+      assert.match(result[0]?.content.value ?? "", /^value:\d+$/);
+    },
+  );
 
-  it("roundtrips any storable normalized entry identically", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "dedupes in-call duplicates by newest birth date; the winner reports against the pre-call snapshot and the dropped duplicate is omitted",
+    [],
+    async (store) => {
+      const validatorsA = { etag: "A" };
+      const validatorsB = { etag: "B" };
+
+      // Pre-call stored value for the slot.
+      await store.store([
+        {
+          entry: makeEntry("id", "seed", varyOnFormat, {
+            validators: validatorsA,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      // A single call has three entries for the SAME slot. The MIDDLE entry has
+      // the newest birth date, so it must win under the built-in Stores' shared
+      // newest-birth-date retention policy -- a last-write-wins implementation would
+      // persist (and report for) the last entry instead. Crucially the
+      // winner's validators equal the *pre-call* stored value A, so the winner
+      // must report "unchanged", proving the comparison is against the
+      // pre-call snapshot and NOT against the other in-call entry B (which
+      // would give "changed").
+      const results = await store.store([
+        {
+          entry: makeEntry("id", "oldest", varyOnFormat, {
+            validators: validatorsB,
+            date: new Date("2024-01-01T00:00:00.000Z"),
+          }),
+          maxStoreForSeconds: 60,
+        },
+        {
+          entry: makeEntry("id", "winner", varyOnFormat, {
+            validators: validatorsA,
+            date: new Date("2024-05-01T00:00:00.000Z"),
+            initialAge: 0,
+          }),
+          maxStoreForSeconds: 60,
+        },
+        {
+          entry: makeEntry("id", "loser", varyOnFormat, {
+            validators: validatorsB,
+            date: new Date("2024-02-01T00:00:00.000Z"),
+            initialAge: 0,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      assert.equal(results.length, 3);
+      const rels = relationshipsOf(results);
+
+      // Winner (index 1, newest birth date) reports against the pre-call
+      // snapshot A; the dropped duplicate persists nothing and is omitted.
+      assert.deepEqual(rels, [undefined, "unchanged", undefined]);
+
+      // The winner is what actually persisted, even though it came in the MIDDLE.
+      const stored = await getOne(store, { id: "id", params: matchingParams });
+      assert.equal(stored.length, 1);
+      assert.deepEqual(stored[0]?.validators, validatorsA);
+      assert.equal(stored[0]?.content.value, "winner");
+      assert.equal(
+        stored[0]?.date.getTime(),
+        new Date("2024-05-01T00:00:00.000Z").getTime(),
+      );
+    },
+  );
+
+  commonBehavior(
+    "matches a naive newest-validators-per-slot oracle over random store sequences",
+    [],
+    async (store) => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.record({ runId: fc.uuid(), calls: operationsArb }),
+          async ({ runId, calls }) => {
+            const oracle = makeOracle();
+            for (const call of calls) {
+              const expected = oracle.expectAndApply(call);
+              const inputs = call.map((op) => {
+                const { id, vary } = slotSpec(runId, op.slotIdx);
+                return {
+                  entry: makeEntry(id, "v", vary, {
+                    validators: op.validators,
+                    date: op.date,
+                    initialAge: op.initialAge,
+                  }),
+                  maxStoreForSeconds: 60,
+                };
+              });
+
+              const results = await store.store(inputs);
+              assert.equal(results.length, inputs.length);
+              assert.deepEqual(relationshipsOf(results), expected);
+            }
+
+            // Each iteration namespaces its slots under a unique runId; delete
+            // them so long-lived stores don't accumulate across iterations.
+            await store.delete(`${runId}:a`);
+            await store.delete(`${runId}:b`);
+          },
+        ),
+        { numRuns: 100 },
+      );
+    },
+  );
+
+  commonBehavior(
+    "ignores extra request metadata when reading hits and misses",
+    [],
+    async (store) => {
+      await store.store([
+        { entry: makeEntry("hit", "value"), maxStoreForSeconds: 60 },
+      ]);
+      const observer = () =>
+        assert.fail("request metadata must not be invoked");
+      const results = await getMany(store, [
+        { id: "hit", params: matchingParams, observer },
+        { id: "miss", params: matchingParams, observer },
+      ]).then(throwIfAnyError);
+      const hit = results[0];
+      assert.deepEqual(
+        hit.map(({ content }) => content),
+        [{ value: "value" }],
+      );
+      assert.deepEqual(results[1], []);
+    },
+  );
+
+  commonBehavior(
+    "roundtrips any storable normalized entry identically",
+    [],
+    async (store) => {
       // Both `fc.record` and `fc.dictionary` produce null-prototype objects,
       // which are not `assert.deepEqual` to the regular-prototype objects that
       // `JSON.parse` returns. Recursively reparent so JSON-based stores can
@@ -235,7 +465,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
 
           await store.delete(entry.id);
           await store.store([{ entry, maxStoreForSeconds: Infinity }]);
-          const result = await store.get(entry.id, params);
+          const result = await getOne(store, { id: entry.id, params: params });
 
           assert.equal(result.length, 1, "expected exactly one matching entry");
           const got = result[0];
@@ -252,11 +482,13 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         }),
         { numRuns: 100 },
       );
-    });
-  });
+    },
+  );
 
-  it("roundtrips Infinity values in directives as Infinity", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "roundtrips Infinity values in directives as Infinity",
+    [],
+    async (store) => {
       const entry = makeEntry("id", "infinite", varyOnFormat, {
         directives: {
           freshUntilAge: Infinity,
@@ -270,7 +502,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       });
 
       await store.store([{ entry, maxStoreForSeconds: 60 }]);
-      const result = await store.get("id", matchingParams);
+      const result = await getOne(store, { id: "id", params: matchingParams });
 
       assert.equal(result.length, 1);
       assert.equal(result[0]?.directives.freshUntilAge, Infinity);
@@ -281,27 +513,13 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       );
       assert.equal(result[0]?.directives.maxStale?.whileRevalidate, Infinity);
       assert.equal(result[0]?.directives.maxStale?.ifError, Infinity);
-    });
-  });
+    },
+  );
 
-  it("only returns entries matching the requested id", async () => {
-    await withStore(createFixture, async (store) => {
-      await store.store([
-        { entry: makeEntry("id", "wanted"), maxStoreForSeconds: 60 },
-        { entry: makeEntry("other", "unwanted"), maxStoreForSeconds: 60 },
-      ]);
-
-      const result = await store.get("id", matchingParams);
-
-      assert.deepEqual(
-        result.map(({ id, content }) => [id, content.value]),
-        [["id", "wanted"]],
-      );
-    });
-  });
-
-  it("matches vary subsets exactly and can return multiple matching variants", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "matches vary subsets exactly and can return multiple matching variants",
+    [],
+    async (store) => {
       await store.store([
         { entry: makeEntry("id", "empty", emptyVary), maxStoreForSeconds: 60 },
         {
@@ -319,22 +537,24 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       ]);
 
       assert.deepEqual(
-        (await store.get("id", matchingParams))
+        (await getOne(store, { id: "id", params: matchingParams }))
           .map(({ content }) => content.value)
           .sort(),
         ["audience", "empty", "format", "lang"],
       );
       assert.deepEqual(
-        (await store.get("id", unmatchedParams))
+        (await getOne(store, { id: "id", params: unmatchedParams }))
           .map(({ content }) => content.value)
           .sort(),
         ["audience", "empty", "lang"],
       );
-    });
-  });
+    },
+  );
 
-  it("matches null vary values against missing params", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "matches null vary values against missing params",
+    [],
+    async (store) => {
       await store.store([
         { entry: makeEntry("id", "empty", emptyVary), maxStoreForSeconds: 60 },
         {
@@ -344,22 +564,24 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       ]);
 
       assert.deepEqual(
-        (await store.get("id", missingFormatParams))
+        (await getOne(store, { id: "id", params: missingFormatParams }))
           .map(({ content }) => content.value)
           .sort(),
         ["empty", "missing-format"],
       );
       assert.deepEqual(
-        (await store.get("id", matchingParams)).map(
+        (await getOne(store, { id: "id", params: matchingParams })).map(
           ({ content }) => content.value,
         ),
         ["empty"],
       );
-    });
-  });
+    },
+  );
 
-  it("treats vary keys that collide with Object.prototype members as ordinary params", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "treats vary keys that collide with Object.prototype members as ordinary params",
+    [],
+    async (store) => {
       // Param names like "constructor"/"toString"/"__proto__" must be handled
       // as ordinary params, not resolved up the prototype chain. Each is stored
       // here with a null value, meaning "this variant applies only when the
@@ -384,7 +606,7 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
       // e.g. "constructor" to the inherited function and fail to match here.
       const noParams = {} as NormalizedParams<TestParams>;
       assert.deepEqual(
-        (await store.get("id", noParams))
+        (await getOne(store, { id: "id", params: noParams }))
           .map(({ content }) => content.value)
           .sort(),
         ["all-absent", "empty"],
@@ -399,16 +621,18 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         string
       > as unknown as NormalizedParams<TestParams>;
       assert.deepEqual(
-        (await store.get("id", withConstructorParam)).map(
+        (await getOne(store, { id: "id", params: withConstructorParam })).map(
           ({ content }) => content.value,
         ),
         ["empty"],
       );
-    });
-  });
+    },
+  );
 
-  it("preserves getMany order, duplicate requests, misses, and per-request params", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "preserves getMany order, duplicate requests, misses, and per-request params",
+    [],
+    async (store) => {
       await store.store([
         { entry: makeEntry("one", "one-json"), maxStoreForSeconds: 60 },
         {
@@ -418,12 +642,12 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         { entry: makeEntry("two", "two-json"), maxStoreForSeconds: 60 },
       ]);
 
-      const result = await store.getMany([
+      const result = await getMany(store, [
         { id: "one", params: matchingParams },
         { id: "missing", params: matchingParams },
         { id: "two", params: unmatchedParams },
         { id: "one", params: unmatchedParams },
-      ] as const);
+      ] as const).then(throwIfAnyError);
 
       assert.ok(!(result[0] instanceof Error));
       assert.ok(!(result[3] instanceof Error));
@@ -437,11 +661,13 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         result[3].map(({ content }) => content.value),
         ["one-any"],
       );
-    });
-  });
+    },
+  );
 
-  it("never returns a normalized ID collision as a hit", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "never returns a normalized ID collision as a hit",
+    [],
+    async (store) => {
       await store.store([
         {
           entry: makeEntry("�x", "replacement", emptyVary),
@@ -449,21 +675,29 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         },
       ]);
       for (const id of ["\ud800x", "\ud801x", "\udc00x"]) {
-        assert.deepEqual(await store.get(id, matchingParams), []);
         assert.deepEqual(
-          await store.getMany([{ id, params: matchingParams }]),
+          await getOne(store, { id: id, params: matchingParams }),
+          [],
+        );
+        assert.deepEqual(
+          await getMany(store, [{ id, params: matchingParams }]).then(
+            throwIfAnyError,
+          ),
           [[]],
         );
       }
       assert.equal(
-        (await store.get("�x", matchingParams))[0]?.content.value,
+        (await getOne(store, { id: "�x", params: matchingParams }))[0]?.content
+          .value,
         "replacement",
       );
-    });
-  });
+    },
+  );
 
-  it("never serves an ill-formed stored ID under a colliding ID", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "never serves an ill-formed stored ID under a colliding ID",
+    [],
+    async (store) => {
       // Postgres rejects this JSONB entry; SQLite and MemoryStore preserve its
       // original ID in the entry. Either rejection or exact hits/misses is safe.
       try {
@@ -482,8 +716,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
           throw error;
       }
       for (const id of ["�x", "\ud801x", "\ud800x"]) {
-        const single = await store.get(id, matchingParams);
-        const [bulk] = await store.getMany([{ id, params: matchingParams }]);
+        const single = await getOne(store, { id: id, params: matchingParams });
+        const [bulk] = await getMany(store, [
+          { id, params: matchingParams },
+        ]).then(throwIfAnyError);
         assert.ok(single.every((entry) => entry.id === id));
         assert.ok(bulk !== undefined && !(bulk instanceof Error));
         assert.ok(bulk.every((entry) => entry.id === id));
@@ -492,11 +728,13 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
           assert.deepEqual(bulk, []);
         }
       }
-    });
-  });
+    },
+  );
 
-  it("never normalizes string vary values into false matches", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "never normalizes string vary values into false matches",
+    [],
+    async (store) => {
       await store.store([
         {
           entry: makeEntry("vary-unicode", "replacement", {
@@ -509,7 +747,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         const params = { format } as NormalizedParams<TestParams>;
         // Both Postgres paths reject ill-formed JSONB params.
         try {
-          assert.deepEqual(await store.get("vary-unicode", params), []);
+          assert.deepEqual(
+            await getOne(store, { id: "vary-unicode", params: params }),
+            [],
+          );
         } catch (error) {
           if (
             !(error instanceof Error) ||
@@ -520,7 +761,9 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         }
         try {
           assert.deepEqual(
-            await store.getMany([{ id: "vary-unicode", params }]),
+            await getMany(store, [{ id: "vary-unicode", params }]).then(
+              throwIfAnyError,
+            ),
             [[]],
           );
         } catch (error) {
@@ -532,11 +775,13 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
             throw error;
         }
       }
-    });
-  });
+    },
+  );
 
-  it("preserves persisted ill-formed vary values or rejects them without false hits", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "preserves persisted ill-formed vary values or rejects them without false hits",
+    [],
+    async (store) => {
       for (const format of ["\ud800", "\ud801", "\udc00"]) {
         try {
           await store.store([
@@ -560,10 +805,13 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
           const params = {
             format: requestedFormat,
           } as NormalizedParams<TestParams>;
-          const single = await store.get("stored-vary-unicode", params);
-          const [bulk] = await store.getMany([
+          const single = await getOne(store, {
+            id: "stored-vary-unicode",
+            params: params,
+          });
+          const [bulk] = await getMany(store, [
             { id: "stored-vary-unicode", params },
-          ]);
+          ]).then(throwIfAnyError);
           assert.ok(bulk !== undefined && !(bulk instanceof Error));
           for (const entry of [...single, ...bulk]) {
             assert.equal(entry.id, "stored-vary-unicode");
@@ -576,11 +824,13 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
           }
         }
       }
-    });
-  });
+    },
+  );
 
-  it("returns from getMany, per request, what get returns for that request", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "returns from getMany, per request, what get returns for that request",
+    [],
+    async (store) => {
       // A small param space, so that random requests often match stored
       // variants. `constructor` collides with an Object.prototype member, which
       // a matcher must treat as an ordinary param.
@@ -651,12 +901,19 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
               ) as NormalizedParams<TestParams>,
             }));
             const requests = [...matchingRequests, ...randomRequests].map(
-              ({ id, params }) => ({ id: scoped(id), params }),
+              ({ id, params }) => ({
+                id: scoped(id),
+                params,
+              }),
             );
 
-            const viaGetMany = await store.getMany(requests);
+            const viaGetMany = await getMany(store, requests).then(
+              throwIfAnyError,
+            );
             const viaGet = await Promise.all(
-              requests.map(async ({ id, params }) => store.get(id, params)),
+              requests.map(async ({ id, params }) =>
+                getOne(store, { id: id, params: params }),
+              ),
             );
 
             assert.ok(
@@ -676,11 +933,13 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         ),
         { numRuns: 50 },
       );
-    });
-  });
+    },
+  );
 
-  it("deletes all variants for an id and leaves other ids alone", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "deletes all variants for an id and leaves other ids alone",
+    [],
+    async (store) => {
       await store.store([
         {
           entry: makeEntry("id", "format", varyOnFormat),
@@ -698,27 +957,41 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
 
       await store.delete("id");
 
-      assert.deepEqual(await store.get("id", matchingParams), []);
-      assert.deepEqual((await store.get("other", matchingParams))[0]?.content, {
-        value: "other",
-      });
-    });
-  });
+      assert.deepEqual(
+        await getOne(store, { id: "id", params: matchingParams }),
+        [],
+      );
+      assert.deepEqual(
+        (await getOne(store, { id: "other", params: matchingParams }))[0]
+          ?.content,
+        {
+          value: "other",
+        },
+      );
+    },
+  );
 
-  it("treats delete of a missing id as a no-op", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "treats delete of a missing id as a no-op",
+    [],
+    async (store) => {
       await store.store([
         { entry: makeEntry("id", "first"), maxStoreForSeconds: 60 },
       ]);
 
       await store.delete("missing");
 
-      assert.equal((await store.get("id", matchingParams)).length, 1);
-    });
-  });
+      assert.equal(
+        (await getOne(store, { id: "id", params: matchingParams })).length,
+        1,
+      );
+    },
+  );
 
-  it("supports concurrent stores to different ids", async () => {
-    await withStore(createFixture, async (store) => {
+  commonBehavior(
+    "supports concurrent stores to different ids",
+    [],
+    async (store) => {
       const ids = Array.from({ length: 20 }, (_, i) => `id:${i}`);
 
       await Promise.all(
@@ -732,9 +1005,10 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
         ),
       );
 
-      const result = await store.getMany(
+      const result = await getMany(
+        store,
         ids.map((id) => ({ id, params: matchingParams })),
-      );
+      ).then(throwIfAnyError);
 
       assert.deepEqual(
         result
@@ -745,43 +1019,342 @@ function defineStoreConformance(createFixture: () => Promise<StoreFixture>) {
           .sort(),
         ids.map((_, i) => `value:${i}`).sort(),
       );
-    });
-  });
+    },
+  );
 
-  it("keeps returned entries valid while stores and deletes overlap", async () => {
-    await withStore(createFixture, async (store) => {
-      await store.store(
-        Array.from({ length: 12 }, (_, i) => ({
-          entry: makeEntry(`id:${i}`, `initial:${i}`),
-          maxStoreForSeconds: 60,
-        })),
-      );
+  commonBehavior(
+    "ignores undefined-valued keys when comparing validators, on both sides",
+    [],
+    async (store) => {
+      // Deliberately type-violating input; see the "Validators are
+      // interpreted as their JSON-serialized form" section comment in
+      // defineChangeDetectionConformance.
+      const dirtyOne = {
+        etag: "1",
+        extra: undefined,
+      } as unknown as AnyValidators;
+      const dirtyTwo = {
+        etag: "2",
+        extra: undefined,
+      } as unknown as AnyValidators;
 
-      const operations: Promise<unknown>[] = [];
-      for (let i = 0; i < 12; i += 1) {
-        const id = `id:${i}`;
-        operations.push(
-          store.store([
-            {
-              entry: makeEntry(id, `updated:${i}`),
-              maxStoreForSeconds: 60,
-            },
-          ]),
-          store.get(id, matchingParams).then((entries) => {
-            for (const entry of entries) {
-              assert.equal(entry.id, id);
-              assert.deepEqual(entry.vary, varyOnFormat);
-            }
+      // Incoming side: a clean seed, then a re-store whose only difference is
+      // an undefined-valued key. Serialization-wise they're identical.
+      await store.store([
+        {
+          entry: makeEntry("incoming", "a", varyOnFormat, {
+            validators: { etag: "1" },
           }),
-        );
-        if (i % 3 === 0) {
-          operations.push(store.delete(id));
-        }
-      }
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      const incomingSide = await store.store([
+        {
+          entry: makeEntry("incoming", "b", varyOnFormat, {
+            validators: dirtyOne,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(incomingSide)[0], "unchanged");
 
-      await Promise.all(operations);
-    });
-  });
+      // Stored side: seed with the undefined-valued key, then re-store clean.
+      const dirtySeed = await store.store([
+        {
+          entry: makeEntry("stored", "a", varyOnFormat, {
+            validators: dirtyTwo,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(dirtySeed)[0], "is-new");
+
+      const storedSide = await store.store([
+        {
+          entry: makeEntry("stored", "b", varyOnFormat, {
+            validators: { etag: "2" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(storedSide)[0], "unchanged");
+    },
+  );
+
+  commonBehavior(
+    "reports is-new for a brand-new variant of an already-stored resource id",
+    [],
+    async (store) => {
+      // First variant of the resource is is-new...
+      const first = await store.store([
+        {
+          entry: makeEntry("id", "fmt", varyOnFormat, {
+            validators: { etag: "fmt" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(first)[0], "is-new");
+
+      // ...and so is a *different* variant of the SAME id: change detection is
+      // keyed per (id, vary) slot, not per resource id.
+      const secondVariant = await store.store([
+        {
+          entry: makeEntry("id", "lang", varyOnLanguage, {
+            validators: { etag: "lang" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(secondVariant)[0], "is-new");
+
+      // Re-storing the original variant now sees a live entry in its slot.
+      const restoreOriginal = await store.store([
+        {
+          entry: makeEntry("id", "fmt2", varyOnFormat, {
+            validators: { etag: "fmt-changed" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(restoreOriginal)[0], "changed");
+    },
+  );
+
+  commonBehavior(
+    "reports is-new when the slot's stored record has expired, even if it's still physically present",
+    // PostgresStore never expires records -- every record it holds is
+    // returned by `get` -- so this test does not apply to it.
+    ["PostgresStore"],
+    async (store) => {
+      // 0.125s is exactly representable in binary, so `* 1000` stays an
+      // integer and can't trip SQLite's STRICT INTEGER expires_at column.
+      const validators = { etag: "same" };
+      const first = await store.store([
+        {
+          entry: makeEntry("id", "a", varyOnFormat, { validators }),
+          maxStoreForSeconds: 0.125,
+        },
+      ]);
+      assert.equal(relationshipsOf(first)[0], "is-new");
+
+      // Wait until the record is expired. Nothing has forced a cleanup pass,
+      // so a store may well still hold the record physically -- but `get`
+      // would no longer return it, so per the contract the slot holds no
+      // LIVE entry and change detection must not compare against it: storing
+      // the SAME validators again must be "is-new", not "unchanged".
+      await sleep(500);
+
+      const second = await store.store([
+        {
+          entry: makeEntry("id", "b", varyOnFormat, { validators }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(second)[0], "is-new");
+    },
+  );
+
+  commonBehavior(
+    "reports unchanged for validators that deep-equal the stored ones (key order + nesting independent)",
+    [],
+    async (store) => {
+      await store.store([
+        {
+          entry: makeEntry("id", "a", varyOnFormat, {
+            validators: { a: "1", b: "2", meta: { x: 1, y: [1, 2] } },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      // Same content, top-level keys and nested keys reordered.
+      const reordered = await store.store([
+        {
+          entry: makeEntry("id", "b", varyOnFormat, {
+            validators: { meta: { y: [1, 2], x: 1 }, b: "2", a: "1" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(reordered)[0], "unchanged");
+    },
+  );
+
+  commonBehavior(
+    "reports changed when validators differ from the stored ones",
+    [],
+    async (store) => {
+      await store.store([
+        {
+          entry: makeEntry("id", "a", varyOnFormat, {
+            validators: { etag: "1" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      const changedValue = await store.store([
+        {
+          entry: makeEntry("id", "b", varyOnFormat, {
+            validators: { etag: "2" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(changedValue)[0], "changed");
+
+      // A nested-value difference (same shape) is also "changed".
+      await store.store([
+        {
+          entry: makeEntry("id", "c", varyOnFormat, {
+            validators: { meta: { x: 1, y: [1, 2] } },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      const nestedChanged = await store.store([
+        {
+          entry: makeEntry("id", "d", varyOnFormat, {
+            validators: { meta: { x: 2, y: [1, 2] } },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(nestedChanged)[0], "changed");
+    },
+  );
+
+  commonBehavior(
+    "compares against the newest-birth-date stored entry, not set membership (A -> B -> A)",
+    [],
+    async (store) => {
+      const validatorsA = { etag: "A" };
+      const validatorsB = { etag: "B" };
+
+      // Birth date = date - initialAge*1000. We drive birth dates purely
+      // through the entries' date/initialAge fields -- never by mocking the
+      // clock -- so B is born strictly after A.
+      const storeA1 = await store.store([
+        {
+          entry: makeEntry("id", "A1", varyOnFormat, {
+            validators: validatorsA,
+            date: new Date("2024-01-01T00:00:00.000Z"),
+            initialAge: 0,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(storeA1)[0], "is-new");
+
+      const storeB = await store.store([
+        {
+          entry: makeEntry("id", "B", varyOnFormat, {
+            validators: validatorsB,
+            date: new Date("2024-06-01T00:00:00.000Z"),
+            initialAge: 0,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(storeB)[0], "changed");
+
+      // Store A again. Even though validators A were previously a member of
+      // this slot's history, the comparison is against the currently-stored
+      // (newest-birth-date) entry, which is B -- so A vs B is "changed".
+      const storeA2 = await store.store([
+        {
+          entry: makeEntry("id", "A2", varyOnFormat, {
+            validators: validatorsA,
+            date: new Date("2024-03-01T00:00:00.000Z"),
+            initialAge: 0,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(storeA2)[0], "changed");
+
+      const stored = await getOne(store, { id: "id", params: matchingParams });
+      assert.equal(stored.length, 1);
+      assert.deepEqual(stored[0]?.validators, validatorsA);
+    },
+  );
+
+  commonBehavior(
+    "returns a result array parallel to the input entries for a mixed batch",
+    [],
+    async (store) => {
+      // Seed two distinct slots.
+      await store.store([
+        {
+          entry: makeEntry("seeded-unchanged", "s", varyOnFormat, {
+            validators: { etag: "s0" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+        {
+          entry: makeEntry("seeded-changed", "s", varyOnFormat, {
+            validators: { etag: "s1" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      // One store() call whose entries each target a DISTINCT slot, so there's
+      // no in-call dedup ambiguity -- each entry's relationship is its own.
+      const results = await store.store([
+        {
+          entry: makeEntry("brand-new", "n", varyOnFormat, {
+            validators: { etag: "n" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+        {
+          entry: makeEntry("seeded-unchanged", "u", varyOnFormat, {
+            validators: { etag: "s0" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+        {
+          entry: makeEntry("seeded-changed", "c", varyOnFormat, {
+            validators: { etag: "s1-different" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+        {
+          entry: makeEntry("empty-one", "e", varyOnFormat, { validators: {} }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      assert.equal(results.length, 4);
+      assert.deepEqual(relationshipsOf(results), [
+        "is-new",
+        "unchanged",
+        "changed",
+        undefined,
+      ]);
+    },
+  );
+  commonBehavior(
+    "rejects pre-aborted reads with the caller's reason",
+    [],
+    async (store) => {
+      // Finish lazy initialization before testing cancellation and cleanup.
+      await getOne(store, { id: "initialize", params: matchingParams });
+      const controller = new AbortController();
+      const reason = new Error("read cancelled before dispatch");
+      controller.abort(reason);
+      const request = { id: "id", params: matchingParams };
+      const options = { signal: controller.signal };
+      await assert.rejects(
+        store.get !== undefined
+          ? store.get(request, options)
+          : store.getMany([request], options),
+        (error) => error === reason,
+      );
+    },
+  );
 }
 
 async function withStore(
@@ -805,7 +1378,7 @@ function makeEntry(
     date?: Date;
     directives?: NormalizedProducerDirectives;
     initialAge?: number;
-    validators?: Record<string, string>;
+    validators?: AnyValidators;
   },
 ): Entry<TestSpec, AnyValidators, TestParams> {
   return {
@@ -819,9 +1392,270 @@ function makeEntry(
   };
 }
 
-function snapshotEntry(entry: Entry<TestSpec, AnyValidators, TestParams>) {
+// Convenience so tests can read the reported relationship out of the parallel
+// result array without repeating the optional-chain everywhere.
+function relationshipsOf(
+  results: readonly StoreEntryResult[],
+): (StoreEntryRelationship | undefined)[] {
+  return results.map((r) => r?.relationshipToExistingStoredData);
+}
+
+function defineChangeDetectionConformance(
+  createFixture: () => Promise<StoreFixture>,
+) {
+  // -- Empty validators => field omitted, regardless of what's stored --------
+
+  it("omits the relationship for empty validators even when the slot already holds data", async () => {
+    await withStore(createFixture, async (store) => {
+      // Seed a non-empty entry, then overwrite with empty validators. The
+      // empty-validators rule wins over the fact that the slot changed.
+      await store.store([
+        {
+          entry: makeEntry("id", "a", varyOnFormat, {
+            validators: { etag: "seed" },
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      const overwriteEmpty = await store.store([
+        {
+          entry: makeEntry("id", "b", varyOnFormat, { validators: {} }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(overwriteEmpty)[0], undefined);
+
+      // And again, now that the slot holds an empty-validators entry.
+      const overwriteEmptyAgain = await store.store([
+        {
+          entry: makeEntry("id", "c", varyOnFormat, { validators: {} }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+      assert.equal(relationshipsOf(overwriteEmptyAgain)[0], undefined);
+    });
+  });
+
+  // -- Validators are interpreted as their JSON-serialized form --------------
+  //
+  // `undefined` isn't a legal validator value (AnyValidators values are JSON),
+  // but it's expressible from JS, and JSON serialization silently drops
+  // `undefined`-valued keys. Every store must interpret validators as what
+  // survives serialization -- including stores that hold or receive the raw
+  // in-memory object -- or the same input classifies differently per store.
+
+  it("ignores undefined-valued keys when deciding whether validators are empty", async () => {
+    await withStore(createFixture, async (store) => {
+      // Deliberately type-violating input; see the section comment above.
+      const effectivelyEmpty = {
+        etag: undefined,
+      } as unknown as AnyValidators;
+
+      const results = await store.store([
+        {
+          entry: makeEntry("id", "a", varyOnFormat, {
+            validators: effectivelyEmpty,
+          }),
+          maxStoreForSeconds: 60,
+        },
+      ]);
+
+      // Nothing survives serialization, so there's nothing to compare on: the
+      // relationship must be omitted (not "is-new").
+      assert.equal(relationshipsOf(results)[0], undefined);
+    });
+  });
+}
+
+// ===========================================================================
+// Property-test generator + oracle (shared by the property and the audit test)
+// ===========================================================================
+
+// A single input entry within one store() call, addressed by an abstract slot
+// index (see `slotSpec` for the id/vary mapping).
+type OracleOp = {
+  slotIdx: number;
+  validators: AnyValidators;
+  date: Date;
+  initialAge: number;
+};
+// One store() call is a list of ops.
+type OracleCall = OracleOp[];
+
+// Four abstract slots: two resource ids x two variants. This exercises the
+// per-(id, vary) slot granularity (same id + different vary is a different
+// slot) while keeping the slot space small enough that `unchanged` collisions
+// actually occur.
+const SLOT_COUNT = 4;
+
+function slotSpec(
+  runId: string,
+  slotIdx: number,
+): { id: string; vary: NormalizedVary<TestParams> } {
   return {
-    ...entry,
-    date: entry.date.toISOString(),
+    id: `${runId}:${slotIdx < 2 ? "a" : "b"}`,
+    vary: slotIdx % 2 === 0 ? varyOnFormat : varyOnLanguage,
   };
 }
+
+// Small pool of validator objects, drawn from heavily so that repeats (and
+// therefore `unchanged`) are frequent. Deliberately includes:
+//   - `{}` (empty) so the omit rule is exercised inside the property;
+//   - a superset pair ({etag:v1} vs {etag:v1, weak:true}) => "changed";
+//   - key-reordered duplicates (top-level and nested) that are isEqual-equal,
+//     so an order-SENSITIVE implementation bug would diverge from the
+//     order-independent oracle and be caught.
+const validatorsPool = [
+  {},
+  { etag: "v1" },
+  { etag: "v2" },
+  { etag: "v1", weak: true },
+  { weak: true, etag: "v1" },
+  { lastModified: "2020-01-01T00:00:00Z", meta: { rev: 1, tags: ["a", "b"] } },
+  { meta: { tags: ["a", "b"], rev: 1 }, lastModified: "2020-01-01T00:00:00Z" },
+] satisfies AnyValidators[];
+
+// Values that don't survive a JSON round-trip stably would make the oracle
+// (which holds the in-memory object) and the store (which round-trips through
+// JSON) legitimately disagree; exclude them. In practice `AnyValidatorsArb`'s
+// `fc.jsonValue()` never emits Infinity/NaN/undefined and isEqual treats -0/0
+// as equal, so this filter almost never fires -- it's a documented safety net.
+const roundTrips = (v: AnyValidators): boolean =>
+  isEqual(JSON.parse(JSON.stringify(v)), v);
+
+const poolArb: fc.Arbitrary<AnyValidators> = fc.constantFrom(...validatorsPool);
+// ~80% from the collision-friendly pool, ~20% from the broad reused arbitrary
+// for structural breadth.
+const validatorsArb: fc.Arbitrary<AnyValidators> = fc.oneof(
+  poolArb,
+  poolArb,
+  poolArb,
+  poolArb,
+  AnyValidatorsArb.filter(roundTrips),
+);
+
+const dateArb = fc.date({ noInvalidDate: true });
+
+// One store() call: for each of the four slots, optionally include an op. This
+// guarantees DISTINCT slots within a call (each slot appears at most once), so
+// there is no in-call dedup ambiguity to reconcile across the three stores'
+// differing dedup rules -- see the by-construction exclusions note below.
+const callArb: fc.Arbitrary<OracleCall> = fc
+  .tuple(
+    ...Array.from({ length: SLOT_COUNT }, (_unused, slotIdx) =>
+      fc
+        .option(
+          fc.record({
+            validators: validatorsArb,
+            date: dateArb,
+            initialAge: fc.nat({ max: 1000 }),
+          }),
+          { nil: undefined },
+        )
+        .map((v) => (v === undefined ? undefined : { slotIdx, ...v })),
+    ),
+  )
+  .map((slots) => slots.filter((s): s is OracleOp => s !== undefined))
+  .filter((ops) => ops.length > 0);
+
+const operationsArb: fc.Arbitrary<OracleCall[]> = fc.array(callArb, {
+  minLength: 1,
+  maxLength: 8,
+});
+
+// Naive oracle: for each slot, remember the validators of the most recently
+// stored entry (all current stores keep <= 1 entry per slot, and distinct
+// slots per call means the sole writer of a slot always wins). Compute each
+// input's relationship against the PRE-call state, then apply the call.
+function makeOracle() {
+  const stored = new Map<number, AnyValidators>();
+  return {
+    expectAndApply(call: OracleCall): (StoreEntryRelationship | undefined)[] {
+      const expected = call.map((op): StoreEntryRelationship | undefined => {
+        if (Object.keys(op.validators).length === 0) return undefined;
+        if (!stored.has(op.slotIdx)) return "is-new";
+        return isEqual(stored.get(op.slotIdx), op.validators)
+          ? "unchanged"
+          : "changed";
+      });
+      // Storing any entry (even empty-validators) occupies the slot, so the
+      // next store to that slot compares against it rather than seeing is-new.
+      for (const op of call) stored.set(op.slotIdx, op.validators);
+      return expected;
+    },
+  };
+}
+
+// === By-construction exclusions of the property generator (coverage holes) ===
+//
+// Per the writing-tests skill, every constraint on the generator is a
+// zero-coverage region; each is enumerated here and covered by a dedicated
+// example test above:
+//
+//  1. NO in-call duplicate slots. `callArb` emits each slot at most once per
+//     call, so the "multiple inputs for one slot in one store() call" case is
+//     unreachable by the property. Covered by
+//     "dedupes in-call duplicates by newest birth date...", which pins the
+//     shared retention policy: the built-in Stores keep the entry with the
+//     newest birth date. (Rationale for still excluding duplicates here: randomly
+//     generated dates can tie, and the winner among birth-date ties is
+//     implementation-defined, so this policy oracle can't predict it.)
+//
+//  2. Newest-birth-date dedup among MULTIPLE same-call entries is never
+//     exercised: with <= 1 entry per slot and distinct slots per call, each
+//     slot's stored value is simply the last write, so `date`/`initialAge`
+//     never influence the property's outcome. Covered by the "A -> B -> A"
+//     test (cross-call: comparison target is the currently-stored value) and
+//     the in-call duplicate test (newest-birth-date entry wins even when it
+//     is not last).
+//
+//  3. Slots come from a fixed 2-ids x 2-varies set, not arbitrary id/vary
+//     values -- a deliberate bound so `unchanged` collisions are frequent.
+//     Arbitrary id/vary storage/matching is covered by the general
+//     Store conformance tests above.
+//
+//  4. Validator values are restricted to JSON-round-trippable data (see
+//     `roundTrips`); Infinity/NaN/undefined are never generated because they
+//     are not representable in the JSON-backed stores. The runtime meaning of
+//     type-violating `undefined` values (interpreted as their JSON-serialized
+//     form) is covered by the dedicated "ignores undefined-valued keys" tests.
+//
+//  5. `maxStoreForSeconds` is fixed at 60, so no entry ever expires within a
+//     property run and the expired-slot rule (expired records are not live =>
+//     "is-new") is unreachable here. Covered by the dedicated "expired ...
+//     still physically present" test (for the stores where entries expire).
+//
+// NOT excluded (exercised inside the property): empty-validators entries (the
+// omit rule), is-new on fresh slots, and per-(id,vary) slot granularity.
+
+describe("Change-detection property generator coverage", () => {
+  // Generator self-audit. This is store-independent -- it only exercises the
+  // shared arbitrary + oracle -- so it lives at the top level rather than
+  // per-store. It proves the property-test generator actually produces every
+  // relationship outcome (the "dimension-accounting" guard: a future edit that
+  // silently stops generating, say, `unchanged` becomes a red test instead of
+  // an invisible coverage hole).
+  it("generator exercises is-new, unchanged, changed, and omitted outcomes", () => {
+    const samples = fc.sample(operationsArb, { numRuns: 3000, seed: 0xc0ffee });
+    const seen = new Set<string>();
+    for (const calls of samples) {
+      const oracle = makeOracle();
+      for (const call of calls) {
+        for (const rel of oracle.expectAndApply(call)) {
+          seen.add(String(rel));
+        }
+      }
+    }
+    assert.ok(seen.has("is-new"), "generator never produced an is-new case");
+    assert.ok(
+      seen.has("unchanged"),
+      "generator never produced an unchanged case",
+    );
+    assert.ok(seen.has("changed"), "generator never produced a changed case");
+    assert.ok(
+      seen.has("undefined"),
+      "generator never produced an empty-validators (omitted) case",
+    );
+  });
+});

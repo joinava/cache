@@ -1,16 +1,16 @@
 import { expect } from "chai";
-import type { DistributedOmit } from "type-fest";
 import assert from "node:assert/strict";
 import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { setTimeout as delay } from "timers/promises";
+import type { DistributedOmit } from "type-fest";
 
 import {
-  cacheReadChannel,
   idStartsWith,
   resourceType,
   type CacheFetchMessage,
   type CacheProduceMessage,
   type CacheReadMessage,
+  type CacheReadStoreMessage,
   type CacheStoreEntryMessage,
   type ResourceTypes,
 } from "../src/index.js";
@@ -43,6 +43,39 @@ export const ACCEPT_ANY_REGISTRY = {
 export const freshFor100 = { freshUntilAge: 100 };
 
 /**
+ * A registry with one resource type for ids that start with "resource:".
+ * Classification tests use it where ACCEPT_ANY_REGISTRY would accept a bad id.
+ */
+export const RESOURCE_PREFIX_REGISTRY = {
+  resource: resourceType<number>()({
+    matches: idStartsWith("resource:"),
+  }),
+} satisfies ResourceTypes;
+
+/** Each result's content, or the Error in its slot. */
+export const contents = <T>(
+  results: readonly ({ content: T } | Error)[],
+): (T | Error)[] =>
+  results.map((entry) => (entry instanceof Error ? entry : entry.content));
+
+/**
+ * Content that is 10 seconds old and stale, but usable while a refresh runs.
+ * Spread it into a stored entry or return it from a producer. Pass `ifError`
+ * to also allow serving it when the refresh fails.
+ */
+export const staleWhileRevalidating = (
+  content: string,
+  { ifError = 0 }: { ifError?: number } = {},
+) => ({
+  content,
+  date: new Date(Date.now() - 10_000),
+  directives: {
+    freshUntilAge: 1,
+    maxStale: { withoutRevalidation: 0, whileRevalidate: 100, ifError },
+  },
+});
+
+/**
  * Asserts its type argument is `true` at COMPILE time; the runtime body is
  * empty. `expectType<IsEqual<A, B>>()` (type-fest's `IsEqual`, which is the
  * INVARIANT comparison -- `IsEqual<string, any>` and
@@ -69,21 +102,40 @@ export const V2_CHANNEL_NAMES = {
   fetch: "@zingage/cache:fetch",
   produce: "@zingage/cache:produce",
   storeEntry: "@zingage/cache:store-entry",
+  readStore: "@zingage/cache:read-store",
 } as const;
 
-type CapturedReadMessage = DistributedOmit<CacheReadMessage, "durationMs">;
+/**
+ * A captured message. `captureChannels` drops the measurement fields `Keys`
+ * unless the caller asks for measurements, so they are optional here.
+ */
+type Captured<Message, Keys extends keyof Message> = DistributedOmit<
+  Message,
+  Keys
+> &
+  Partial<Pick<Message, Keys>>;
+
+type CapturedReadMessage = Captured<CacheReadMessage, "durationMs">;
+type CapturedFetchMessage = Captured<CacheFetchMessage, "durationMs">;
+type CapturedProduceMessage = Captured<CacheProduceMessage, "queueWaitTotalMs">;
+type CapturedReadStoreMessage = Captured<
+  CacheReadStoreMessage,
+  "durationMs" | "queueWaitTotalMs"
+>;
 
 export type CapturedMessage =
   | { channel: "read"; message: CapturedReadMessage }
-  | { channel: "fetch"; message: CacheFetchMessage }
-  | { channel: "produce"; message: CacheProduceMessage }
-  | { channel: "store-entry"; message: CacheStoreEntryMessage };
+  | { channel: "fetch"; message: CapturedFetchMessage }
+  | { channel: "produce"; message: CapturedProduceMessage }
+  | { channel: "store-entry"; message: CacheStoreEntryMessage }
+  | { channel: "read-store"; message: CapturedReadStoreMessage };
 
 export type ChannelCapture = {
   read: CapturedReadMessage[];
-  fetch: CacheFetchMessage[];
-  produce: CacheProduceMessage[];
+  fetch: CapturedFetchMessage[];
+  produce: CapturedProduceMessage[];
   storeEntry: CacheStoreEntryMessage[];
+  readStore: CapturedReadStoreMessage[];
   /** Every captured message, across channels, in arrival order. */
   all: CapturedMessage[];
   /** Unsubscribes all listeners. Always call (e.g. in `finally`). */
@@ -91,17 +143,26 @@ export type ChannelCapture = {
 };
 
 /**
- * Subscribes to all four 2.0 diagnostics channels and collects the messages
+ * Subscribes to every diagnostics channel and collects the messages
  * attributed to `cacheName` (every documented message type carries a `cache`
  * field, so filtering on it isolates concurrently-running tests from each
  * other). Call `stop()` when done -- leaked subscribers poison other tests'
  * counts.
+ *
+ * By default, read, fetch, and read-store messages drop `durationMs`, and
+ * produce and read-store messages drop `queueWaitTotalMs`. Outcome tests
+ * deep-equal messages, and those fields depend on timing. Pass
+ * `{ measurements: true }` to keep them, as the timing tests do.
  */
-export function captureChannels(cacheName: string): ChannelCapture {
+export function captureChannels(
+  cacheName: string,
+  options: { measurements?: true } = {},
+): ChannelCapture {
   const read: CapturedReadMessage[] = [];
-  const fetch: CacheFetchMessage[] = [];
-  const produce: CacheProduceMessage[] = [];
+  const fetch: CapturedFetchMessage[] = [];
+  const produce: CapturedProduceMessage[] = [];
   const storeEntry: CacheStoreEntryMessage[] = [];
+  const readStore: CapturedReadStoreMessage[] = [];
   const all: CapturedMessage[] = [];
 
   const isForThisCache = (msg: unknown): boolean =>
@@ -114,49 +175,58 @@ export function captureChannels(cacheName: string): ChannelCapture {
   // the full payload shapes, so a message that doesn't actually match the
   // documented type fails loudly there.
   const collect =
-    <M>(channel: CapturedMessage["channel"], bucket: M[]) =>
+    <M extends object>(channel: CapturedMessage["channel"], bucket: M[]) =>
     (msg: unknown) => {
       if (!isForThisCache(msg)) return;
-      const message = msg as M;
+      const message = { ...(msg as M) };
+      if (options.measurements !== true) {
+        if (channel === "read" || channel === "fetch") {
+          Reflect.deleteProperty(message, "durationMs");
+        }
+        if (channel === "read-store") {
+          ["durationMs", "queueWaitTotalMs"].forEach((key) =>
+            Reflect.deleteProperty(message, key),
+          );
+        }
+        if (channel === "produce") {
+          Reflect.deleteProperty(message, "queueWaitTotalMs");
+        }
+      }
       bucket.push(message);
       all.push({ channel, message } as CapturedMessage);
     };
 
-  const onRead = (msg: CacheReadMessage) => {
-    if (msg.cache !== cacheName) return;
-    const { durationMs, ...message } = msg;
-    // Validate timing separately so existing payload assertions remain exact.
-    assert.ok(
-      durationMs !== undefined &&
-        Number.isFinite(durationMs) &&
-        durationMs >= 0,
-    );
-    read.push(message);
-    all.push({ channel: "read", message });
-  };
-  const onFetch = collect<CacheFetchMessage>("fetch", fetch);
-  const onProduce = collect<CacheProduceMessage>("produce", produce);
+  const onRead = collect<CapturedReadMessage>("read", read);
+  const onFetch = collect<CapturedFetchMessage>("fetch", fetch);
+  const onProduce = collect<CapturedProduceMessage>("produce", produce);
   const onStoreEntry = collect<CacheStoreEntryMessage>(
     "store-entry",
     storeEntry,
   );
+  const onReadStore = collect<CapturedReadStoreMessage>(
+    "read-store",
+    readStore,
+  );
 
-  cacheReadChannel.subscribe(onRead);
+  subscribe(V2_CHANNEL_NAMES.read, onRead);
   subscribe(V2_CHANNEL_NAMES.fetch, onFetch);
   subscribe(V2_CHANNEL_NAMES.produce, onProduce);
   subscribe(V2_CHANNEL_NAMES.storeEntry, onStoreEntry);
+  subscribe(V2_CHANNEL_NAMES.readStore, onReadStore);
 
   return {
     read,
     fetch,
     produce,
     storeEntry,
+    readStore,
     all,
     stop: () => {
-      cacheReadChannel.unsubscribe(onRead);
+      unsubscribe(V2_CHANNEL_NAMES.read, onRead);
       unsubscribe(V2_CHANNEL_NAMES.fetch, onFetch);
       unsubscribe(V2_CHANNEL_NAMES.produce, onProduce);
       unsubscribe(V2_CHANNEL_NAMES.storeEntry, onStoreEntry);
+      unsubscribe(V2_CHANNEL_NAMES.readStore, onReadStore);
     },
   };
 }
@@ -250,7 +320,7 @@ export const sortByResourceId = <T extends { resourceId: string }>(
  * `vary: {}` reads as an extra field and fails here.
  */
 export function expectProducerPathFetch(
-  msg: CacheFetchMessage | undefined,
+  msg: CapturedFetchMessage | undefined,
   expected: {
     cache: string;
     resourceType: string;
@@ -280,7 +350,7 @@ export function expectProducerPathFetch(
  * field exists to prevent.
  */
 export function expectCachePathFetch(
-  msg: CacheFetchMessage | undefined,
+  msg: CapturedFetchMessage | undefined,
   expected: {
     cache: string;
     resourceType: string;
@@ -303,18 +373,19 @@ export function expectCachePathFetch(
  * deep-equaled. `requests` are compared order-insensitively (batch order
  * within one bulk invocation isn't documented).
  *
- * `collapsedCallerCount` is the initiator plus every rider, and counts
- * ATTACHMENT rather than settlement dependence: a lone caller reports 1, one
- * rider makes 2, and a background revalidation with no waiting foreground
- * caller reports 1.
+ * `collapsedRequestCount` counts the requests that rode the invocation's
+ * tasks, and counts ATTACHMENT rather than settlement dependence: a lone
+ * request reports 0, one rider makes 1, and a background revalidation that
+ * rides counts like any other rider.
  */
 export function expectProduceMessage(
-  msg: CacheProduceMessage | undefined,
+  msg: CapturedProduceMessage | undefined,
   expected: {
     cache: string;
+    autoBatched: boolean;
     trigger: "miss" | "revalidation" | "bypass";
     requests: readonly { resourceType: string; resourceId: string }[];
-    collapsedCallerCount: number;
+    collapsedRequestCount: number;
     outcome: "success" | "error";
     failedRequestCount?: number;
     minDurationMs?: number;
@@ -330,8 +401,10 @@ export function expectProduceMessage(
   );
   expect(rest).to.deep.equal({
     cache: expected.cache,
+    autoBatched: expected.autoBatched,
+    requestCount: expected.requests.length,
     trigger: expected.trigger,
-    collapsedCallerCount: expected.collapsedCallerCount,
+    collapsedRequestCount: expected.collapsedRequestCount,
     outcome: expected.outcome,
     failedRequestCount:
       expected.failedRequestCount ??

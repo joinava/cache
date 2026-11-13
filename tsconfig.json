@@ -45,5 +45,6 @@
     "outDir": "dist",
     "sourceMap": true
   },
-  "include": ["./src", "./test"]
+  "include": ["./src", "./test"],
+  "exclude": ["./test/types"]
 }

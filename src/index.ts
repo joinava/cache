@@ -5,19 +5,14 @@ import {
   isValidatable,
 } from "./utils/normalizedProducerResultResourceHelpers.js";
 
+export { default as Cache, type ReadOptions } from "./cache/Cache.js";
+export type { CacheOptions } from "./cache/CacheOptions.js";
 export {
-  AmbiguousResourceTypeError,
-  default as Cache,
   singleTypeCacheOptions,
-  UnclassifiableIdError,
-  type CacheOptions,
   type SingleTypeCacheOptionsBuilder,
   type SingleTypeRegistry,
-} from "./Cache.js";
-export type {
-  CacheLookupResult,
-  CacheReadOutcome,
-} from "./utils/cacheHelpers.js";
+} from "./cache/singleTypeCacheOptions.js";
+export type { CacheLookupResult } from "./utils/cacheHelpers.js";
 export { default as MemoryStore } from "./stores/MemoryStore/MemoryStore.js";
 export { default as PostgresStore } from "./stores/PostgresStore/PostgresStore.js";
 export type {
@@ -30,56 +25,51 @@ export {
   type SqliteStoreSupportedParams,
 } from "./stores/SqliteStore/SqliteStore.js";
 export {
+  AmbiguousResourceTypeError,
   classifyIdAgainst,
   idStartsWith,
   resourceType,
   resourceTypesEntries,
+  UnclassifiableIdError,
   type IdClassification,
   type ResourceTypesEntries,
 } from "./resourceTypeClassification.js";
 export * from "./types/index.js";
-export { default as collapsedTaskCreator } from "./utils/collapsedTaskCreator.js";
 export { restoreInfinityInDirectives } from "./utils/normalization.js";
-export { naiveGetMany } from "./utils/utils.js";
+export { throwIfAnyError } from "./utils/utils.js";
 export type { JsonOf, JSONWithUndefined } from "type-party";
 export { jsonParse, jsonStringify } from "type-party/runtime/json.js";
-export {
-  NoProducerForResourceTypeError,
-  UnroutableIdError,
-  type UnroutableIdReason,
-} from "./utils/producer-errors.js";
+export { NoProducerForResourceTypeError } from "./wrapProducer/producerClient.js";
 export {
   bulkHashedInputProducerByInputType,
   hashedInputProducerByInputType,
   type BulkHashedInputProducerBuilder,
   type HashedInputProducer,
   type HashedInputProducerBuilder,
+  type HashedInputProducerResult,
   type HashedInputVariant,
-} from "./utils/hashedInputProducerByInputType.js";
-export { producerByIdType } from "./utils/producerByIdType.js";
+} from "./producer-builders/hashedInputProducerByInputType.js";
+export {
+  producerByIdType,
+  UnroutableIdError,
+  type ProducersFor,
+  type UnroutableIdReason,
+} from "./producer-builders/producerByIdType.js";
 export {
   bulkProducerByIdType,
   type BulkProducersFor,
-  type BulkResourceTypeProducer,
-} from "./utils/bulkProducerByIdType.js";
-export {
-  wrapBulkProducer,
-  type CoveringBulkProducer,
-} from "./utils/wrapBulkProducer.js";
+} from "./producer-builders/bulkProducerByIdType.js";
+
 export {
   MintedIdResourceTypeMismatchError,
-  wrapBulkHashedInputProducer,
   wrapHashedInputProducer,
-  type HashedInputProducerResult,
-} from "./utils/wrapHashedInputProducer.js";
+} from "./wrapProducer/wrapHashedInputProducer.js";
 export {
-  coveredTypes,
   default as wrapProducer,
-  type CoveringProducer,
-  type ProducersFor,
-  type ResourceTypeProducer,
+  type WrappedProducerClient,
+  type WrappedReadOptions,
   type WrapProducerOptions,
-} from "./utils/wrapProducer.js";
+} from "./wrapProducer/wrapProducer.js";
 
 // Diagnostics channels
 export {
@@ -90,13 +80,11 @@ export {
   CACHE_PRODUCE_CHANNEL_NAME,
   cacheProduceChannel,
   type CacheProduceMessage,
-  CACHE_READ_BATCH_CHANNEL_NAME,
-  cacheReadBatchChannel,
-  type CacheReadBatchMessage,
+  CACHE_READ_STORE_CHANNEL_NAME,
+  cacheReadStoreChannel,
+  type CacheReadStoreMessage,
   CACHE_READ_CHANNEL_NAME,
   cacheReadChannel,
-  type CacheReadFound,
-  type CacheReadFoundWithEntry,
   type CacheReadMessage,
   CACHE_STORE_ENTRY_CHANNEL_NAME,
   cacheStoreEntryChannel,
@@ -115,4 +103,4 @@ export {
 } from "./utils/varyHelpers.js";
 export type { VariantKey, VaryKeys } from "./utils/varyHelpers.js";
 
-export type { OnStore } from "./utils/wrapProducer.js";
+export type { OnStore } from "./wrapProducer/wrapProducer.js";

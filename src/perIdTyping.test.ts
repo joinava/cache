@@ -1,3 +1,4 @@
+import { throwIfAnyError } from "./utils/utils.js";
 import { expect } from "chai";
 import { describe, it } from "node:test";
 import type { IsEqual } from "type-fest";
@@ -5,7 +6,7 @@ import type { JsonOf } from "type-party";
 import { jsonStringify } from "type-party/runtime/json.js";
 
 import { expectType } from "../test/v2AcceptanceHelpers.js";
-import Cache from "./Cache.js";
+import Cache from "./cache/Cache.js";
 import {
   idStartsWith,
   MemoryStore,
@@ -15,7 +16,7 @@ import {
   type SpecOf,
 } from "./index.js";
 import type { CacheSpec } from "./types/00_CacheSpec.js";
-import wrapProducer from "./utils/wrapProducer.js";
+import wrapProducer from "./wrapProducer/wrapProducer.js";
 
 /**
  * Sample domain for per-id-typing tests:
@@ -79,10 +80,13 @@ describe("Per-id content typing", () => {
         resourceTypes: soleRegistry,
       });
       try {
-        const _f = wrapProducer({ cache }, async (req) => ({
-          content: req.id,
-          directives: { freshUntilAge: 1 },
-        }));
+        const _f = wrapProducer({
+          cache,
+          produce: async (req) => ({
+            content: req.id,
+            directives: { freshUntilAge: 1 },
+          }),
+        });
         void _f;
       } finally {
         void cache.close();
@@ -199,7 +203,7 @@ describe("Per-id content typing", () => {
     });
   });
 
-  describe("Cache.getMany", () => {
+  describe("Cache.getUnbatched", () => {
     it("narrows the result content per request id (tuple typing)", async () => {
       const cache = makeStoriesCache();
       try {
@@ -217,10 +221,12 @@ describe("Per-id content typing", () => {
           },
         ]);
 
-        const [storyRes, collectionRes] = await cache.getMany([
-          { id: "story:42", params: {}, directives: {} },
-          { id: "collection:hot", params: {}, directives: {} },
-        ] as const);
+        const [storyRes, collectionRes] = await cache
+          .getUnbatched([
+            { id: "story:42", params: {}, directives: {} },
+            { id: "collection:hot", params: {}, directives: {} },
+          ] as const)
+          .then(throwIfAnyError);
 
         expectType<
           IsEqual<NonNullable<typeof storyRes.usable>["content"], Story>
@@ -246,9 +252,10 @@ describe("Per-id content typing", () => {
         // entry's producer is non-generic over its own branch's id, so
         // TypeScript fully checks the (id, content) correlation per branch with
         // no user-side casts.
-        const fetcher = wrapProducer(
-          { cache, collapseOverlappingRequestsTime: 0 },
-          producerByIdType(cache.resourceTypes, {
+        const fetcher = wrapProducer({
+          cache,
+          collapseOverlappingRequestsTime: 0,
+          produce: producerByIdType(cache.resourceTypes, {
             story: async (req) => ({
               content: {
                 id: req.id,
@@ -264,10 +271,10 @@ describe("Per-id content typing", () => {
               directives: { freshUntilAge: 1 },
             }),
           }),
-        );
+        });
 
-        const storyResult = await fetcher({ id: "story:abc" });
-        const collectionResult = await fetcher({ id: "collection:home" });
+        const storyResult = await fetcher.get({ id: "story:abc" });
+        const collectionResult = await fetcher.get({ id: "collection:home" });
 
         // Compile-time: per-id content narrowing.
         expectType<IsEqual<typeof storyResult.content, Story>>();
@@ -292,9 +299,10 @@ describe("Per-id content typing", () => {
         const story1: Story = { id: "1", title: "First" };
         const story2: Story = { id: "2", title: "Second" };
 
-        const fetcher = wrapProducer(
-          { cache, collapseOverlappingRequestsTime: 0 },
-          producerByIdType(cache.resourceTypes, {
+        const fetcher = wrapProducer({
+          cache,
+          collapseOverlappingRequestsTime: 0,
+          produce: producerByIdType(cache.resourceTypes, {
             collection: async (_req) => ({
               content: [story1, story2] satisfies Story[],
               directives: { freshUntilAge: 100 },
@@ -321,10 +329,10 @@ describe("Per-id content typing", () => {
               directives: { freshUntilAge: 1 },
             }),
           }),
-        );
+        });
 
         // Fetching the collection should also cache the individual stories.
-        const collectionResult = await fetcher({ id: "collection:top" });
+        const collectionResult = await fetcher.get({ id: "collection:top" });
         expect(collectionResult.content).to.deep.equal([story1, story2]);
 
         // Now fetch one of the individual stories: it should come from the
@@ -469,9 +477,10 @@ describe("Per-id content typing", () => {
         // check; each branch's producer receives `req.id` narrowed to its
         // branch's branded key, and its return is required to be content for
         // that variant.
-        const fetcher = wrapProducer(
-          { cache, collapseOverlappingRequestsTime: 0 },
-          producerByIdType(cache.resourceTypes, {
+        const fetcher = wrapProducer({
+          cache,
+          collapseOverlappingRequestsTime: 0,
+          produce: producerByIdType(cache.resourceTypes, {
             story: async (req) => {
               expectType<IsEqual<typeof req.id, StoryKey>>();
               const parsed = JSON.parse(req.id) as { story: string };
@@ -494,10 +503,10 @@ describe("Per-id content typing", () => {
               };
             },
           }),
-        );
+        });
 
-        const storyResult = await fetcher({ id: storyId });
-        const collectionResult = await fetcher({ id: collectionId });
+        const storyResult = await fetcher.get({ id: storyId });
+        const collectionResult = await fetcher.get({ id: collectionId });
 
         expectType<IsEqual<typeof storyResult.content, Story>>();
         expectType<IsEqual<typeof collectionResult.content, Story[]>>();
