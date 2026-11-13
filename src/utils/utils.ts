@@ -192,24 +192,29 @@ export async function readStoreObserved<
 >(
   store: Store<Spec, Validators, Params>,
   requests: Reqs,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal | undefined },
   observe?: (event: StoreReadObservation) => void,
 ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
-  options?.signal?.throwIfAborted();
+  // The Store contract types `signal` as present-or-absent, never undefined,
+  // so an explicit `signal: undefined` from a caller is dropped here, at the
+  // one place that calls the Store.
+  const signal = options?.signal;
+  const storeOptions = signal === undefined ? undefined : { signal };
+  signal?.throwIfAborted();
 
   if (requests.length === 0) {
     return [] as StoreGetManyResult<Spec, Reqs, Validators, Params>;
   }
 
   if (store.getMany === undefined) {
-    return readSingleStore(store, requests, 10, options, observe);
+    return readSingleStore(store, requests, 10, storeOptions, observe);
   }
 
   const startedAt = observe === undefined ? 0 : performance.now();
   let results: StoreGetManyResult<Spec, Reqs, Validators, Params>;
 
   try {
-    results = await store.getMany(requests, options);
+    results = await store.getMany(requests, storeOptions);
     if (
       !Array.isArray(results) ||
       results.length !== requests.length ||
@@ -239,13 +244,13 @@ export async function readStoreObserved<
     observe?.({
       operation: "getMany",
       requestCount: requests.length,
-      failedRequestCount: options?.signal?.aborted ? 0 : requests.length,
+      failedRequestCount: signal?.aborted ? 0 : requests.length,
       entryCount: 0,
       durationMs: performance.now() - startedAt,
-      outcome: options?.signal?.aborted ? "cancelled" : "failure",
+      outcome: signal?.aborted ? "cancelled" : "failure",
     });
 
-    options?.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     if (failure instanceof CacheContractError) throw failure;
 
     const error = asError(failure);
@@ -257,7 +262,7 @@ export async function readStoreObserved<
     >;
   }
 
-  options?.signal?.throwIfAborted();
+  signal?.throwIfAborted();
   return results;
 }
 

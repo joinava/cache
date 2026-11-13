@@ -74,7 +74,7 @@ import {
 const DEFAULT_READ_BATCH_SIZE = 100;
 
 /** Options for {@link Cache.get} and {@link Cache.getUnbatched}. */
-export type ReadOptions = { signal?: AbortSignal };
+export type ReadOptions = { signal?: AbortSignal | undefined };
 
 /**
  * Thrown when an id matches zero resource types in the cache's registry.
@@ -887,7 +887,7 @@ export default class Cache<
     >[],
   >(
     requests: Requests,
-    options?: { signal?: AbortSignal },
+    options?: ReadOptions,
     batch?: { autoBatched: boolean; queueWaitTotalMs: number },
   ) {
     const observed = cacheReadStoreChannel.hasSubscribers;
