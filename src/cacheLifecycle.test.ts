@@ -51,6 +51,32 @@ describe("close() drains accepted work", suiteOptions, () => {
     await cache.close();
   });
 
+  it("waits for an in-flight read on a Store without getMany before it closes the Store", async (t) => {
+    const store = new MemoryStore<Spec>();
+    const readGate = Promise.withResolvers<void>();
+    const readStarted = Promise.withResolvers<void>();
+    const events: string[] = [];
+    const read = store.get.bind(store);
+    t.mock.method(store, "get", async (...args: Parameters<typeof read>) => {
+      readStarted.resolve();
+      await readGate.promise;
+      events.push("read settled");
+      return read(...args);
+    });
+    t.mock.method(store, "close", async () => {
+      events.push("store closed");
+    });
+    const cache = cacheOver(store, { name: "direct-read-drain" });
+    const pending = cache.get(lookup("a"));
+    await readStarted.promise;
+    const closing = cache.close();
+    await nextTurn();
+    assert.deepEqual(events, []);
+    readGate.resolve();
+    await Promise.all([pending, closing]);
+    assert.deepEqual(events, ["read settled", "store closed"]);
+  });
+
   it("drains accepted writes and deletes after operation failure, then reports cleanup failure", async (t) => {
     const store = new MemoryStore<Spec>();
     const writeGate = Promise.withResolvers<void>();
