@@ -38,7 +38,7 @@ import {
   keepMaxPerGroup,
 } from "../../utils/utils.js";
 import { resultVariantKey } from "../../utils/varyHelpers.js";
-import { PendingPromisesTracker } from "../../scheduling/pendingPromisesTracker.js";
+import { PendingPromisesTracker } from "@zingage/scheduling";
 import type {
   ReadWorkerRequestInput,
   WorkerEntryJson,

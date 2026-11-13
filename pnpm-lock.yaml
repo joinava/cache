@@ -12,8 +12,8 @@ importers:
   .:
     dependencies:
       '@zingage/scheduling':
-        specifier: ^1.1.0
-        version: 1.1.0
+        specifier: ^1.2.0
+        version: 1.2.0
       debug:
         specifier: ^4.4.1
         version: 4.4.3
@@ -389,8 +389,8 @@ packages:
   '@types/pg@8.16.0':
     resolution: {integrity: sha512-RmhMd/wD+CF8Dfo+cVIy3RR5cl8CyfXQ0tGgW6XBL8L4LM/UTEbNXYRbLwU6w+CgrKBNbrQWt4FUtTfaU5jSYQ==}
 
-  '@zingage/scheduling@1.1.0':
-    resolution: {integrity: sha512-AWReKD4a9hbGKY1MAK5UFPz/n3L290xCUxBwNVVOAbn/0R2tYDzxAfZfbTNyy0MWD3FLUPCtAECq1VHG1CMXfg==}
+  '@zingage/scheduling@1.2.0':
+    resolution: {integrity: sha512-R5s0MbsM2ZzykSxXN+ZmxkMe5jsqMBdIU0lwn8bnYAZTe3W9OI5hhJkON9/GM+R3OaKonG1VIQwH6Ax6TVAggA==}
 
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
@@ -443,6 +443,9 @@ packages:
 
   es-toolkit@1.43.0:
     resolution: {integrity: sha512-SKCT8AsWvYzBBuUqMk4NPwFlSdqLpJwmy6AP322ERn8W2YLIB6JBXnwMI2Qsh2gfphT3q7EKAxKb23cvFHFwKA==}
+
+  es-toolkit@1.47.1:
+    resolution: {integrity: sha512-5RAqEwf4P4E17p+W75KLOWw/nOvKZzSQpxM32IpI2KZLaVonjTrZ0Ai5ghMaVI9eKC2p8eoQgcBdkEDgzFk6+Q==}
 
   execa@5.1.1:
     resolution: {integrity: sha512-8uSpZZocAZRBAPIEINJj3Lo9HyGitllczc27Eh5YYojjMFMn8yHMDMaUHE2Jqfq05D/wucwI4JGURyXt1vchyg==}
@@ -672,6 +675,9 @@ packages:
   type-party@0.10.1:
     resolution: {integrity: sha512-ohpicEwetF4n56ENTeb/AjDjRIM35ykyqQIadLOVjOJjNNOXxWTX78+1gUIUaQ/fhQEj6AO74gocCgNjG79bTQ==}
 
+  type-party@0.10.2:
+    resolution: {integrity: sha512-N5bas7gv6QqtFsOTMBgh19tXrqM+iwcI8Vpsr0wI0cuuuSjNi2BSrGyx/MiLpGQ4wLz9StAjs9b0c48IBxWoKw==}
+
   typescript@5.9.3:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
     engines: {node: '>=14.17'}
@@ -898,7 +904,14 @@ snapshots:
       pg-protocol: 1.11.0
       pg-types: 2.2.0
 
-  '@zingage/scheduling@1.1.0': {}
+  '@zingage/scheduling@1.2.0':
+    dependencies:
+      debug: 4.4.3
+      es-toolkit: 1.47.1
+      type-fest: 5.4.1
+      type-party: 0.10.2
+    transitivePeerDependencies:
+      - supports-color
 
   assertion-error@2.0.1: {}
 
@@ -940,6 +953,8 @@ snapshots:
       '@noble/hashes': 1.8.0
 
   es-toolkit@1.43.0: {}
+
+  es-toolkit@1.47.1: {}
 
   execa@5.1.1:
     dependencies:
@@ -1146,6 +1161,12 @@ snapshots:
   type-party@0.10.1:
     dependencies:
       safe-stable-stringify: 2.5.0
+      type-fest: 5.4.1
+
+  type-party@0.10.2:
+    dependencies:
+      safe-stable-stringify: 2.5.0
+      tagged-tag: 1.0.0
       type-fest: 5.4.1
 
   typescript@5.9.3: {}

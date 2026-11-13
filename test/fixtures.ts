@@ -3,7 +3,7 @@ import { readStoreObserved } from "../src/utils/utils.js";
 import pg from "pg";
 import { mock } from "node:test";
 import Cache from "../src/cache/Cache.js";
-import type { BatchOptions } from "../src/scheduling/batcher.js";
+import type { BatchOptions } from "@zingage/scheduling";
 import wrapProducer from "../src/wrapProducer/wrapProducer.js";
 
 import fc from "fast-check";

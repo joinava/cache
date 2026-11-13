@@ -6,7 +6,7 @@
  *
  * @module
  */
-import { TaskSharer } from "../scheduling/taskSharer.js";
+import { CollapsedTaskCreator } from "@zingage/scheduling";
 import type {
   ResourceTypeName,
   ResourceTypes,
@@ -68,17 +68,17 @@ export class SingleProducerScheduler<
   Produced,
 > implements ProducerScheduler<Work, Produced> {
   /** Shares pending work between requests with the same key. */
-  readonly #sharer: TaskSharer<Work, Produced, undefined>;
+  readonly #taskCreator: CollapsedTaskCreator<Work, Produced, undefined>;
 
   constructor({
     collapseTasksMs,
     makeKey,
     dispatch,
   }: ProducerSchedulerOptions<Work, Produced>) {
-    this.#sharer = new TaskSharer({
+    this.#taskCreator = new CollapsedTaskCreator({
       collapseTasksMs,
       makeKey,
-      // Sends each task. The sharer passes only
+      // Sends each task. The task creator passes only
       // tasks whose requests were not cancelled, and sends them in this same
       // turn, so no task needs a cancellation check here. Like the bulk
       // scheduler's `Batcher`, it rejects a task whose slot is an Error, and
@@ -118,7 +118,7 @@ export class SingleProducerScheduler<
   startOrRideTasks(
     requests: readonly { request: Work; signal?: AbortSignal | undefined }[],
   ): { promise: Promise<Produced>; rode: boolean }[] {
-    return this.#sharer
+    return this.#taskCreator
       .startOrRideTasks(
         requests.map(({ request, signal }) => ({ input: request, signal })),
       )
@@ -130,6 +130,6 @@ export class SingleProducerScheduler<
 
   /** Waits until no task is running. */
   close(): Promise<void> {
-    return this.#sharer.drain();
+    return this.#taskCreator.drain();
   }
 }

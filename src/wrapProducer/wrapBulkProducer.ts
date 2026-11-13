@@ -8,11 +8,12 @@
 import { pick } from "es-toolkit";
 import {
   Batcher,
+  CollapsedTaskCreator,
   type BatchHandle,
   type BatchItem,
   type BatchOptions,
-} from "../scheduling/batcher.js";
-import { TaskSharer, type SharedTaskView } from "../scheduling/taskSharer.js";
+  type SharedTaskView,
+} from "@zingage/scheduling";
 import type {
   ResourceTypeName,
   ResourceTypes,
@@ -23,6 +24,7 @@ import type {
   CoveringBulkProducer,
 } from "../types/index.js";
 import type { LooseBulkProducer } from "../types/05_Producer.js";
+import { defaultLoggersByComponent } from "../utils/utils.js";
 import {
   createProducerClient,
   type DispatchedRequest,
@@ -75,7 +77,7 @@ type DirectStart<Work, Produced> = {
  * Shares pending work between requests, and batches the started tasks. A
  * queued task whose requests are all cancelled leaves the queue.
  *
- * It composes a `TaskSharer`, which shares work, with a `Batcher`, which
+ * It composes a `CollapsedTaskCreator`, which shares work, with a `Batcher`, which
  * batches and sends it. The `Batcher` also logs the warning for work started
  * after `close`.
  *
@@ -94,7 +96,7 @@ export class BulkProducerScheduler<Work, Produced> implements ProducerScheduler<
    * Shares work. Its context is a direct call's list of new tasks to send at
    * once, or undefined for automatic work, which queues.
    */
-  readonly #sharer: TaskSharer<
+  readonly #taskCreator: CollapsedTaskCreator<
     Work,
     Produced,
     BatchHandle<SharedTaskView<Work>, Produced> | undefined,
@@ -124,7 +126,8 @@ export class BulkProducerScheduler<Work, Produced> implements ProducerScheduler<
         "batchScheduleFn",
         "preserveAsyncContext",
       ]),
-      ...(logger === undefined ? {} : { logger }),
+      // Keep the `@zingage/cache:batcher` debug namespace by default.
+      logger: logger ?? defaultLoggersByComponent.batcher,
       dispatch: (items, info) =>
         dispatch(
           items.map(
@@ -138,7 +141,7 @@ export class BulkProducerScheduler<Work, Produced> implements ProducerScheduler<
         ),
     });
 
-    this.#sharer = new TaskSharer({
+    this.#taskCreator = new CollapsedTaskCreator({
       collapseTasksMs: options.collapseTasksMs,
       makeKey: options.makeKey,
       // Starts each task. A direct call passes a list as the context, and
@@ -195,9 +198,9 @@ export class BulkProducerScheduler<Work, Produced> implements ProducerScheduler<
       ? undefined
       : [];
 
-    // If this throws, the sharer kept none of the new tasks, so no caller
+    // If this throws, the task creator kept none of the new tasks, so no caller
     // waits for their results.
-    const outcomes = this.#sharer.startOrRideTasks(
+    const outcomes = this.#taskCreator.startOrRideTasks(
       requests.map(({ request, signal }) => ({ input: request, signal })),
       newDirectStarts,
     );
@@ -235,7 +238,7 @@ export class BulkProducerScheduler<Work, Produced> implements ProducerScheduler<
     this.#closing ??= (async () => {
       this.flush();
       await this.#batcher.close();
-      await this.#sharer.drain();
+      await this.#taskCreator.drain();
     })();
     return this.#closing;
   }

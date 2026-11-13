@@ -41,7 +41,7 @@ import {
   producerByIdType,
   type ProducersFor,
 } from "../producer-builders/producerByIdType.js";
-import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
+import { PendingPromisesTracker } from "@zingage/scheduling";
 import { asError, CacheContractError } from "../utils/utils.js";
 import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
 import {

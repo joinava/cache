@@ -44,8 +44,7 @@ import type {
   ProducerResultResource,
 } from "../types/index.js";
 import type { CacheLookupResult } from "../utils/cacheHelpers.js";
-import type { DispatchInfo } from "../scheduling/batcher.js";
-import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
+import { PendingPromisesTracker, type DispatchInfo } from "@zingage/scheduling";
 import {
   completeRequest,
   type ReachesProducerAsIs,

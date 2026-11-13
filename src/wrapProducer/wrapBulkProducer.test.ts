@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import type { DispatchInfo } from "../scheduling/batcher.js";
+import type { DispatchInfo } from "@zingage/scheduling";
 import type { Logger } from "../types/index.js";
 import { BulkProducerScheduler } from "./wrapBulkProducer.js";
 

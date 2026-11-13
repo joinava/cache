@@ -6,6 +6,12 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
 
 ### Breaking changes
 
+- The package no longer exports `collapsedTaskCreator`. Import
+  `wrapWithTaskCollapsing` from `@zingage/scheduling` instead. It has the same
+  semantics. It rejects with a `SchedulingContractError` when its task
+  creator synchronously calls it again with the same key, instead of
+  recursing without end. For collapsing with cancellation, use
+  `CollapsedTaskCreator` from `@zingage/scheduling`.
 - Stores declare exactly one read capability: `get` or `getMany`. Read through
   a Cache, which adapts to either kind of Store. The package no longer exports
   `naiveGetMany`, because a Store no longer needs a fallback `getMany`.
@@ -78,10 +84,6 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
   identify automatic batching.
 - Client and Cache shutdown drain accepted reads, production, background
   refreshes, and persistence before cleanup.
-- `collapsedTaskCreator` rejects with `CacheContractError` when its task
-  creator synchronously calls it again with the same key, instead of
-  recursing without end. Its trace log also reports the completion of a task
-  that a newer task replaced.
 
 See the [v3 migration guide](README.md#migrating-from-v3),
 [Store implementation guide](docs/implementing-a-store.md), and

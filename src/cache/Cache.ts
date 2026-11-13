@@ -54,8 +54,7 @@ import {
 } from "../utils/cacheHelpers.js";
 import type { CacheOptions } from "./CacheOptions.js";
 import { PendingResources } from "./pendingResources.js";
-import { Batcher } from "../scheduling/batcher.js";
-import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
+import { Batcher, PendingPromisesTracker } from "@zingage/scheduling";
 import {
   readStoreObserved,
   raceWithSignal,
@@ -71,7 +70,7 @@ import {
 
 /**
  * The default `readBatching.maxBatchSize`. It is larger than the producer
- * default (`DEFAULT_PRODUCER_BATCH_SIZE`, 20), because a wrapped `getMany` sends one `Cache.get` per item,
+ * default (`DEFAULT_MAX_BATCH_SIZE`, 20), because a wrapped `getMany` sends one `Cache.get` per item,
  * and every automatic batch is its own concurrent Store call: a 1,000-item
  * set makes 10 Store calls at 100, and 50 at 20. It stays well below a full
  * Postgres chunk (1,000 requests), because stored entries can be large and
@@ -246,7 +245,8 @@ export default class Cache<
         : new Batcher({
             maxBatchSize: DEFAULT_READ_BATCH_SIZE,
             ...options.readBatching,
-            ...(options.logger ? { logger: options.logger } : {}),
+            // Keep the `@zingage/cache:batcher` debug namespace by default.
+            logger: options.logger ?? defaultLoggersByComponent.batcher,
             dispatch: (reads, { autoBatched }) =>
               this.#readStore(
                 reads.map(({ input }) => input),

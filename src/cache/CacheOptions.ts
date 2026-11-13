@@ -1,5 +1,5 @@
 import type { InvariantOf } from "type-fest";
-import type { BatchOptions } from "../scheduling/batcher.js";
+import type { BatchOptions } from "@zingage/scheduling";
 import type { CacheSpec } from "../types/00_CacheSpec.js";
 import type { ResourceTypes, SpecOf } from "../types/00_ResourceTypes.js";
 import type { AnyParams } from "../types/01_Params.js";

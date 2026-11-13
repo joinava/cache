@@ -24,7 +24,7 @@ import type {
   Logger,
   PartialReadonlyConsumerRequest,
 } from "../types/index.js";
-import type { BatchOptions } from "../scheduling/batcher.js";
+import type { BatchOptions } from "@zingage/scheduling";
 import type { OnStore } from "./producerClient.js";
 import { wrapBulkProducer } from "./wrapBulkProducer.js";
 import { wrapSingleProducer } from "./wrapSingleProducer.js";
