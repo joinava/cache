@@ -1,7 +1,9 @@
 /**
  * @fileoverview The producer contract: what a producer returns, the function
  * shapes that producers implement, and the `coveredTypes` declaration through
- * which a producer states which resource types it covers.
+ * which a producer states which resource types it covers. It also holds the
+ * id-erased `Loose*` forms of these shapes, which the package uses internally
+ * and does not export.
  *
  * @module
  */
@@ -229,3 +231,47 @@ export type CoveringBulkProducer<
   ErrorType extends Error = Error,
 > = BulkResourceTypeProducer<RT, Covered, Validators, Params, ErrorType> &
   CoveredTypesCarrier<RT, Covered>;
+
+/**
+ * A request as the producer machinery's id-erased internals see it: every id
+ * of the registry, with `id` still usable as that type (see
+ * {@link ReadonlyConsumerRequest}).
+ */
+export type LooseRequestFor<
+  RT extends ResourceTypes,
+  Params extends AnyParams,
+> = ReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>;
+
+/** A request-paired producer result over the whole registry. */
+export type LooseResultFor<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = RequestPairedProducerResult<SpecOf<RT>, Validators, Params>;
+
+/**
+ * The internal, id-erased shape that the wrappers and the by-id-type builders
+ * dispatch through. Not exported from the package.
+ * SAFETY: the producer is only invoked after (a) `cache.classify(req.id)`
+ * succeeds and (b) the coverage check confirms the classified type is one the
+ * producer declared (or the producer declared none, i.e. it covers the whole
+ * registry) -- so the request's id is in exactly the id sub-space the producer
+ * accepts.
+ */
+export type LooseProducer<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = (
+  req: LooseRequestFor<RT, Params>,
+) => Promise<LooseResultFor<RT, Validators, Params>>;
+
+/** The internal, id-erased bulk dispatch shape; see `LooseProducer`. */
+export type LooseBulkProducer<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  ErrorType extends Error,
+> = (
+  reqs: readonly LooseRequestFor<RT, Params>[],
+) => Promise<(LooseResultFor<RT, Validators, Params> | ErrorType)[]>;

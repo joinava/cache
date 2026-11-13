@@ -20,13 +20,13 @@ import type {
   AnyValidators,
   ConsumerDirectives,
   Entry,
-  ProducerResultResource,
   RequestPairedProducerResult,
 } from "../types/index.js";
 import {
   builtBranches,
   type HashedInputProducer,
   type HashedInputProducerMeta,
+  type HashedInputProducerResult,
   type LooseBranch,
 } from "../producer-builders/hashedInputProducerByInputType.js";
 import {
@@ -121,7 +121,7 @@ import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
  *   as a cache hit. In a hashed-input producer these are correlated per variant:
  *   the `input` and `content` must come from the SAME variant, so "computing a
  *   collection also caches its stories" is checked rather than merely allowed.
- * - **Id-keyed** (`{ id, content, … }`, a plain {@link ProducerResultResource}):
+ * - **Id-keyed** (`{ id, content, … }`, a plain `ProducerResultResource`):
  *   for ANY registry type, covered or not — exactly what plain producers'
  *   supplementals are. Classified by their own id at store time. This is what
  *   makes these wrappers full peers of `wrapProducer` when the hash exists for
@@ -141,55 +141,6 @@ import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
  * doesn't flood the event loop.
  */
 const HASH_CONCURRENCY = 10;
-
-/**
- * What a hashed-input producer returns: like a plain
- * {@link RequestPairedProducerResult}, but the primary carries no `id` (it's
- * stamped on from the derived hash), and each `supplementalResources` entry
- * is either **input-keyed** (`{ input, … }` — hashed and mint-checked via
- * the `matchesInput`-routed covered branch) or **id-keyed** (`{ id, … }` —
- * a plain {@link ProducerResultResource} for any registry type, classified
- * at store time). See the module docs.
- */
-export type HashedInputProducerResult<
-  Input,
-  Spec extends CacheSpec,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-  /**
-   * The union of specs input-keyed supplementals may target. The wrappers
-   * pass every COVERED branch's spec (inputs route by `matchesInput`, so
-   * any covered branch can produce a supplemental); defaults to `Spec` so a
-   * bare 4-arg instantiation keeps the producing-branch-confined meaning.
-   */
-  CoveredSpec extends CacheSpec = Spec,
-  /**
-   * The union of specs id-keyed supplementals may target. The wrappers pass
-   * the FULL registry union (id-keyed supplementals are classified by their
-   * own id at store time, like plain producers').
-   */
-  RegistrySpec extends CacheSpec = Spec,
-> = Omit<
-  RequestPairedProducerResult<Spec, Validators, Params>,
-  "id" | "supplementalResources"
-> & {
-  supplementalResources?: (
-    | (CoveredSpec extends unknown
-        ? Omit<
-            ProducerResultResource<CoveredSpec, Validators, Params>,
-            "id"
-          > & {
-            input: Input;
-            id?: never;
-          }
-        : never)
-    | (RegistrySpec extends unknown
-        ? ProducerResultResource<RegistrySpec, Validators, Params> & {
-            input?: never;
-          }
-        : never)
-  )[];
-};
 
 /**
  * Picks the branch for an input: the first (in `.when` order) whose

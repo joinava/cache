@@ -5,9 +5,10 @@
  *
  * Split out from the wrappers because it deliberately does not need them, or a
  * `Cache`: a hashed-input producer is a value in its own right, buildable and
- * reusable before any cache exists. The only thing it takes from the wrapper
- * side is a *type*, so nothing here imports a wrapper at runtime -- the runtime
- * edge runs the other way, the wrapper reading {@link builtBranches}.
+ * reusable before any cache exists. It imports nothing from the wrapper, not
+ * even a type: the result type its producers return,
+ * {@link HashedInputProducerResult}, is defined here. The import edge runs the
+ * other way, the wrapper reading {@link builtBranches}.
  *
  * @module
  */
@@ -19,7 +20,6 @@ import type {
   ProducerResultResource,
   RequestPairedProducerResult,
 } from "../types/index.js";
-import type { HashedInputProducerResult } from "../wrapProducer/wrapHashedInputProducer.js";
 
 /**
  * One variant of a hashed-input cache: the `input` a resource type's values are
@@ -474,6 +474,55 @@ export function bulkHashedInputProducerByInputType<
     Record<string, never>
   >;
 }
+
+/**
+ * What a hashed-input producer returns: like a plain
+ * {@link RequestPairedProducerResult}, but the primary carries no `id` (it's
+ * stamped on from the derived hash), and each `supplementalResources` entry
+ * is either **input-keyed** (`{ input, … }` — hashed and mint-checked via
+ * the `matchesInput`-routed covered branch) or **id-keyed** (`{ id, … }` —
+ * a plain {@link ProducerResultResource} for any registry type, classified
+ * at store time). See the `wrapHashedInputProducer` module docs.
+ */
+export type HashedInputProducerResult<
+  Input,
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  /**
+   * The union of specs input-keyed supplementals may target. The wrappers
+   * pass every COVERED branch's spec (inputs route by `matchesInput`, so
+   * any covered branch can produce a supplemental); defaults to `Spec` so a
+   * bare 4-arg instantiation keeps the producing-branch-confined meaning.
+   */
+  CoveredSpec extends CacheSpec = Spec,
+  /**
+   * The union of specs id-keyed supplementals may target. The wrappers pass
+   * the FULL registry union (id-keyed supplementals are classified by their
+   * own id at store time, like plain producers').
+   */
+  RegistrySpec extends CacheSpec = Spec,
+> = Omit<
+  RequestPairedProducerResult<Spec, Validators, Params>,
+  "id" | "supplementalResources"
+> & {
+  supplementalResources?: (
+    | (CoveredSpec extends unknown
+        ? Omit<
+            ProducerResultResource<CoveredSpec, Validators, Params>,
+            "id"
+          > & {
+            input: Input;
+            id?: never;
+          }
+        : never)
+    | (RegistrySpec extends unknown
+        ? ProducerResultResource<RegistrySpec, Validators, Params> & {
+            input?: never;
+          }
+        : never)
+  )[];
+};
 
 /**
  * The internal, type-erased branch shape all wrapper plumbing dispatches

@@ -48,6 +48,7 @@ export {
   type BulkHashedInputProducerBuilder,
   type HashedInputProducer,
   type HashedInputProducerBuilder,
+  type HashedInputProducerResult,
   type HashedInputVariant,
 } from "./producer-builders/hashedInputProducerByInputType.js";
 export {
@@ -64,7 +65,6 @@ export {
 export {
   MintedIdResourceTypeMismatchError,
   wrapHashedInputProducer,
-  type HashedInputProducerResult,
 } from "./wrapProducer/wrapHashedInputProducer.js";
 export {
   default as wrapProducer,

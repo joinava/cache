@@ -16,10 +16,10 @@ import type {
   AnyValidators,
   CoveringProducer,
 } from "../types/index.js";
+import type { LooseProducer } from "../types/05_Producer.js";
 import {
   createProducerClient,
   releaseOnSettle,
-  type LooseProducer,
   type ProducerScheduler,
   type ProducerSchedulerOptions,
 } from "./producerClient.js";

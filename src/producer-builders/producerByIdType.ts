@@ -4,8 +4,8 @@
  *
  * Split out from the wrappers because it needs no `Cache` at all: routing an id
  * to a sub-producer is a function of the resource-type registry's `matches`
- * guards and nothing else. It imports the {@link coveredTypes} carrier from the
- * producer types, and only types from `producerClient`. The routing error it
+ * guards and nothing else. It imports the {@link coveredTypes} carrier and the
+ * id-erased `Loose*` shapes from the producer types. The routing error it
  * throws, {@link UnroutableIdError}, is defined here, and the producer client
  * imports it to re-throw it with its cache's name. So the runtime import graph
  * between the two runs one way: wrapper -> this file.
@@ -30,10 +30,7 @@ import {
   type CoveringProducer,
   type ResourceTypeProducer,
 } from "../types/index.js";
-import type {
-  LooseProducer,
-  LooseRequestFor,
-} from "../wrapProducer/producerClient.js";
+import type { LooseProducer, LooseRequestFor } from "../types/05_Producer.js";
 
 /**
  * Why an id could not be routed to one of a by-id-type producer's covered

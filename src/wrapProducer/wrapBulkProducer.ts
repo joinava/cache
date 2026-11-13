@@ -23,11 +23,11 @@ import type {
   AnyValidators,
   CoveringBulkProducer,
 } from "../types/index.js";
+import type { LooseBulkProducer } from "../types/05_Producer.js";
 import {
   createProducerClient,
   releaseOnSettle,
   type DispatchedRequest,
-  type LooseBulkProducer,
   type ProducerScheduler,
   type ProducerSchedulerOptions,
 } from "./producerClient.js";
