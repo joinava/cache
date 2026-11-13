@@ -65,7 +65,7 @@ import type { CacheLookupResult } from "./cacheHelpers.js";
 import type {
   WrappedProducerClient,
   WrappedReadOptions,
-  WrapProducerOptions,
+  ProducerClientOptions,
 } from "./wrapProducer.js";
 
 /**
@@ -361,7 +361,7 @@ export function createProducerClient<
   Validators extends AnyValidators,
   Params extends AnyParams,
 >(
-  options: WrapProducerOptions<RT, Validators, Params>,
+  options: ProducerClientOptions<RT, Validators, Params>,
   { producer, call, makeScheduler }: ProducerBinding<RT, Validators, Params>,
 ): WrappedProducerClient<RT, Covered, Validators, Params> {
   const {

@@ -26,7 +26,7 @@ import {
 import { asError, assertResultCount } from "./utils.js";
 import type {
   WrappedProducerClient,
-  WrapProducerOptions,
+  ProducerClientOptions,
 } from "./wrapProducer.js";
 
 /**
@@ -39,7 +39,7 @@ export function wrapSingleProducer<
   Validators extends AnyValidators,
   Params extends AnyParams,
 >(
-  options: WrapProducerOptions<RT, Validators, Params>,
+  options: ProducerClientOptions<RT, Validators, Params>,
   produce: CoveringProducer<RT, Covered, Validators, Params>,
 ): WrappedProducerClient<RT, Covered, Validators, Params> {
   // Classification and coverage checks prove this erasure before dispatch.

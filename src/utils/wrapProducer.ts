@@ -51,6 +51,30 @@ export type WrapProducerOptions<
   RT extends ResourceTypes,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
+> = ProducerClientOptions<RT, Validators, Params> & {
+  /**
+   * Bulk accumulation settings; default limit 20. The limit applies only to
+   * accumulated work. Does not change participation. Only a `produceMany`
+   * producer accepts it, because a single producer never batches.
+   *
+   * Automatic batches run concurrently, with no limit: a wrapped `getMany`
+   * of 1,000 misses makes 50 concurrent `produceMany` calls at the default
+   * limit. To limit concurrent producer calls, wrap the producer itself, for
+   * example with `pLimit`.
+   */
+  producerBatching?: BatchOptions;
+};
+
+/**
+ * The {@link WrapProducerOptions} that every producer wrapper takes: all of
+ * them except `producerBatching`, which only a bulk producer uses. The single
+ * wrapper and the shared client take this type, so neither can read batch
+ * settings that do not apply to it.
+ */
+export type ProducerClientOptions<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
 > = {
   /**
    * REQUIRED. An instance of the cache class. This is where values returned by
@@ -81,16 +105,6 @@ export type WrapProducerOptions<
    * A custom logger to use (optional).
    */
   logger?: Logger;
-  /**
-   * Bulk accumulation settings; default limit 20. The limit applies only to
-   * accumulated work. Does not change participation.
-   *
-   * Automatic batches run concurrently, with no limit: a wrapped `getMany`
-   * of 1,000 misses makes 50 concurrent `produceMany` calls at the default
-   * limit. To limit concurrent producer calls, wrap the producer itself, for
-   * example with `pLimit`.
-   */
-  producerBatching?: BatchOptions;
 };
 
 export type WrappedReadOptions = {
