@@ -33,12 +33,9 @@ import {
   bulkProducerByIdType,
   type BulkProducersFor,
 } from "./bulkProducerByIdType.js";
-import { producerByIdType } from "./producerByIdType.js";
+import { producerByIdType, type ProducersFor } from "./producerByIdType.js";
 import { asError, CacheContractError } from "./utils.js";
-import wrapProducer, {
-  type ProducersFor,
-  type WrapProducerOptions,
-} from "./wrapProducer.js";
+import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
 
 /**
  * ## Hashed-input producers vs. (plain) producers

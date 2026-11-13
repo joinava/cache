@@ -37,9 +37,12 @@ import type {
   AnyParams,
   AnyValidators,
   ConsumerDirectives,
+  Entry,
   Logger,
   Vary,
   PartialReadonlyConsumerRequest,
+  ReadonlyConsumerRequest,
+  RequestPairedProducerResult,
 } from "../types/index.js";
 import type { DispatchInfo } from "../scheduling/batcher.js";
 import { normalizeParams, normalizeVary } from "./normalization.js";
@@ -56,11 +59,10 @@ import {
   defaultLoggersByComponent,
   raceWithSignal,
 } from "./utils.js";
+import type { SpecForId } from "../types/00_CacheSpec.js";
+import { coveredTypes } from "../types/index.js";
+import type { CacheLookupResult } from "./cacheHelpers.js";
 import type {
-  LooseEntryFor,
-  LooseLookupResultFor,
-  LooseRequestFor,
-  LooseResultFor,
   WrappedProducerClient,
   WrappedReadOptions,
   WrapProducerOptions,
@@ -103,22 +105,12 @@ export function notifyStore(
 }
 
 /**
- * The key under which a producer function declares WHICH resource types it
- * covers. A real runtime symbol carrying a real runtime value (see
- * `CoveringProducer` in wrapProducer.ts), not a type-only phantom: the wrappers read it to
- * enforce coverage, and it is exported so declaration emit can name it.
- */
-export const coveredTypes: unique symbol = Symbol(
-  "@zingage/cache.coveredTypes",
-);
-
-/**
  * Snapshots a producer's declared covered set for the coverage check: a `Set`
  * for membership testing, insertion-ordered so the error message can still
  * list the names in their declared order, and a copy so a post-wrap mutation
  * of the caller's array can't widen (or otherwise change) coverage later.
  * `undefined` means the producer declared nothing, which (see
- * `CoveringProducer` in wrapProducer.ts) means it covers the whole registry: there is no
+ * `CoveringProducer`) means it covers the whole registry: there is no
  * covered set to enumerate and nothing to check.
  */
 export function coveredTypeSet(producer: {
@@ -161,6 +153,67 @@ export function isRequestingCacheBypass(
 ) {
   return dirs.maxAge === 0;
 }
+
+/** The internal, id-erased dispatch shape; see `LooseProducer`. */
+export type LooseBulkProducer<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  ErrorType extends Error,
+> = (
+  reqs: readonly LooseRequestFor<RT, Params>[],
+) => Promise<(LooseResultFor<RT, Validators, Params> | ErrorType)[]>;
+
+/**
+ * A request as the wrappers' id-erased internals see it: every id the wrapper
+ * could be handed, with `id` still usable as that type (see
+ * {@link ReadonlyConsumerRequest}).
+ */
+export type LooseRequestFor<
+  RT extends ResourceTypes,
+  Params extends AnyParams,
+> = ReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>;
+
+/** An entry as the wrappers' id-erased internals see it. */
+export type LooseEntryFor<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = Entry<SpecForId<SpecOf<RT>, SpecOf<RT>["id"]>, Validators, Params>;
+
+/** A cache lookup result as the wrappers' id-erased internals see it. */
+export type LooseLookupResultFor<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = CacheLookupResult<
+  SpecForId<SpecOf<RT>, SpecOf<RT>["id"]>,
+  Validators,
+  Params
+>;
+
+/** A request-paired producer result over the whole registry. */
+export type LooseResultFor<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = RequestPairedProducerResult<SpecOf<RT>, Validators, Params>;
+
+/**
+ * The internal, id-erased shape all wrapper plumbing dispatches through.
+ * SAFETY: the producer is only invoked after (a) `cache.classify(req.id)`
+ * succeeds and (b) the coverage check confirms the classified type is one the
+ * producer declared (or the producer declared none, i.e. it covers the whole
+ * registry) -- so the request's id is in exactly the id sub-space the producer
+ * accepts.
+ */
+export type LooseProducer<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = (
+  req: LooseRequestFor<RT, Params>,
+) => Promise<LooseResultFor<RT, Validators, Params>>;
 
 /** One task as a {@link ProducerScheduler} hands it to `dispatch`. */
 export type DispatchedRequest<Work> = {
@@ -1041,8 +1094,8 @@ export function createProducerClient<
     return promise;
   };
 
-  // SAFETY: the runtime client is id-erased internally (see LooseProducer in
-  // wrapProducer.ts), but every path upholds the per-id contract the signature promises: cache
+  // SAFETY: the runtime client is id-erased internally (see LooseProducer),
+  // but every path upholds the per-id contract the signature promises: cache
   // reads narrow by id, and each producer's request-paired result is stamped
   // with its own request's id.
   return {

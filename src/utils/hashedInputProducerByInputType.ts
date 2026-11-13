@@ -189,7 +189,7 @@ export type HashedInputProducerBuilder<
       hashInput: (input: Input) => Id | Promise<Id>;
       produce: (
         // `ReadonlyDeep` and no `AbortSignal`, for the reasons on
-        // `RequestPairedProducer`: the input may be shared between collapsed
+        // `ResourceTypeProducer`: the input may be shared between collapsed
         // callers, and the invocation forwards no signal.
         input: ReadonlyDeep<Input>,
       ) => Promise<BuiltBranchResult<V, Name, Validators, Params, IdKeyedSpec>>;

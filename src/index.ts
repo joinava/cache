@@ -57,11 +57,13 @@ export {
   type HashedInputProducerBuilder,
   type HashedInputVariant,
 } from "./utils/hashedInputProducerByInputType.js";
-export { producerByIdType } from "./utils/producerByIdType.js";
+export {
+  producerByIdType,
+  type ProducersFor,
+} from "./utils/producerByIdType.js";
 export {
   bulkProducerByIdType,
   type BulkProducersFor,
-  type BulkResourceTypeProducer,
 } from "./utils/bulkProducerByIdType.js";
 
 export {
@@ -70,14 +72,9 @@ export {
   type HashedInputProducerResult,
 } from "./utils/wrapHashedInputProducer.js";
 export {
-  coveredTypes,
   default as wrapProducer,
-  type CoveringProducer,
-  type CoveringBulkProducer,
   type WrappedProducerClient,
   type WrappedReadOptions,
-  type ProducersFor,
-  type ResourceTypeProducer,
   type WrapProducerOptions,
 } from "./utils/wrapProducer.js";
 

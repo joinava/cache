@@ -1,7 +1,6 @@
 /**
  * @fileoverview Per-resource-type dispatch for BULK producers: the bulk
- * counterpart of `producerByIdType`, and the sub-producer vocabulary that only
- * this helper's callers speak.
+ * counterpart of `producerByIdType`, and its argument type `BulkProducersFor`.
  *
  * Split from the wrapper for the same reason the single helper is: routing a
  * batch to sub-producers is a function of the resource-type registry's `matches`
@@ -10,76 +9,35 @@
  *
  * Routing itself is imported from `producerByIdType` rather than reimplemented,
  * which is what keeps the two helpers' answers to "is this id covered" from
- * drifting apart. The edge back to `wrapProducer` is **type-only** (its
- * `CoveringBulkProducer` return shape and its id-erased `LooseBulkProducer`), as
- * is `wrapProducer`'s edge to the sub-producer type here, so the runtime
- * import graph stays acyclic in both directions.
+ * drifting apart. Its return shape, `CoveringBulkProducer`, and the sub-producer
+ * type, `BulkResourceTypeProducer`, live with the other producer types in
+ * `types/05_Producer.ts`. None of its runtime imports import this file, so the
+ * import graph stays acyclic.
  *
  * @module
  */
 import type {
-  IdOfResourceType,
   ResourceTypeName,
   ResourceTypes,
-  SpecOf,
 } from "../types/00_ResourceTypes.js";
 import { resourceTypesEntries } from "../resourceTypeClassification.js";
-import type {
-  AnyParams,
-  AnyValidators,
-  ReadonlyConsumerRequest,
-  RequestPairedProducerResult,
-} from "../types/index.js";
 import { CacheContractError } from "./utils.js";
-import { resolveCoveredSubProducer } from "./producerByIdType.js";
-import type {
-  CoveringBulkProducer,
-  LooseBulkProducer,
-} from "./wrapProducer.js";
+import {
+  emptyProducersRecordMessage,
+  resolveCoveredSubProducer,
+} from "./producerByIdType.js";
 import {
   coveredTypes,
-  emptyProducersRecordMessage,
-  type LooseRequestFor,
-  type LooseResultFor,
-} from "./wrapProducer.js";
-
-/**
- * A bulk producer for ONE resource type: a {@link bulkProducerByIdType}
- * sub-producer. That helper splits the wrapper's batch by classified resource
- * type and calls each sub-producer once with its own type's slice, so a
- * sub-producer's batch never mixes types. (The wrapper itself takes a single
- * {@link CoveringBulkProducer}, which by default sees the WHOLE mixed batch --
- * that is the point of the single-function form.) Results are request-paired;
- * Error elements mark per-request failures. Every request must remain valid
- * when added, removed, reordered, split, or deduplicated in another batch.
- *
- * The result type is a flat array of (RequestPairedProducerResult |
- * ErrorType): each element is a discriminated union over the type's spec, so
- * each (id, content) pair must internally agree, but the type system does
- * not require the i'th result element to align with the i'th request's id at
- * the call site (which would require gnarly mapped-tuple typing). When
- * `wrapProducer` returns its results to the caller, they ARE narrowed
- * per-request via the wrapper's own generic.
- */
-export type BulkResourceTypeProducer<
-  RT extends ResourceTypes,
-  K extends ResourceTypeName<RT>,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-  ErrorType extends Error,
-> = (
-  reqs: readonly ReadonlyConsumerRequest<Params, IdOfResourceType<RT[K]>>[],
-) => Promise<
-  (
-    | RequestPairedProducerResult<
-        SpecOf<RT>,
-        Validators,
-        Params,
-        IdOfResourceType<RT[K]>
-      >
-    | ErrorType
-  )[]
->;
+  type AnyParams,
+  type AnyValidators,
+  type BulkResourceTypeProducer,
+  type CoveringBulkProducer,
+} from "../types/index.js";
+import type {
+  LooseBulkProducer,
+  LooseRequestFor,
+  LooseResultFor,
+} from "./producerClient.js";
 
 /**
  * {@link bulkProducerByIdType}'s argument: one entry per covered resource
@@ -159,7 +117,7 @@ export function bulkProducerByIdType<
   resourceTypes: RT,
   producers: BulkProducersFor<RT, Covered, Validators, Params, ErrorType>,
 ): CoveringBulkProducer<RT, Covered, Validators, Params, ErrorType> {
-  // SAFETY: see LooseProducer in wrapProducer.ts. A value is only read out of
+  // SAFETY: see LooseProducer in producerClient.ts. A value is only read out of
   // this record after classification succeeds and the key is confirmed to be
   // the record's own, so each sub-producer's slice holds exactly the ids it
   // declared. Snapshotted for the reason given on `coveredTypeSet`.
@@ -169,9 +127,7 @@ export function bulkProducerByIdType<
   const coveredResourceTypes = Object.keys(looseProducers);
 
   if (coveredResourceTypes.length === 0) {
-    throw new Error(
-      emptyProducersRecordMessage("bulkProducerByIdType", "wrapProducer"),
-    );
+    throw new Error(emptyProducersRecordMessage("bulkProducerByIdType"));
   }
 
   // Computed once, here, rather than per classified id. Named for the registry
@@ -279,7 +235,7 @@ export function bulkProducerByIdType<
   };
 
   // SAFETY: the dispatching function is id-erased internally (see
-  // LooseProducer in wrapProducer.ts), and the covered names are the record's
+  // LooseProducer in producerClient.ts), and the covered names are the record's
   // own keys, so the declared set and the reachable sub-producers cannot
   // disagree.
   return Object.assign(dispatchingProducer, {

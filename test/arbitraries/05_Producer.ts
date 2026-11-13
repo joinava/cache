@@ -3,7 +3,7 @@ import fc from "fast-check";
 import type { CacheSpec } from "../../src/types/00_CacheSpec.js";
 import type { AnyParams } from "../../src/types/01_Params.js";
 import type { AnyValidators } from "../../src/types/02_Validators.js";
-import type { RequestPairedProducerResult } from "../../src/types/05_RequestPairedProducer.js";
+import type { RequestPairedProducerResult } from "../../src/types/05_Producer.js";
 import { ProducerResultArb } from "./04_ProducerResult.js";
 
 /**

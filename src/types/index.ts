@@ -1,5 +1,6 @@
 // The files in this directory hold types defining the contract between the
-// various components that make up the caching system.
+// various components that make up the caching system, plus the runtime values
+// those types key on (`coveredTypes`, `components`).
 //
 // Those that are meant to be public are re-exported below.
 export type { CacheSpec, ContentForId, SpecForId } from "./00_CacheSpec.js";
@@ -28,10 +29,14 @@ export type {
   ProducerResultResourceObject,
   Vary,
 } from "./04_ProducerResult.js";
-export type {
-  RequestPairedProducer,
-  RequestPairedProducerResult,
-} from "./05_RequestPairedProducer.js";
+export {
+  coveredTypes,
+  type BulkResourceTypeProducer,
+  type CoveringBulkProducer,
+  type CoveringProducer,
+  type RequestPairedProducerResult,
+  type ResourceTypeProducer,
+} from "./05_Producer.js";
 export type {
   Entry,
   EntryForId,

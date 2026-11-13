@@ -26,6 +26,9 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
 - Rename the `@zingage/cache:read-batch` diagnostics channel to
   `@zingage/cache:read-store`, with exports `CACHE_READ_STORE_CHANNEL_NAME`,
   `cacheReadStoreChannel`, and `CacheReadStoreMessage`. No aliases are provided.
+- Remove the `RequestPairedProducer` type export. Nothing in the package
+  accepted it. Type a producer with `ResourceTypeProducer` or
+  `CoveringProducer` instead.
 - Remove the `CacheReadFound` and `CacheReadFoundWithEntry` type exports. Use
   `CacheReadMessage["found"]` instead.
 - Replace the produce message's `collapsedCallerCount` with

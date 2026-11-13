@@ -5,9 +5,9 @@
  * Split out from the wrappers because it needs no `Cache` at all: routing an id
  * to a sub-producer is a function of the resource-type registry's `matches`
  * guards and nothing else. What it does still need it imports -- the
- * {@link coveredTypes} carrier and the id-erased internal shapes from
- * `wrapProducer`, the routing errors from `producer-errors` -- so the runtime
- * import graph runs one way (this file -> those) and the bulk side is type-only.
+ * {@link coveredTypes} carrier from the producer types, the id-erased internal
+ * shapes from `producerClient`, and the routing errors from `producer-errors`
+ * -- so the runtime import graph runs one way (this file -> those).
  *
  * @module
  */
@@ -21,7 +21,6 @@ import {
   resourceTypesEntries,
   type ResourceTypesEntries,
 } from "../resourceTypeClassification.js";
-import type { AnyParams, AnyValidators } from "../types/index.js";
 import {
   UnroutableIdError,
   type UnroutableIdReason,
@@ -29,12 +28,12 @@ import {
 import { assertUnreachable } from "./utils.js";
 import {
   coveredTypes,
-  emptyProducersRecordMessage,
+  type AnyParams,
+  type AnyValidators,
   type CoveringProducer,
-  type LooseProducer,
-  type LooseRequestFor,
-  type ProducersFor,
-} from "./wrapProducer.js";
+  type ResourceTypeProducer,
+} from "../types/index.js";
+import type { LooseProducer, LooseRequestFor } from "./producerClient.js";
 
 /**
  * Classifies `id` against the registry a by-id-type helper was built from and
@@ -93,6 +92,37 @@ export function resolveCoveredSubProducer<SubProducer>(
 }
 
 /**
+ * The write side of the coverage contract: what `producerByIdType` and
+ * `bulkProducerByIdType` throw when handed an empty record. Shared so the two
+ * helpers can't word the same refusal differently. The read side is
+ * `coveredTypeSet` in producerClient.ts.
+ */
+export function emptyProducersRecordMessage(
+  helper: "producerByIdType" | "bulkProducerByIdType",
+): string {
+  return (
+    `${helper}: \`producers\` must be a record with one entry per covered ` +
+    `resource type and cannot be empty. (A producer that covers the whole ` +
+    `registry needs no helper: pass the function itself to wrapProducer.)`
+  );
+}
+
+/**
+ * {@link producerByIdType}'s argument: one entry per covered resource type,
+ * any non-empty subset of the registry. `Covered` is inferred from the
+ * record's keys. Non-coverage is expressed by omission, so a wrapper never has
+ * to make claims about types that other wrappers may produce.
+ */
+export type ProducersFor<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = {
+  readonly [K in Covered]: ResourceTypeProducer<RT, K, Validators, Params>;
+};
+
+/**
  * Sugar over {@link wrapProducer}'s single-producer primitive: turns a record
  * with one entry per covered resource type into ONE function that dispatches
  * by the request's classified type, and that declares its covered set in
@@ -143,9 +173,7 @@ export function producerByIdType<
   const coveredResourceTypes = Object.keys(looseProducers);
 
   if (coveredResourceTypes.length === 0) {
-    throw new Error(
-      emptyProducersRecordMessage("producerByIdType", "wrapProducer"),
-    );
+    throw new Error(emptyProducersRecordMessage("producerByIdType"));
   }
 
   // Computed once, here, rather than per classified id.

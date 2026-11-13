@@ -11,17 +11,20 @@ import type {
   ResourceTypeName,
   ResourceTypes,
 } from "../types/00_ResourceTypes.js";
-import type { AnyParams, AnyValidators } from "../types/index.js";
+import type {
+  AnyParams,
+  AnyValidators,
+  CoveringProducer,
+} from "../types/index.js";
 import {
   createProducerClient,
   releaseOnSettle,
+  type LooseProducer,
   type ProducerScheduler,
   type ProducerSchedulerOptions,
 } from "./producerClient.js";
 import { asError, assertResultCount } from "./utils.js";
 import type {
-  CoveringProducer,
-  LooseProducer,
   WrappedProducerClient,
   WrapProducerOptions,
 } from "./wrapProducer.js";
