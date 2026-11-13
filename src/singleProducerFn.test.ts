@@ -238,9 +238,9 @@ describe("single producer function + by-id-type sugar", () => {
     });
 
     // The contrasting case -- a sub-producer whose result COUNT disagrees with
-    // its slice, which the sugar rejects rather than padding with Errors, failing
-    // the whole invocation including its healthy sibling type's element -- is
-    // pinned in bulkProducerByIdType.test.ts. The wrapper's own under-return
+    // its slice, which the sugar fills with one CacheContractError per slot of
+    // that slice while the healthy sibling type's element is still delivered --
+    // is pinned in bulkProducerByIdType.test.ts. The wrapper's own under-return
     // check, reachable only via a bare producer now, is in
     // diagnosticsChannels.test.ts with the full channel consequences (produce
     // outcome, nothing stored, per-element dispositions).

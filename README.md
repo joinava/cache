@@ -147,14 +147,14 @@ A Store declares exactly one read primitive. MemoryStore implements `get(request
 Read through a Cache. The Cache adapts to either primitive, and it publishes diagnostics for each Store read.
 
 `cache.get()` reads one request. With a bulk-capable Store, it joins the automatic accumulation. `cache.getUnbatched()` reads a known set as one Store call, sent promptly. Both accept `{ signal }`. Single-only stores dispatch every read promptly.
-Configure the accumulation scheduler with `readBatching`. Its maximum batch size, 20 by default, limits only accumulated reads. Dispatch runs after Promise continuations.
+Configure the accumulation scheduler with `readBatching`. Its maximum batch size, 100 by default, limits only accumulated reads. Each accumulated batch is its own concurrent Store call. Dispatch runs after Promise continuations.
 
 ```ts
 const cache = new Cache({
   store,
   name: "visits",
   resourceTypes: visitsResourceTypes,
-  readBatching: { maxBatchSize: 20, batchScheduleFn: setImmediate },
+  readBatching: { maxBatchSize: 100, batchScheduleFn: setImmediate },
 });
 const lookups = await Promise.all(
   requests.map((request) => cache.get(request)),

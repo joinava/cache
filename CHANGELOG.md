@@ -45,11 +45,20 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
   stable sorting. The default processing budget is now 4 ms instead of 8 ms.
 
 - Separate Store-read and producer queues automatically batch bulk-capable
-  operations, with a default maximum batch size of 20. Single-only
+  operations. The default maximum batch size is 100 for Store reads and 20
+  for producers. Batches run concurrently, with no limit; wrap a producer in
+  `pLimit` to limit its concurrent invocations. Single-only
   capabilities dispatch promptly. Wrapper calls can disable Store and
   producer accumulation independently with `autoBatch` options. The batch
   limit applies only to accumulated work: a direct call reaches the Store or
   producer as one invocation.
+- A package contract violation in one producer result slot, or in one
+  `bulkProducerByIdType` slice, rejects only the callers of the affected
+  requests. Automatic batching merges unrelated callers into one invocation,
+  so failing all of them would fail valid requests. `produce` diagnostics
+  count these slots in `failedRequestCount`, and the invocation's `outcome`
+  stays `"success"`. A wrong result count for the whole invocation still
+  rejects every caller.
 - Compatible pending requests share producer work across calls. Producers
   receive original parameters; normalized parameters determine compatibility.
 - Postgres and SQLite preserve successful request slots when another request

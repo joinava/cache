@@ -63,6 +63,16 @@ import {
   timeSlicedMapNonEmpty,
 } from "./utils/utils.js";
 
+/**
+ * The default `readBatching.maxBatchSize`. It is larger than the producer
+ * default (`DEFAULT_PRODUCER_BATCH_SIZE`, 20), because a wrapped `getMany` sends one `Cache.get` per item,
+ * and every automatic batch is its own concurrent Store call: a 1,000-item
+ * set makes 10 Store calls at 100, and 50 at 20. It stays well below a full
+ * Postgres chunk (1,000 requests), because stored entries can be large and
+ * one call returns every matching payload.
+ */
+const DEFAULT_READ_BATCH_SIZE = 100;
+
 /** Options for {@link Cache.get} and {@link Cache.getUnbatched}. */
 export type ReadOptions = { signal?: AbortSignal };
 
@@ -211,9 +221,10 @@ export type CacheOptions<
   normalizeParamName?: NormalizeParamName<Params>;
   normalizeParamValue?: NormalizeParamValue<Params>;
   /**
-   * Configure accumulation for bulk-capable Stores. The default limit is 20 and
-   * applies only to accumulated reads. Single-only Stores dispatch promptly.
-   * `getUnbatched` sends its set as one Store call instead.
+   * Configure accumulation for bulk-capable Stores. The default limit is
+   * 100 requests and applies only to accumulated
+   * reads. Single-only Stores dispatch promptly. `getUnbatched` sends its set
+   * as one Store call instead.
    */
   readBatching?: BatchOptions;
 };
@@ -272,7 +283,12 @@ export default class Cache<
     | undefined;
   #closed = false;
   #closePromise: Promise<void> | undefined;
-  /** Store calls in flight. close() waits for them before it closes the Store. */
+  /**
+   * Accepted operations that can still reach the Store. close() waits for
+   * them once, then closes the Store. So one tracked operation must cover
+   * every step of a public call that ends in a Store call, including steps
+   * such as normalization that run before the call starts.
+   */
   readonly #operations = new Set<Promise<unknown>>();
   readonly #onGetAfterClose: "throw" | "act-empty";
   readonly #onStoreAfterClose: "throw" | "no-op";
@@ -312,6 +328,7 @@ export default class Cache<
       this.#dataStore.getMany === undefined
         ? undefined
         : new Batcher({
+            maxBatchSize: DEFAULT_READ_BATCH_SIZE,
             ...options.readBatching,
             ...(options.logger ? { logger: options.logger } : {}),
             dispatch: (reads, { autoBatched }) =>
@@ -647,13 +664,22 @@ export default class Cache<
 
     // Store requests retain separate slots, even when their IDs are equal.
     // Freshness belongs to each logical read, never to shared physical work.
-    const storeRequests = await timeSlicedMapNonEmpty(requests, (req) => ({
-      id: req.id,
-      params: this.normalizeParams(req.params),
-    }));
+    //
+    // The call is accepted, so close() must wait for its read. Normalization
+    // can yield to the event loop before the read starts, so one tracked
+    // operation covers normalization and the read.
+    const storeRead = this.#track(async () =>
+      this.#readStore(
+        await timeSlicedMapNonEmpty(requests, (req) => ({
+          id: req.id,
+          params: this.normalizeParams(req.params),
+        })),
+        options,
+      ),
+    );
 
     const cacheEntriesForRequests = await raceWithSignal(
-      this.#readStore(storeRequests, options),
+      storeRead,
       options?.signal,
     ).catch((error: unknown) => {
       // One message PER REQUEST, not one per call, before the error
@@ -766,14 +792,13 @@ export default class Cache<
       entriesWithTimes,
     );
 
-    const results = await this.#track(() =>
-      this.#dataStore.store(
-        entriesWithTimes as unknown as readonly StoreEntryInput<
-          StoreSupportedTypes,
-          Validators,
-          Params
-        >[],
-      ),
+    // `store()` already tracks this whole method, so close() waits for it.
+    const results = await this.#dataStore.store(
+      entriesWithTimes as unknown as readonly StoreEntryInput<
+        StoreSupportedTypes,
+        Validators,
+        Params
+      >[],
     );
 
     // The results array is parallel to the input entries (see Store.store).

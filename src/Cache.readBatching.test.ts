@@ -119,7 +119,7 @@ describe("Cache read batching", suiteOptions, () => {
     assert.deepEqual(getManyRequestCounts(), [1, 1]);
   });
 
-  it("splits a flush of 1,200 requests into getMany calls of at most 20", async () => {
+  it("splits a flush of 1,200 requests into getMany calls of at most 100", async () => {
     const { store, getManyRequestCounts } = spiedStore();
     const cache = cacheOver(store);
     const ids = Array.from({ length: 1200 }, (_, i) => `id:${String(i)}`);
@@ -131,8 +131,8 @@ describe("Cache read batching", suiteOptions, () => {
       ids.map(async (id) => cache.get(lookup(id))),
     );
 
-    // The default `readBatching.maxBatchSize` is 20 (README.md, `CacheOptions.readBatching`).
-    assert.deepEqual(getManyRequestCounts(), Array(60).fill(20));
+    // The default `readBatching.maxBatchSize` is 100 (README.md, `CacheOptions.readBatching`).
+    assert.deepEqual(getManyRequestCounts(), Array(12).fill(100));
     assert.deepEqual(
       results.map((it) => it.usable?.content),
       ids,

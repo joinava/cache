@@ -170,6 +170,9 @@ export type Enqueued<Input, Result> = {
   readonly handle: BatchHandle<Input, Result> | undefined;
 };
 
+/** The default `maxBatchSize`. The Cache passes its own default for Store reads. */
+export const DEFAULT_PRODUCER_BATCH_SIZE = 20;
+
 /**
  * Queues work and dispatches it in batches. `requestScheduler` composes it
  * with `TaskSharer`, which shares work. The batcher does not share work, and
@@ -199,7 +202,7 @@ export type Enqueued<Input, Result> = {
  * entry leaves the queue and its result rejects with the signal's reason.
  * Dispatched work always completes.
  *
- Shutdown has two steps, because an owner can still accept work after its
+ * Shutdown has two steps, because an owner can still accept work after its
  * shutdown starts:
  *
  * 1. `flush` sends every pending batch at once, and drops `batchScheduleFn`,
@@ -263,7 +266,7 @@ export class Batcher<Input, Result> {
       logger?: Logger;
     },
   ) {
-    const maxBatchSize = options.maxBatchSize ?? 20;
+    const maxBatchSize = options.maxBatchSize ?? DEFAULT_PRODUCER_BATCH_SIZE;
     if (
       maxBatchSize !== Infinity &&
       (!Number.isInteger(maxBatchSize) || maxBatchSize < 1)

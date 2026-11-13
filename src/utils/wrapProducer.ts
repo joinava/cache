@@ -157,6 +157,11 @@ export type WrapProducerOptions<
   /**
    * Bulk accumulation settings; default limit 20. The limit applies only to
    * accumulated work. Does not change participation.
+   *
+   * Automatic batches run concurrently, with no limit: a wrapped `getMany`
+   * of 1,000 misses makes 50 concurrent `produceMany` calls at the default
+   * limit. To limit concurrent producer calls, wrap the producer itself, for
+   * example with `pLimit`.
    */
   producerBatching?: BatchOptions;
 };
@@ -724,9 +729,7 @@ export default function wrapProducer<
       // when nobody is listening. Same reasoning as `Cache.store`.
       // `collapsedRequestCount` is read here, at settlement, so that riders
       // that joined while the producer ran count too.
-      const publishProduce = (
-        results: readonly (Result | Error)[] | undefined,
-      ) => {
+      const publishProduce = (results: readonly unknown[] | undefined) => {
         if (!cacheProduceChannel.hasSubscribers) return;
 
         const trigger = tasks[0]!.request.trigger;
@@ -786,13 +789,6 @@ export default function wrapProducer<
             `producer returned ${String(definedCount)} results for ${String(tasks.length)} requests`,
           );
         }
-
-        const contractFailure = results.find(
-          (result) => result instanceof CacheContractError,
-        );
-        if (contractFailure instanceof CacheContractError) {
-          throw contractFailure;
-        }
       } catch (error) {
         // A rejected producer call fails every request in the invocation.
         // (A bulk producer should return Error elements for per-request
@@ -805,8 +801,6 @@ export default function wrapProducer<
         // where the cache's name is attached.
         rethrowUnroutableWithCacheName(cache.name, error);
       }
-
-      publishProduce(results);
 
       // One physical write retains batching for a producer invocation's resources.
       //
@@ -835,10 +829,18 @@ export default function wrapProducer<
             >(normalizeVaryBound, result, id, now);
           return { entry, resources };
         } catch (error) {
-          if (error instanceof CacheContractError) throw error;
+          // Like an Error slot from the producer, a result that fails to
+          // normalize fails only its own slot, even for a CacheContractError:
+          // automatic batching merges unrelated callers into one invocation.
+          // The slot's own callers still reject their whole public call,
+          // through the CacheContractError rethrow in each slot pipeline.
           return asError(error);
         }
       });
+
+      // Published after normalization, so that a slot that fails to
+      // normalize counts as failed.
+      publishProduce(prepared);
 
       // Extract all resources to store (main resources + supplemental
       // resources), but NOT requests that failed.

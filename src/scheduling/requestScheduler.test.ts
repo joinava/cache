@@ -177,8 +177,10 @@ it(
         })[0]!.promise,
     );
     assert.deepEqual(await Promise.all(late), ["late", "late"]);
+    // The bulk scheduler still queues an automatic request after close, and
+    // the single-request scheduler always sends at once.
     assert.deepEqual(warnings, [
-      "batcher: dispatchNow called after close",
+      "batcher: enqueue called after close",
       "batcher: dispatchNow called after close",
     ]);
   },
@@ -261,3 +263,32 @@ it(
     ]);
   },
 );
+
+it("still batches automatic requests that start after flush", async () => {
+  const calls: (readonly string[])[] = [];
+  const infos: DispatchInfo[] = [];
+  const scheduler = new RequestScheduler<string, string>({
+    // A schedule that never fires, as an owner's may during shutdown.
+    batching: { batchScheduleFn: () => {} },
+    ...sharing,
+    dispatch: async (requests, info) => {
+      calls.push(requests.map(({ request }) => request));
+      infos.push(info);
+      return await Promise.resolve(requests.map(({ request }) => request));
+    },
+  });
+  scheduler.flush();
+
+  const outcomes = ["a", "b", "c"].flatMap((request) =>
+    scheduler.startOrRideTasks([{ request }], { autoBatch: true }),
+  );
+
+  assert.deepEqual(await Promise.all(outcomes.map(({ promise }) => promise)), [
+    "a",
+    "b",
+    "c",
+  ]);
+  assert.deepEqual(calls, [["a", "b", "c"]]);
+  assert.deepEqual(infos, [{ autoBatched: true }]);
+  await scheduler.close();
+});

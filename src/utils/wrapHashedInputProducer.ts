@@ -34,7 +34,7 @@ import {
   type BulkProducersFor,
 } from "./bulkProducerByIdType.js";
 import { producerByIdType } from "./producerByIdType.js";
-import { CacheContractError } from "./utils.js";
+import { asError, CacheContractError } from "./utils.js";
 import wrapProducer, {
   type ProducersFor,
   type WrapProducerOptions,
@@ -687,9 +687,14 @@ export function wrapHashedInputProducer(
         );
       }
 
+      // A result whose supplementals fail to hash fails only its own slot,
+      // including for a MintedIdResourceTypeMismatchError. The invocation can
+      // hold other callers' requests, which automatic batching merged in.
       return Promise.all(
         results.map(async (result) =>
-          result instanceof Error ? result : hashSupplementals(result),
+          result instanceof Error
+            ? result
+            : hashSupplementals(result).catch(asError),
         ),
       );
     };
@@ -932,8 +937,8 @@ function makeSupplementalHasher<Input>(
           // Input-keyed: route to a covered branch with the same
           // `matchesInput` selection applied to call-time inputs, hash
           // with THAT branch's `hashInput`, and mint-check eagerly -- so
-          // a producer minting a bad supplemental id fails the invocation
-          // loudly (named branch) instead of a silent store-time
+          // a producer minting a bad supplemental id fails that result's
+          // slot loudly (named branch) instead of a silent store-time
           // rejection behind the wrappers' fire-and-forget store.
           const { input, ...rest } = resource;
           return ownHashing(

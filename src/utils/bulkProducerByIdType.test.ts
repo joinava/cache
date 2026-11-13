@@ -14,6 +14,7 @@ import {
   type ResourceTypes,
 } from "../index.js";
 import { bulkProducerByIdType } from "./bulkProducerByIdType.js";
+import { CacheContractError } from "./utils.js";
 import wrapProducer from "./wrapProducer.js";
 
 /**
@@ -220,20 +221,21 @@ describe("bulkProducerByIdType", () => {
     expect((slot as Error).cause).to.equal("just a string");
   });
 
-  it("an UNDER-RETURNING sub-producer fails the whole invocation, naming it and both counts", async () => {
-    // Padding the missing slots with an Error would turn a producer contract
-    // violation into a per-request failure and hide the bug. Failing here rather
-    // than leaving holes for the wrapper's own check is what lets the error name
-    // the sub-producer at fault: the wrapper sees only the merged batch.
-    // A HEALTHY sibling is wired up alongside to pin the blast radius: it still
-    // runs, and one slice's contract violation still fails the whole invocation,
-    // so its results are not delivered either.
-    const bizBulk = mock.fn(
-      async (reqs: readonly { readonly id: string }[]) =>
-        reqs.map((req) => ({
-          content: `biz-${req.id}`,
-          directives: freshFor100,
-        })),
+  it("an UNDER-RETURNING sub-producer fails its whole slice with a contract error naming it and both counts", async () => {
+    // Every slot of the slice gets the CacheContractError, not only the
+    // missing ones: the slice's positional pairing is broken, so none of its
+    // results can be trusted. The error stays a CacheContractError, so the
+    // wrapper still rejects the public call of each request in the slice.
+    // Failing here rather than leaving holes for the wrapper's own check is
+    // what lets the error name the sub-producer at fault: the wrapper sees
+    // only the merged batch. A HEALTHY sibling is wired up alongside to pin
+    // the blast radius: the wrapper can merge other callers' requests into one
+    // invocation, so the sibling's results are still delivered.
+    const bizBulk = mock.fn(async (reqs: readonly { readonly id: string }[]) =>
+      reqs.map((req) => ({
+        content: `biz-${req.id}`,
+        directives: freshFor100,
+      })),
     );
     const producer = bulkProducerByIdType(registry, {
       site_day: async (reqs) =>
@@ -244,19 +246,21 @@ describe("bulkProducerByIdType", () => {
       business_slice: bizBulk,
     });
 
-    await assert.rejects(
-      async () =>
-        producer([
-          { ...emptyRequest, id: "site:1" },
-          { ...emptyRequest, id: "biz:1" },
-          { ...emptyRequest, id: "site:2" },
-        ]),
+    const [site1, biz1, site2] = await producer([
+      { ...emptyRequest, id: "site:1" },
+      { ...emptyRequest, id: "biz:1" },
+      { ...emptyRequest, id: "site:2" },
+    ]);
+    expect(site1).to.be.instanceOf(CacheContractError);
+    expect((site1 as Error).message).to.match(
       /the "site_day" producer returned a result count \(1\) that does not match the number of requests in its slice \(2\)/,
     );
+    expect(site2).to.equal(site1);
+    expect(biz1).to.deep.include({ content: "biz-biz:1" });
     expect(bizBulk.mock.callCount()).to.equal(1);
   });
 
-  it("an OVER-RETURNING sub-producer fails the whole invocation too", async () => {
+  it("an OVER-RETURNING sub-producer fails its whole slice too", async () => {
     // Extras mean this sub-producer disagrees with the slice it was handed, so
     // its positional pairing is no longer trustworthy. The wrapper rejects a bare
     // producer's over-return for the same reason (wrapBulkProducer.test.ts); what
@@ -271,15 +275,15 @@ describe("bulkProducerByIdType", () => {
       ],
     });
 
-    await assert.rejects(
-      async () => producer([{ ...emptyRequest, id: "site:1" }]),
+    const [slot] = await producer([{ ...emptyRequest, id: "site:1" }]);
+    expect(slot).to.be.instanceOf(CacheContractError);
+    expect((slot as Error).message).to.match(
       /the "site_day" producer returned a result count \(2\) that does not match the number of requests in its slice \(1\)/,
     );
   });
 });
 
-it("rejects a null branch result as a package contract violation", async () => {
-  const { CacheContractError } = await import("./utils.js");
+it("fails the slice of a null branch result with a package contract violation", async () => {
   const registry = {
     item: resourceType<string>()({
       matches: (id): id is string => typeof id === "string",
@@ -288,13 +292,11 @@ it("rejects a null branch result as a package contract violation", async () => {
   const producer = bulkProducerByIdType(registry, {
     item: async () => null as never,
   });
-  await assert.rejects(
-    producer([{ id: "a", params: {}, directives: {} }]),
-    CacheContractError,
-  );
+  const [slot] = await producer([{ id: "a", params: {}, directives: {} }]);
+  assert.ok(slot instanceof CacheContractError);
 });
 
-it("drains dispatched branches before reporting a sibling contract failure", async () => {
+it("drains dispatched branches before rejecting a slice's contract failure", async () => {
   const started = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const events: string[] = [];

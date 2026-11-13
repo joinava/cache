@@ -101,14 +101,6 @@ export class RequestScheduler<Request, Result> {
     DirectStart<Request, Result>[] | undefined
   >;
   /**
-   * True once `flush` runs. From then on, `startOrRideTasks` dispatches at
-   * once even for requests passed with `autoBatch: true`, so shutdown does not wait
-   * for a later batch. A flushed batcher would otherwise batch them on the
-   * default schedule. Inert for a single-request target, which always
-   * dispatches at once.
-   */
-  #flushed = false;
-  /**
    * The promise that `close` returns, so a second `close` cannot flush or
    * drain twice.
    */
@@ -202,8 +194,10 @@ export class RequestScheduler<Request, Result> {
     requests: readonly { request: Request; signal?: AbortSignal }[],
     { autoBatch }: { autoBatch: boolean },
   ) {
-    const needsDirectStarts =
-      this.#batching === false || !autoBatch || this.#flushed;
+    // After `flush`, requests passed with `autoBatch: true` still queue. The
+    // flushed batcher sends them on its default schedule, which always fires,
+    // so shutdown still batches them instead of sending one call per request.
+    const needsDirectStarts = this.#batching === false || !autoBatch;
 
     // `schedule` gets this list as its context. When it is defined, `schedule`
     // collects this call's new tasks there, instead of queueing them.
@@ -252,12 +246,13 @@ export class RequestScheduler<Request, Result> {
   }
 
   /**
-   * Dispatches every queued task now, and makes later calls dispatch at
-   * once. An owner that must still start or ride tasks for accepted work during its
-   * shutdown calls it when that shutdown starts, and calls `close` later.
+   * Dispatches every queued task now. Later automatic batches use the
+   * batcher's default schedule, which always fires, instead of
+   * `batchScheduleFn`. An owner that must still start or ride tasks for
+   * accepted work during its shutdown calls it when that shutdown starts, and
+   * calls `close` later.
    */
   flush(): void {
-    this.#flushed = true;
     this.#batcher.flush();
   }
 

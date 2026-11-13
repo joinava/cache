@@ -147,6 +147,29 @@ describe("close() drains accepted work", suiteOptions, () => {
     await cache.close();
   });
 
+  it("finishes an accepted getUnbatched read before it closes the Store", async (t) => {
+    const store = new MemoryStore<Spec>();
+    const events: string[] = [];
+    const read = store.get.bind(store);
+    t.mock.method(store, "get", async (...args: Parameters<typeof read>) => {
+      events.push(`get ${args[0].id}`);
+      return read(...args);
+    });
+    t.mock.method(store, "close", async () => {
+      events.push("close");
+    });
+    const cache = cacheOver(store, { name: "unbatched-close" });
+
+    // getUnbatched normalizes its requests before it reads the Store, and
+    // close() starts while that normalization is pending.
+    const pending = cache.getUnbatched([lookup("a"), lookup("b")]);
+    const closing = cache.close();
+
+    assert.equal((await pending).length, 2);
+    await closing;
+    assert.deepEqual(events, ["get a", "get b", "close"]);
+  });
+
   it("rejects a get that arrives after close() starts", async () => {
     const { store, getManyRequestCounts } = spiedStore();
     const cache = cacheOver(store);

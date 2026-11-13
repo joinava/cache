@@ -16,10 +16,13 @@ import {
   contents,
   freshFor100,
   staleWhileRevalidating,
+  captureChannels,
+  expectProduceMessage,
   uniqueCacheName,
 } from "../test/v2AcceptanceHelpers.js";
 import Cache from "./Cache.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
+import { CacheContractError } from "./utils/utils.js";
 import wrapProducer from "./utils/wrapProducer.js";
 
 describe("automatic and direct producer dispatch", suiteOptions, () => {
@@ -328,5 +331,55 @@ describe("autoBatch: { producer: false }", suiteOptions, () => {
       (await cache.get(lookup("stale"))).usable?.content,
       "new stale",
     );
+  });
+});
+
+describe("contract errors in one producer slot", suiteOptions, () => {
+  it("reject only the callers of that slot, not other callers in the automatic batch", async (t) => {
+    const violation = new CacheContractError("bad result for bad");
+    const calls: string[][] = [];
+    const cache = cacheOver(undefined, { name: "slot-contract-error" });
+    const client = wrapProducer({
+      cache,
+      produceMany: async (requests) => {
+        calls.push(requests.map(({ id }) => id));
+        return requests.map(({ id }) =>
+          id === "bad" ? violation : { content: id, directives: freshFor100 },
+        );
+      },
+    });
+    t.after(async () => {
+      await client.close();
+      await cache.close();
+    });
+
+    const capture = captureChannels(cache.name);
+    try {
+      // Two callers in one event-loop turn share one automatic batch.
+      const [bad, good] = await Promise.allSettled([
+        client.get({ id: "bad" }),
+        client.get({ id: "good" }),
+      ]);
+
+      assert.deepEqual(calls, [["bad", "good"]]);
+      assert.deepEqual(bad, { status: "rejected", reason: violation });
+      assert.equal(good.status === "fulfilled" && good.value.content, "good");
+      assert.equal((await cache.get(lookup("good"))).usable?.content, "good");
+      assert.equal(capture.produce.length, 1);
+      expectProduceMessage(capture.produce[0], {
+        cache: cache.name,
+        autoBatched: true,
+        trigger: "miss",
+        requests: ["bad", "good"].map((resourceId) => ({
+          resourceType: "visits",
+          resourceId,
+        })),
+        collapsedRequestCount: 0,
+        outcome: "success",
+        failedRequestCount: 1,
+      });
+    } finally {
+      capture.stop();
+    }
   });
 });
