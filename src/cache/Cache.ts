@@ -175,6 +175,20 @@ export default class Cache<
    * the caller's directives, but a newer persisted entry would then lose.
    * That saves a round trip only while a write is in flight, so the cache
    * does not do it.
+   *
+   * ## Duplicate `validatable` entries
+   *
+   * A write can land while a read runs, after the read took its snapshot (see
+   * "Read order"). The Store then returns the persisted copy, and the
+   * snapshot still holds the pending copy. The other result keys each select
+   * one entry, so only `validatable` can list the resource twice.
+   *
+   * TODO: Deduplicate `validatable` by validators. Two entries with the same
+   * id, normalized `vary`, and validators describe the same resource state,
+   * because that is what a validator identifies. Duplicates come only from
+   * the pending snapshot, which is small, so comparing each pending entry
+   * against the stored ones is cheap. Validators are user-defined objects, so
+   * the comparison must be structural.
    */
   readonly #pending: PendingResources<SpecOf<RT>, Validators, Params>;
   /**
@@ -379,7 +393,9 @@ export default class Cache<
    * The result also considers the entries of every `store` call whose write
    * has not settled. The Store is read even when a pending entry matches (see
    * `#pending`). Rejects without reading the Store if the request's
-   * parameters cannot be normalized for the pending match.
+   * parameters cannot be normalized for the pending match. While a write is
+   * in flight, `validatable` can list one resource twice: once from the Store
+   * and once from the pending write.
    */
   public async get<Id extends SpecOf<RT>["id"]>(
     req: ReadonlyConsumerRequest<Params, Id>,
@@ -515,7 +531,8 @@ export default class Cache<
    * Every request whose pending snapshot succeeds is read from the Store,
    * also when a pending entry matches. A request whose parameters cannot be
    * normalized for the pending match gets that error in its slot and is left
-   * out of the Store call.
+   * out of the Store call. As in `get`, a slot's `validatable` can list one
+   * resource twice while its write is in flight.
    *
    * @param requests Array of consumer requests to process
    * @returns Promise that resolves to one CacheLookupResult or Error per
