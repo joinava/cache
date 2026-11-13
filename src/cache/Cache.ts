@@ -61,6 +61,11 @@ import {
   defaultLoggersByComponent,
   timeSlicedMapNonEmpty,
 } from "../utils/utils.js";
+import {
+  msSince,
+  performanceNow,
+  type PerformanceNow,
+} from "../utils/performanceNow.js";
 
 /**
  * The default `readBatching.maxBatchSize`. It is larger than the producer
@@ -338,7 +343,7 @@ export default class Cache<
     const resourceType = this.classify(req.id);
 
     const target: ReadTarget = { resourceType, id: req.id, requestIndex: 0 };
-    const readStartedAt = performance.now();
+    const readStartedAt = performanceNow();
 
     if (this.#actEmptyBecauseClosed("get")) {
       this.#publishRead(target, readStartedAt, { found: "none" });
@@ -463,13 +468,13 @@ export default class Cache<
     // the whole operation before we touch the store.
     const targets: readonly ReadTarget[] = mapNonEmpty(
       requests,
-      (req, requestIndex): ReadTarget => ({
+      (req, requestIndex) => ({
         resourceType: this.classify(req.id),
         id: req.id,
         requestIndex,
       }),
     );
-    const readStartedAt = performance.now();
+    const readStartedAt = performanceNow();
 
     if (this.#actEmptyBecauseClosed("getUnbatched")) {
       return mapNonEmpty(requests, (_req, i) => {
@@ -749,7 +754,7 @@ export default class Cache<
     directives: ReadonlyDeep<ConsumerDirectives>,
     now: Date,
     target: ReadTarget,
-    readStartedAt: number,
+    readStartedAt: PerformanceNow,
   ): CacheLookupResult<Spec, Validators, Params> {
     const { result, classifiedEntries } = classifyCacheEntries(
       entries,
@@ -770,15 +775,15 @@ export default class Cache<
 
   /** Publishes one request's `read` message. */
   #publishRead(
-    target: ReadTarget,
-    readStartedAt: number,
+    target: { readonly resourceType: string; readonly id: string },
+    readStartedAt: PerformanceNow,
     outcome: PickEach<CacheReadMessage, "found" | "vary" | "error">,
   ): void {
     publishCacheRead({
       cache: this.name,
       resourceType: target.resourceType,
       resourceId: target.id,
-      durationMs: performance.now() - readStartedAt,
+      durationMs: msSince(readStartedAt),
       ...outcome,
     });
   }

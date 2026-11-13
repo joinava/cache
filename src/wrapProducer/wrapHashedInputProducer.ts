@@ -1,6 +1,7 @@
 import {
   getFromGetMany,
   wrappedReadStartedAt,
+  type ClientReadOptions,
   type WrappedReadOptions,
 } from "./wrapProducer.js";
 import pLimit from "p-limit";
@@ -43,6 +44,10 @@ import {
 import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
 import { asError, CacheContractError } from "../utils/utils.js";
 import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
+import {
+  performanceNow,
+  type PerformanceNow,
+} from "../utils/performanceNow.js";
 
 /**
  * ## Hashed-input producers vs. (plain) producers
@@ -730,7 +735,7 @@ export function wrapHashedInputProducer(
   const run = async (
     inputs: readonly never[],
     admitted: () => void,
-    startedAt: number,
+    startedAt: PerformanceNow,
     callOptions?: HashedReadOptions,
   ) => {
     const signal = callOptions?.signal;
@@ -769,7 +774,7 @@ export function wrapHashedInputProducer(
       return request;
     });
 
-    const wrappedOptions = {
+    const wrappedOptions: ClientReadOptions = {
       ...callOptions,
       [wrappedReadStartedAt]: startedAt,
     };
@@ -791,7 +796,7 @@ export function wrapHashedInputProducer(
     const admission = Promise.withResolvers<void>();
     void admissions.track(admission.promise);
 
-    const startedAt = performance.now();
+    const startedAt = performanceNow();
     const promise = Promise.resolve()
       .then(() =>
         run(inputs, () => admission.resolve(), startedAt, callOptions),

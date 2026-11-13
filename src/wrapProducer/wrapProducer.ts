@@ -37,6 +37,7 @@ export {
   notifyStore,
   PRODUCER_ERROR_FALLBACK_WARNING,
   wrappedReadStartedAt,
+  type ClientReadOptions,
   type OnStore,
 } from "./producerClient.js";
 

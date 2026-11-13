@@ -18,6 +18,7 @@ import type {
 } from "../types/07_Store.js";
 import type { AnyParams, AnyValidators } from "../types/index.js";
 import { components, type Logger } from "../types/index.js";
+import { msSince, performanceNow } from "./performanceNow.js";
 export type { JsonOf } from "type-party";
 export { jsonParse, jsonStringify } from "type-party/runtime/json.js";
 
@@ -210,7 +211,7 @@ export async function readStoreObserved<
     return readSingleStore(store, requests, 10, storeOptions, observe);
   }
 
-  const startedAt = observe === undefined ? 0 : performance.now();
+  const startedAt = performanceNow();
   let results: StoreGetManyResult<Spec, Reqs, Validators, Params>;
 
   try {
@@ -237,7 +238,7 @@ export async function readStoreObserved<
       requestCount: requests.length,
       failedRequestCount: failures.length,
       entryCount: sumBy(successes, (entries) => entries.length),
-      durationMs: performance.now() - startedAt,
+      durationMs: msSince(startedAt),
       outcome: failures.length > 0 ? "failure" : "success",
     });
   } catch (failure) {
@@ -246,7 +247,7 @@ export async function readStoreObserved<
       requestCount: requests.length,
       failedRequestCount: signal?.aborted ? 0 : requests.length,
       entryCount: 0,
-      durationMs: performance.now() - startedAt,
+      durationMs: msSince(startedAt),
       outcome: signal?.aborted ? "cancelled" : "failure",
     });
 
@@ -338,7 +339,7 @@ async function readSingleStore<
       if (pendingYield !== undefined) await pendingYield;
       options?.signal?.throwIfAborted();
 
-      const startedAt = observe === undefined ? 0 : performance.now();
+      const startedAt = performanceNow();
       try {
         const invocation = budget.measure(() => ({
           promise: store.get(request, options),
@@ -354,7 +355,7 @@ async function readSingleStore<
           requestCount: 1,
           failedRequestCount: 0,
           entryCount: entries.length,
-          durationMs: performance.now() - startedAt,
+          durationMs: msSince(startedAt),
           outcome: "success",
         });
 
@@ -365,7 +366,7 @@ async function readSingleStore<
           requestCount: 1,
           failedRequestCount: options?.signal?.aborted ? 0 : 1,
           entryCount: 0,
-          durationMs: performance.now() - startedAt,
+          durationMs: msSince(startedAt),
           outcome: options?.signal?.aborted ? "cancelled" : "failure",
         });
 

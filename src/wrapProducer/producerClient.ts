@@ -69,6 +69,11 @@ import type {
   WrappedReadOptions,
   ProducerClientOptions,
 } from "./wrapProducer.js";
+import {
+  msSince,
+  performanceNow,
+  type PerformanceNow,
+} from "../utils/performanceNow.js";
 
 /**
  * Thrown by the producer wrappers (not by Cache) when a request's id
@@ -161,6 +166,15 @@ export function rethrowUnroutableWithCacheName(
 export const wrappedReadStartedAt: unique symbol = Symbol(
   "wrappedReadStartedAt",
 );
+
+/**
+ * The read options that the client accepts: the public
+ * {@link WrappedReadOptions}, plus the {@link wrappedReadStartedAt} key. The
+ * package does not export that symbol, so only an internal wrapper can set it.
+ */
+export type ClientReadOptions = WrappedReadOptions & {
+  readonly [wrappedReadStartedAt]?: PerformanceNow;
+};
 
 /** Observe foreground persistence without delaying the produced result. */
 export type OnStore = (stored: Promise<void>) => void;
@@ -564,7 +578,7 @@ function publishProduce(
     readonly trigger: ProducerTrigger;
   }>[],
   autoBatched: boolean,
-  startedAt: number,
+  startedAt: PerformanceNow,
   results: readonly unknown[] | undefined,
 ): void {
   if (!cacheProduceChannel.hasSubscribers) return;
@@ -588,7 +602,7 @@ function publishProduce(
         ? tasks.length
         : results.filter((result) => result instanceof Error).length,
     outcome: results === undefined ? "error" : "success",
-    durationMs: performance.now() - startedAt,
+    durationMs: msSince(startedAt),
   });
 }
 
@@ -773,7 +787,7 @@ export function createProducerClient<
     makeKey: ({ request }) =>
       producerTaskKey(request, (params) => cache.normalizeParams(params)),
     dispatch: async (tasks, { autoBatched }) => {
-      const startedAt = performance.now();
+      const startedAt = performanceNow();
       let results: readonly (Result | Error)[];
 
       const publish = (results: readonly unknown[] | undefined) =>
@@ -857,8 +871,8 @@ export function createProducerClient<
       Params,
       SpecOf<RT>["id"]
     >[],
-    callOptions: WrappedReadOptions = {},
-    startedAt = performance.now(),
+    callOptions: ClientReadOptions = {},
+    startedAt = performanceNow(),
   ): Promise<(ResultEntry | Error)[]> => {
     const { signal } = callOptions;
     const batching = callOptions.autoBatch;
@@ -901,7 +915,7 @@ export function createProducerClient<
           collapsed: rodeBySlot[index]!,
           disposition: "aborted",
           directivesImpliedBypass: item.bypass,
-          durationMs: performance.now() - startedAt,
+          durationMs: msSince(startedAt),
         }),
       );
     };
@@ -1124,7 +1138,7 @@ export function createProducerClient<
         resourceId: item.request.id,
         collapsed: rodeBySlot[index]!,
         ...fetch,
-        durationMs: performance.now() - startedAt,
+        durationMs: msSince(startedAt),
       });
     });
 
@@ -1140,7 +1154,7 @@ export function createProducerClient<
       Params,
       SpecOf<RT>["id"]
     >[],
-    callOptions?: WrappedReadOptions,
+    callOptions?: ClientReadOptions,
   ) => {
     if (closed) {
       return Promise.reject(
@@ -1149,12 +1163,7 @@ export function createProducerClient<
     }
 
     // Register admission before user hooks or producer callbacks can close the client.
-    const startedAt =
-      callOptions !== undefined &&
-      wrappedReadStartedAt in callOptions &&
-      typeof callOptions[wrappedReadStartedAt] === "number"
-        ? callOptions[wrappedReadStartedAt]
-        : performance.now();
+    const startedAt = callOptions?.[wrappedReadStartedAt] ?? performanceNow();
     const promise = Promise.resolve().then(() =>
       run(requests, callOptions, startedAt),
     );

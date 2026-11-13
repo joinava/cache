@@ -7,6 +7,10 @@ import {
 } from "../utils/utils.js";
 import { partition } from "es-toolkit";
 import { PendingPromisesTracker } from "./pendingPromisesTracker.js";
+import {
+  performanceNow,
+  type PerformanceNow,
+} from "../utils/performanceNow.js";
 
 /**
  * Accumulation settings for a bulk target. `Cache` exposes them as
@@ -111,7 +115,7 @@ type Entry<Input, Result> = {
    */
   readonly batch: Batch<Input, Result>;
   /** `performance.now()` at enqueue, for the dispatch's queue wait. */
-  readonly enqueuedAt: number;
+  readonly enqueuedAt: PerformanceNow;
   /**
    * Makes each entry dispatch and settle at most once. An entry can be
    * reached by its batch's dispatch, by `dispatchNow`, and by its signal's
@@ -301,7 +305,7 @@ export class Batcher<Input, Result> {
     // joined, and strand them in a dispatched batch.
     const opened: Batch<Input, Result>[] = [];
     // One call runs at one time, so its entries share it.
-    const enqueuedAt = performance.now();
+    const enqueuedAt = performanceNow();
     const enqueued = items.map((item): Enqueued<Input, Result> => {
       // Like a queued entry that is cancelled, an item that is already
       // cancelled is rejected, not sent.
@@ -326,7 +330,7 @@ export class Batcher<Input, Result> {
   #makeEntryInBatch(
     item: BatchItem<Input>,
     batch: Batch<Input, Result>,
-    enqueuedAt: number,
+    enqueuedAt: PerformanceNow,
   ): Entry<Input, Result> {
     const entry: Entry<Input, Result> = {
       item,
@@ -541,7 +545,7 @@ export class Batcher<Input, Result> {
       else settleResult(it.result, outcome);
     };
 
-    const now = performance.now();
+    const now = performanceNow();
     const run = () =>
       this.#dispatch(
         toSend.map((it) =>
