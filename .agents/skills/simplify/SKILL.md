@@ -116,7 +116,17 @@ Also flag **preconditions enforced only by a comment** in a contract
 between two modules: "callers must pass an already-completed request". Ask
 whether a type (a brand, with `Tagged` or a class type with a `#private` field) can carry it. Verify a brand
 with a type probe before you rely on it: a `type-fest` `Tagged` brand
-survives an object spread, so it cannot prove object identity.
+survives an object spread, so it cannot prove object identity and has other
+limitations. For example, in:
+
+```ts
+declare const y: Tagged<{ readonly a: string }, "Y">;
+const x = { ...y };
+x.a = "Something unvalidated";
+```
+
+`x` still has the `"Y"` tag, _even though `x.a` no longer has the value that
+the function attaching the brand (presumably) checked_.
 
 Also flag **call-order rules and "impossible" throws.** An API that works only
 if the caller calls A before B, and a field made optional with a throw for the
@@ -130,9 +140,11 @@ Compare the change with its base branch, and check its vocabulary.
 
 - **Losses from a rewrite.** For each name, log, comment, helper, `async`, or
   test assertion that the diff removes, confirm that the change needs it gone.
-  When a refactor onto a new abstraction drops an output that callers had,
-  such as a log field, flag it. Do not accept it as a "behavior change" when
-  the new abstraction could expose the missing fact. (Real case: a rewrite
+  When a refactor onto a new abstraction drops an output that callers had
+  before, such as a log field, do not blindly accept it as a "behavior change"
+  when the new abstraction could expose the missing fact. Assess whether
+  bringing back the old behavior is necessary or worth the added complexity,
+  and flag it if you're unsure. (Real case: a rewrite
   onto `TaskSharer` dropped the task key and the start reason from every log.
   The agent reported this as a behavior change. One small return field
   restored them.)
@@ -154,12 +166,8 @@ Review each file, class, and folder that the diff touches as a whole. Check:
 - **Consumers.** List the production importers of each class, helper, and
   wrapper. One importer means the boundary must earn its place: name what it
   hides from its consumer, or propose merging it into that consumer. A
-  wrapper that adds behavior to exactly one class usually belongs inside that
+  wrapper that adds behavior to exactly one class often belongs inside that
   class.
-- **Modes.** When a component serves several caller modes, check that every
-  mode uses every sub-component and option. If a mode never uses a
-  mechanism, propose a split by mode behind a thin facade. Narrow each mode's
-  input type to the fields it reads.
 - **Size and concerns.** Flag a function longer than about 300 lines, or one
   that interleaves 3 or more concerns (for example diagnostics, abort
   handling, batching, and shutdown). Propose a split:
