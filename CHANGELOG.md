@@ -31,6 +31,8 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
   `CoveringProducer` instead.
 - Remove the `CacheReadFound` and `CacheReadFoundWithEntry` type exports. Use
   `CacheReadMessage["found"]` instead.
+- Remove the `CacheReadOutcome` type export. Use the `found` and `vary` fields
+  of `CacheReadMessage` instead.
 - Replace the produce message's `collapsedCallerCount` with
   `collapsedRequestCount`: the requests that rode the invocation's tasks
   instead of starting producer work. A lone request reports 0, not 1. Bulk

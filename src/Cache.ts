@@ -7,6 +7,7 @@ import {
   cacheReadStoreChannel,
   cacheStoreEntryChannel,
   publishCacheRead,
+  readOutcomeOf,
   publishCacheStoreEntry,
 } from "./diagnostics.js";
 import type { ReadonlyConsumerRequest } from "./types/03_ConsumerRequest.js";
@@ -51,7 +52,6 @@ import * as entryUtils from "./utils/normalizedProducerResultResourceHelpers.js"
 import {
   classifyCacheEntries,
   type CacheLookupResult,
-  type CacheReadOutcome,
 } from "./utils/cacheHelpers.js";
 import { Batcher, type BatchOptions } from "./batcher/batcher.js";
 import {
@@ -568,7 +568,7 @@ export default class Cache<
       resultCount: cacheEntries.length,
     });
 
-    const { result, outcome } = this.#processCacheEntries(
+    const result = this.#processCacheEntries(
       cacheEntries as unknown as Entry<
         SpecForId<SpecOf<RT>, Id>,
         Validators,
@@ -578,7 +578,7 @@ export default class Cache<
       now,
       { requestIndex: 0 },
     );
-    publishRead(outcome);
+    publishRead(readOutcomeOf(result));
     return result;
   }
 
@@ -716,13 +716,13 @@ export default class Cache<
         return cacheEntries;
       }
 
-      const { result, outcome } = this.#processCacheEntries(
+      const result = this.#processCacheEntries(
         cacheEntries as unknown as Entry<SpecOf<RT>, Validators, Params>[],
         req.directives,
         now,
         { requestIndex: i },
       );
-      publishRead(i, outcome);
+      publishRead(i, readOutcomeOf(result));
       return result;
     });
   }
@@ -933,10 +933,9 @@ export default class Cache<
   }
 
   /**
-   * Processes cache entries for a single request, returning both the
-   * CacheLookupResult and the {@link CacheReadOutcome} that describes it for
-   * the read channel. Shared entry helpers own classification and selection,
-   * including the selected entry and diagnostic outcome. This method adds
+   * Processes cache entries for a single request, returning its
+   * CacheLookupResult. Shared entry helpers own classification and selection,
+   * including the selected entry. This method adds
    * request-scoped logging for get() and getUnbatched(). Pending-write lookups use
    * the same helpers, so they cannot drift from the cache's selection rules.
    */
@@ -945,11 +944,8 @@ export default class Cache<
     directives: ReadonlyDeep<ConsumerDirectives>,
     now: Date,
     context: { requestIndex: number },
-  ): {
-    result: CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>;
-    outcome: CacheReadOutcome;
-  } {
-    const { result, outcome, classifiedEntries } = classifyCacheEntries(
+  ): CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params> {
+    const { result, classifiedEntries } = classifyCacheEntries(
       entries,
       directives,
       now,
@@ -962,7 +958,7 @@ export default class Cache<
       requestIndex: context.requestIndex,
       res: result,
     });
-    return { result, outcome };
+    return result;
   }
 }
 

@@ -1,9 +1,12 @@
 import type { Channel } from "node:diagnostics_channel";
 import * as diagnosticsChannel from "node:diagnostics_channel";
+import type { PickEach } from "type-party";
 import type { AnyParams } from "./types/01_Params.js";
 import type { AnyValidators } from "./types/02_Validators.js";
 import type { Vary } from "./types/04_ProducerResult.js";
 import type { StoreEntryRelationship } from "./types/06_Store.js";
+import type { CacheSpec } from "./types/index.js";
+import type { CacheLookupResult } from "./utils/cacheHelpers.js";
 
 /**
  * @fileoverview The package's diagnostics channels. There are five:
@@ -193,6 +196,38 @@ export const cacheReadChannel = typedChannel<CacheReadMessage>()(
 export function publishCacheRead(message: CacheReadMessage): void {
   cacheReadChannel.publish(message);
 }
+
+/**
+ * The `found` and `vary` fields of the read message for a lookup that
+ * completed. A lookup that failed publishes `found: "read-failed"` instead.
+ * @internal
+ */
+export function readOutcomeOf<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+>(result: CacheLookupResult<Spec, Validators, Params>): CompletedReadOutcome {
+  // The checks follow the selection order in `selectCacheLookup`
+  // (utils/cacheHelpers.ts), so the outcome names the entry that the lookup
+  // selected. Keep the two orders the same.
+  if (result.usable) return { found: "usable", vary: result.usable.vary };
+  if (result.usableWhileRevalidate) {
+    return {
+      found: "usable-while-revalidate",
+      vary: result.usableWhileRevalidate.vary,
+    };
+  }
+  if (result.usableIfError) {
+    return { found: "usable-if-error", vary: result.usableIfError.vary };
+  }
+  return { found: "none" };
+}
+
+/** The outcome fields of a {@link CacheReadMessage} for a completed lookup. */
+type CompletedReadOutcome = Exclude<
+  PickEach<CacheReadMessage, "found" | "vary" | "error">,
+  { found: "read-failed" }
+>;
 
 /**
  * Name of the diagnostics channel that fires once per call of a wrapped
