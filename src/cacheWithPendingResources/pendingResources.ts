@@ -100,12 +100,12 @@ export class PendingResources<
    *
    * Retain raw resources and their write-time date. Normalize a resource only
    * on its first pending lookup, and reuse that normalized entry afterward.
+   * A resource without a `date` gets `now`, not the lookup time, so lazy
+   * normalization never resets its age.
    * Cleanup uses the raw ID, so unread resources never need normalization.
    */
   track(
-    resources: readonly (ProducerResultResource<Spec, Validators, Params> & {
-      date: Date;
-    })[],
+    resources: readonly ProducerResultResource<Spec, Validators, Params>[],
     stored: Promise<void>,
     now: Date,
   ): void {
@@ -120,6 +120,7 @@ export class PendingResources<
           normalizedEntry ??= normalizeProducerResultResource(
             normalizeVary,
             resource,
+            now,
           );
           return normalizedEntry;
         },

@@ -209,23 +209,27 @@ export class CacheWithPendingResources<
 
   /**
    * Starts writing `resources` and holds them in the overlay until the write
-   * settles. Each resource carries its own date, so the caller's normalized
-   * entries and the stored ones agree on age. Returns the write, which never
-   * rejects unobserved: a failure is logged here.
+   * settles. A resource without a `date` gets one write time, which both the
+   * Store and the overlay use, so the two agree on its age. A caller that
+   * builds its own entry from a resource should set `date` itself. Returns
+   * the write, which never rejects unobserved: a failure is logged here.
    */
   store(
-    resources: readonly (ProducerResultResource<
+    resources: readonly ProducerResultResource<
       SpecOf<RT>,
       Validators,
       Params
-    > & {
-      date: Date;
-    })[],
+    >[],
   ): Promise<void> {
+    const now = new Date();
+    const dated = resources.map((resource) => ({
+      ...resource,
+      date: resource.date ?? now,
+    }));
     const stored =
-      resources.length === 0
+      dated.length === 0
         ? Promise.resolve()
-        : Promise.try(() => this.#cache.store(resources)).then(() => {});
+        : Promise.try(() => this.#cache.store(dated)).then(() => {});
 
     this.#writes.add(stored);
     void stored
@@ -238,7 +242,7 @@ export class CacheWithPendingResources<
           error,
         ),
       );
-    this.#pending.track(resources, stored, new Date());
+    this.#pending.track(dated, stored, now);
     return stored;
   }
 

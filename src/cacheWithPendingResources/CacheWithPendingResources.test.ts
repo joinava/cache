@@ -67,6 +67,24 @@ describe("CacheWithPendingResources", suiteOptions, () => {
     assert.equal((await lookupResult).usable?.content, "pending");
   });
 
+  it("dates a dateless resource at write time, not at its first lookup", async (t) => {
+    const writeGate = Promise.withResolvers<void>();
+    const cache = cacheOver(gatedWriteStore(writeGate.promise));
+    t.after(async () => {
+      writeGate.resolve();
+      await cache.close();
+    });
+    const overlay = new CacheWithPendingResources(cache, noLog);
+
+    void overlay.store([
+      { id: "a", content: "pending", directives: { freshUntilAge: 0.05 } },
+    ]);
+    // Past the 50 ms freshness lifetime, while the write is still pending.
+    await sleep(100);
+
+    assert.equal((await overlay.get(lookup("a"))).usable, undefined);
+  });
+
   it("reports the write behind a pending entry, also after the write settles", async (t) => {
     const cache = cacheOver();
     t.after(() => cache.close());
