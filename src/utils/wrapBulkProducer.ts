@@ -12,7 +12,7 @@ import {
   type BatchHandle,
   type BatchItem,
   type BatchOptions,
-} from "../scheduling/batcher.js";
+} from "../batcher/batcher.js";
 import { TaskSharer, type SharedTaskView } from "../scheduling/taskSharer.js";
 import type {
   ResourceTypeName,

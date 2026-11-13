@@ -53,7 +53,7 @@ import {
   type CacheLookupResult,
   type CacheReadOutcome,
 } from "./utils/cacheHelpers.js";
-import { Batcher, type BatchOptions } from "./scheduling/batcher.js";
+import { Batcher, type BatchOptions } from "./batcher/batcher.js";
 import {
   CacheContractError,
   readStoreObserved,

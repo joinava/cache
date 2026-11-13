@@ -44,7 +44,7 @@ import type {
   ReadonlyConsumerRequest,
   RequestPairedProducerResult,
 } from "../types/index.js";
-import type { DispatchInfo } from "../scheduling/batcher.js";
+import type { DispatchInfo } from "../batcher/batcher.js";
 import { normalizeParams, normalizeVary } from "./normalization.js";
 import { PendingResources } from "./pendingResources.js";
 import { classifyCacheEntries, mergeCacheLookups } from "./cacheHelpers.js";
