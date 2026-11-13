@@ -268,7 +268,7 @@ A bare `produceMany` receives the **full** set of requests to produce — mixed 
 
 A type with no producer in any client is legal and normal: its entries are written as other producers' supplemental resources (or direct `store()` calls) and read via `Cache.get` — the serve-if-present contract. Partial coverage also makes capability-scoped and split clients honest: a second `wrapProducer` call can cover a different subset of the same cache.
 
-Both per-resource-type helpers live in [`producerByIdType.ts`](./src/producer-builders/producerByIdType.ts) and [`bulkProducerByIdType.ts`](./src/producer-builders/bulkProducerByIdType.ts) — they need no client at runtime, and no `Cache`. The errors the producer factories raise are in [`producer-errors.ts`](./src/utils/producer-errors.ts).
+Both per-resource-type helpers live in [`producerByIdType.ts`](./src/producer-builders/producerByIdType.ts) and [`bulkProducerByIdType.ts`](./src/producer-builders/bulkProducerByIdType.ts) — they need no client at runtime, and no `Cache`. `UnroutableIdError` is defined in `producerByIdType.ts`; the client's cache-named `NoProducerForResourceTypeError` is in [`producerClient.ts`](./src/wrapProducer/producerClient.ts).
 
 Compatible requests share pending production for up to three seconds by default. `collapseOverlappingRequestsTime` changes that joining age.
 Completed production has no additional sharing window. Compatibility uses the ID, normalized parameters, and directives.

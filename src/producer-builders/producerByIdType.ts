@@ -4,10 +4,11 @@
  *
  * Split out from the wrappers because it needs no `Cache` at all: routing an id
  * to a sub-producer is a function of the resource-type registry's `matches`
- * guards and nothing else. What it does still need it imports -- the
- * {@link coveredTypes} carrier from the producer types, the id-erased internal
- * shapes from `producerClient`, and the routing errors from `producer-errors`
- * -- so the runtime import graph runs one way (this file -> those).
+ * guards and nothing else. It imports the {@link coveredTypes} carrier from the
+ * producer types, and only types from `producerClient`. The routing error it
+ * throws, {@link UnroutableIdError}, is defined here, and the producer client
+ * imports it to re-throw it with its cache's name. So the runtime import graph
+ * between the two runs one way: wrapper -> this file.
  *
  * @module
  */
@@ -21,11 +22,7 @@ import {
   resourceTypesEntries,
   type ResourceTypesEntries,
 } from "../resourceTypeClassification.js";
-import {
-  UnroutableIdError,
-  type UnroutableIdReason,
-} from "../wrapProducer/producer-errors.js";
-import { assertUnreachable } from "../utils/utils.js";
+import { CacheContractError, assertUnreachable } from "../utils/utils.js";
 import {
   coveredTypes,
   type AnyParams,
@@ -37,6 +34,68 @@ import type {
   LooseProducer,
   LooseRequestFor,
 } from "../wrapProducer/producerClient.js";
+
+/**
+ * Why an id could not be routed to one of a by-id-type producer's covered
+ * sub-producers. A discriminated union so a renderer cannot read a field the
+ * reason does not populate.
+ */
+export type UnroutableIdReason =
+  | {
+      readonly reason: "unclassifiable";
+      /** See {@link IdClassification}'s `cause`. */
+      readonly cause: unknown;
+    }
+  | {
+      readonly reason: "ambiguous";
+      readonly matchedResourceTypes: readonly string[];
+    }
+  | { readonly reason: "uncovered"; readonly resourceType: string };
+
+/**
+ * Thrown by {@link producerByIdType}/`bulkProducerByIdType` when an id cannot
+ * be routed to one of their sub-producers.
+ *
+ * Cache-free by construction: these helpers are built from a resource-type
+ * registry, so they have no cache to name. When one is driven through a wrapper
+ * the wrapper catches it and re-throws the equivalent cache-named error
+ * (see {@link rethrowUnroutableWithCacheName}), so a wrapped producer's
+ * observable errors are unchanged; this error surfaces only when the helper's
+ * result is invoked directly.
+ *
+ * Reaching it through a wrapper at all means the registry the helper was built
+ * from disagrees with the cache's own -- the wrapper classifies first, against
+ * the cache's registry, and rejects uncovered types before dispatching. Passing
+ * `cache.resourceTypes` (rather than some other object of the same shape) is
+ * what keeps the two in step.
+ */
+export class UnroutableIdError extends CacheContractError {
+  override readonly name = "UnroutableIdError";
+  readonly id: string;
+  readonly coveredResourceTypes: readonly string[];
+  readonly detail: UnroutableIdReason;
+
+  constructor(args: {
+    id: string;
+    coveredResourceTypes: readonly string[];
+    detail: UnroutableIdReason;
+  }) {
+    const covered = args.coveredResourceTypes.join(", ");
+    super(
+      args.detail.reason === "uncovered"
+        ? `id ${JSON.stringify(args.id)} classifies to resource type "${args.detail.resourceType}", which is outside this producer's coverage (${covered})`
+        : args.detail.reason === "ambiguous"
+          ? `id ${JSON.stringify(args.id)} matches more than one resource type (${args.detail.matchedResourceTypes.join(", ")}) in the registry this producer was built from`
+          : `id ${JSON.stringify(args.id)} matches no resource type in the registry this producer was built from`,
+      args.detail.reason === "unclassifiable" && args.detail.cause !== undefined
+        ? { cause: args.detail.cause }
+        : undefined,
+    );
+    this.id = args.id;
+    this.coveredResourceTypes = args.coveredResourceTypes;
+    this.detail = args.detail;
+  }
+}
 
 /**
  * Classifies `id` against the registry a by-id-type helper was built from and

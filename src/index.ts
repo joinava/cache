@@ -44,11 +44,7 @@ export { restoreInfinityInDirectives } from "./utils/normalization.js";
 export { throwIfAnyError } from "./utils/utils.js";
 export type { JsonOf, JSONWithUndefined } from "type-party";
 export { jsonParse, jsonStringify } from "type-party/runtime/json.js";
-export {
-  NoProducerForResourceTypeError,
-  UnroutableIdError,
-  type UnroutableIdReason,
-} from "./wrapProducer/producer-errors.js";
+export { NoProducerForResourceTypeError } from "./wrapProducer/producerClient.js";
 export {
   bulkHashedInputProducerByInputType,
   hashedInputProducerByInputType,
@@ -59,7 +55,9 @@ export {
 } from "./producer-builders/hashedInputProducerByInputType.js";
 export {
   producerByIdType,
+  UnroutableIdError,
   type ProducersFor,
+  type UnroutableIdReason,
 } from "./producer-builders/producerByIdType.js";
 export {
   bulkProducerByIdType,

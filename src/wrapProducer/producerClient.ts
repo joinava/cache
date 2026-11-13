@@ -17,10 +17,8 @@ import { sumBy } from "es-toolkit";
 import stableStringify from "safe-stable-stringify";
 import type { ReadonlyDeep } from "type-fest";
 
-import {
-  NoProducerForResourceTypeError,
-  rethrowUnroutableWithCacheName,
-} from "./producer-errors.js";
+import { AmbiguousResourceTypeError, UnclassifiableIdError } from "../Cache.js";
+import { UnroutableIdError } from "../producer-builders/producerByIdType.js";
 import {
   cacheProduceChannel,
   publishCacheFetch,
@@ -58,6 +56,7 @@ import {
 } from "./requestPairedProducerUtils.js";
 import {
   asError,
+  assertUnreachable,
   CacheContractError,
   defaultLoggersByComponent,
   raceWithSignal,
@@ -70,6 +69,89 @@ import type {
   WrappedReadOptions,
   ProducerClientOptions,
 } from "./wrapProducer.js";
+
+/**
+ * Thrown by the producer wrappers (not by Cache) when a request's id
+ * classifies to a resource type outside the wrapper's inferred coverage.
+ * Reachable only via casts or loosely-typed ids -- the wrapped function's
+ * request type bans covered-set violations at compile time. Thrown BEFORE
+ * any cache read: serving a hit for an uncovered type would smuggle the
+ * serve-if-present contract back in through a cast.
+ *
+ * Only reachable when coverage was actually NARROWED -- i.e. the producer
+ * came from {@link producerByIdType}/`bulkProducerByIdType` (which declare
+ * their covered set), or `Covered` was pinned by an explicit type argument.
+ * A bare producer function covers the whole registry by construction (its
+ * parameter type must accept every registry id), so it declares no covered
+ * set, the wrapper runs no coverage check, and this error cannot occur: every
+ * classifiable id has a producer. Unclassifiable/ambiguous ids still fail
+ * loud, from `cache.classify`.
+ */
+export class NoProducerForResourceTypeError extends CacheContractError {
+  override readonly name = "NoProducerForResourceTypeError";
+  readonly cacheName: string;
+  readonly resourceType: string;
+  readonly coveredResourceTypes: readonly string[];
+  readonly id: string;
+
+  constructor(args: {
+    cacheName: string;
+    resourceType: string;
+    coveredResourceTypes: readonly string[];
+    id: string;
+  }) {
+    super(
+      `Cache "${args.cacheName}": id ${JSON.stringify(args.id)} classifies to resource type "${args.resourceType}", which is outside this wrapper's coverage (${args.coveredResourceTypes.join(", ")})`,
+    );
+    this.cacheName = args.cacheName;
+    this.resourceType = args.resourceType;
+    this.coveredResourceTypes = args.coveredResourceTypes;
+    this.id = args.id;
+  }
+}
+
+/**
+ * Re-throws a by-id-type helper's cache-free {@link UnroutableIdError} as the
+ * cache-named error the wrapper's own pre-dispatch checks would have thrown for
+ * the same id, so routing through a wrapper reports one error vocabulary
+ * regardless of which layer noticed. Anything else is re-thrown untouched.
+ */
+export function rethrowUnroutableWithCacheName(
+  cacheName: string,
+  error: unknown,
+): never {
+  if (!(error instanceof UnroutableIdError)) {
+    throw error;
+  }
+  const { detail } = error;
+  switch (detail.reason) {
+    case "uncovered": {
+      throw new NoProducerForResourceTypeError({
+        cacheName,
+        resourceType: detail.resourceType,
+        coveredResourceTypes: error.coveredResourceTypes,
+        id: error.id,
+      });
+    }
+    case "unclassifiable": {
+      throw new UnclassifiableIdError({
+        cacheName,
+        id: error.id,
+        cause: detail.cause,
+      });
+    }
+    case "ambiguous": {
+      throw new AmbiguousResourceTypeError({
+        cacheName,
+        id: error.id,
+        matchedResourceTypes: detail.matchedResourceTypes,
+      });
+    }
+    default: {
+      return assertUnreachable(detail);
+    }
+  }
+}
 
 /**
  * Lets an outer wrapper pass its own call start time in the read options, so
