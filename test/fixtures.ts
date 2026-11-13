@@ -2,8 +2,8 @@ import MemoryStore from "../src/stores/MemoryStore/MemoryStore.js";
 import { readStoreObserved } from "../src/utils/utils.js";
 import pg from "pg";
 import { mock } from "node:test";
-import Cache from "../src/Cache.js";
-import type { BatchOptions } from "../src/batcher/batcher.js";
+import Cache from "../src/cache/Cache.js";
+import type { BatchOptions } from "../src/scheduling/batcher.js";
 import wrapProducer from "../src/wrapProducer/wrapProducer.js";
 
 import fc from "fast-check";

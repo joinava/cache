@@ -1,16 +1,16 @@
-import { throwIfAnyError } from "./utils/utils.js";
+import { throwIfAnyError } from "../utils/utils.js";
 import { expect } from "chai";
 import { after, before, describe, it } from "node:test";
 import { makeTestWithFixture } from "test-with-fixture";
 
 import { setTimeout as delay } from "timers/promises";
-import { dummyEntryData, postgresStoreFixture } from "../test/fixtures.js";
+import { dummyEntryData, postgresStoreFixture } from "../../test/fixtures.js";
 import Cache from "./Cache.js";
-import { resourceType } from "./index.js";
-import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
-import type PostgresStore from "./stores/PostgresStore/PostgresStore.js";
-import type { CacheSpec } from "./types/00_CacheSpec.js";
-import { type JSON } from "./types/utils.js";
+import { resourceType } from "../index.js";
+import MemoryStore from "../stores/MemoryStore/MemoryStore.js";
+import type PostgresStore from "../stores/PostgresStore/PostgresStore.js";
+import type { CacheSpec } from "../types/00_CacheSpec.js";
+import { type JSON } from "../types/utils.js";
 
 // These suites exercise id-structure-agnostic Cache behavior, so they use a
 // sole-type registry (2.0 requires every cache to name itself and declare its

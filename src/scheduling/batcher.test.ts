@@ -8,7 +8,7 @@ import {
   type DispatchedItem,
   type DispatchInfo,
 } from "./batcher.js";
-import { TaskSharer } from "../scheduling/taskSharer.js";
+import { TaskSharer } from "./taskSharer.js";
 
 function item(input: string, signal?: AbortSignal): BatchItem<string> {
   return { input, signal };

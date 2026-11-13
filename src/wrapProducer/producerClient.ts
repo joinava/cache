@@ -17,7 +17,10 @@ import { sumBy } from "es-toolkit";
 import stableStringify from "safe-stable-stringify";
 import type { ReadonlyDeep } from "type-fest";
 
-import { AmbiguousResourceTypeError, UnclassifiableIdError } from "../Cache.js";
+import {
+  AmbiguousResourceTypeError,
+  UnclassifiableIdError,
+} from "../cache/Cache.js";
 import { UnroutableIdError } from "../producer-builders/producerByIdType.js";
 import {
   cacheProduceChannel,
@@ -39,12 +42,12 @@ import type {
   Logger,
   PartialReadonlyConsumerRequest,
 } from "../types/index.js";
-import type { DispatchInfo } from "../batcher/batcher.js";
+import type { DispatchInfo } from "../scheduling/batcher.js";
 import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
 import {
   CacheWithPendingResources,
   type LookupFor,
-} from "../cacheWithPendingResources/CacheWithPendingResources.js";
+} from "../cache/CacheWithPendingResources.js";
 import {
   completeRequest,
   type ReachesProducerAsIs,

@@ -4,7 +4,7 @@ import type { IsEqual } from "type-fest";
 import type { JsonOf } from "type-party";
 
 import { expectType, uniqueCacheName } from "../test/v2AcceptanceHelpers.js";
-import Cache from "./Cache.js";
+import Cache from "./cache/Cache.js";
 import {
   bulkProducerByIdType,
   cacheReadChannel,

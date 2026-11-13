@@ -14,7 +14,7 @@ export {
   type ReadOptions,
   type SingleTypeCacheOptionsBuilder,
   type SingleTypeRegistry,
-} from "./Cache.js";
+} from "./cache/Cache.js";
 export type { CacheLookupResult } from "./utils/cacheHelpers.js";
 export { default as MemoryStore } from "./stores/MemoryStore/MemoryStore.js";
 export { default as PostgresStore } from "./stores/PostgresStore/PostgresStore.js";

@@ -8,6 +8,8 @@
  *
  * The tracker has no closed state. Each owner decides what new work does
  * after its own `close` starts, and in what order it drains its trackers.
+ *
+ * @internal
  */
 export class PendingPromisesTracker {
   readonly #pending = new Set<Promise<unknown>>();

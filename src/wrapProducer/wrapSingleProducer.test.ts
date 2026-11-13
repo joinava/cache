@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import type { DispatchInfo } from "../batcher/batcher.js";
+import type { DispatchInfo } from "../scheduling/batcher.js";
 import { SingleProducerScheduler } from "./wrapSingleProducer.js";
 
 const defaults = {

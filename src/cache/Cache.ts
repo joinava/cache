@@ -9,14 +9,14 @@ import {
   publishCacheRead,
   readOutcomeOf,
   publishCacheStoreEntry,
-} from "./diagnostics.js";
-import type { ReadonlyConsumerRequest } from "./types/03_ConsumerRequest.js";
+} from "../diagnostics.js";
+import type { ReadonlyConsumerRequest } from "../types/03_ConsumerRequest.js";
 import {
   type Entry,
   type EntryForId,
   type NormalizeParamName,
   type NormalizeParamValue,
-} from "./types/06_Normalization.js";
+} from "../types/06_Normalization.js";
 import {
   type AnyParams,
   type AnyParamValue,
@@ -35,26 +35,26 @@ import {
   type StoreEntryResult,
   type StoreGetManyRequest,
   type Vary,
-} from "./types/index.js";
+} from "../types/index.js";
 import {
   classifyIdAgainst,
   resourceType,
   resourceTypesEntries,
   type ResourceTypesEntries,
-} from "./resourceTypeClassification.js";
-import { type Bind1 } from "./types/utils.js";
+} from "../resourceTypeClassification.js";
+import { type Bind1 } from "../types/utils.js";
 import {
   normalizeParams,
   normalizeProducerResultResource,
   normalizeVary,
-} from "./utils/normalization.js";
-import * as entryUtils from "./utils/normalizedProducerResultResourceHelpers.js";
+} from "../utils/normalization.js";
+import * as entryUtils from "../utils/normalizedProducerResultResourceHelpers.js";
 import {
   classifyCacheEntries,
   type CacheLookupResult,
-} from "./utils/cacheHelpers.js";
-import { Batcher, type BatchOptions } from "./batcher/batcher.js";
-import { PendingPromisesTracker } from "./scheduling/pendingPromisesTracker.js";
+} from "../utils/cacheHelpers.js";
+import { Batcher, type BatchOptions } from "../scheduling/batcher.js";
+import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
 import {
   CacheContractError,
   readStoreObserved,
@@ -62,7 +62,7 @@ import {
   assertUnreachable,
   defaultLoggersByComponent,
   timeSlicedMapNonEmpty,
-} from "./utils/utils.js";
+} from "../utils/utils.js";
 
 /**
  * The default `readBatching.maxBatchSize`. It is larger than the producer

@@ -11,7 +11,7 @@ import {
   type BatchHandle,
   type BatchItem,
   type BatchOptions,
-} from "../batcher/batcher.js";
+} from "../scheduling/batcher.js";
 import { TaskSharer, type SharedTaskView } from "../scheduling/taskSharer.js";
 import type {
   ResourceTypeName,

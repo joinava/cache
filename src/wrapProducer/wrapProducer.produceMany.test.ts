@@ -15,7 +15,7 @@ import {
   contents,
   RESOURCE_PREFIX_REGISTRY,
 } from "../../test/v2AcceptanceHelpers.js";
-import Cache from "../Cache.js";
+import Cache from "../cache/Cache.js";
 import {
   MemoryStore,
   wrapProducer,

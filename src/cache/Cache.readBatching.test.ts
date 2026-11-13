@@ -11,17 +11,17 @@ import {
   spiedStore,
   suiteOptions,
   type Spec,
-} from "../test/fixtures.js";
+} from "../../test/fixtures.js";
 import {
   ACCEPT_ANY_REGISTRY,
   captureChannels,
   freshFor100,
   uniqueCacheName,
   waitUntil,
-} from "../test/v2AcceptanceHelpers.js";
+} from "../../test/v2AcceptanceHelpers.js";
 import Cache, { singleTypeCacheOptions } from "./Cache.js";
-import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
-import wrapProducer from "./wrapProducer/wrapProducer.js";
+import MemoryStore from "../stores/MemoryStore/MemoryStore.js";
+import wrapProducer from "../wrapProducer/wrapProducer.js";
 
 /**
  * The read-batching contract: for a Store with `getMany`, the `get()` calls of

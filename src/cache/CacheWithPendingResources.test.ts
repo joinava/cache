@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it, mock } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import Cache from "../Cache.js";
+import Cache from "./Cache.js";
 import {
   bulkMemoryStore,
   cacheOver,

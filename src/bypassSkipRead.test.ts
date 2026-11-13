@@ -11,7 +11,7 @@ import {
   TWO_TYPE_REGISTRY,
   freshFor100,
 } from "../test/v2AcceptanceHelpers.js";
-import Cache from "./Cache.js";
+import Cache from "./cache/Cache.js";
 import {
   bulkProducerByIdType,
   MemoryStore,

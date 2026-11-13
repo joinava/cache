@@ -6,7 +6,7 @@ import {
   defaultLoggersByComponent,
 } from "../utils/utils.js";
 import { partition } from "es-toolkit";
-import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
+import { PendingPromisesTracker } from "./pendingPromisesTracker.js";
 
 /**
  * Accumulation settings for a bulk target. `Cache` exposes them as

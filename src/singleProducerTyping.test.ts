@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import type { IsEqual } from "type-fest";
 
 import { expectType, uniqueCacheName } from "../test/v2AcceptanceHelpers.js";
-import Cache from "./Cache.js";
+import Cache from "./cache/Cache.js";
 import {
   bulkProducerByIdType,
   coveredTypes,

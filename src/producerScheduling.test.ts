@@ -20,7 +20,7 @@ import {
   expectProduceMessage,
   uniqueCacheName,
 } from "../test/v2AcceptanceHelpers.js";
-import Cache from "./Cache.js";
+import Cache from "./cache/Cache.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 import { CacheContractError } from "./utils/utils.js";
 import wrapProducer from "./wrapProducer/wrapProducer.js";

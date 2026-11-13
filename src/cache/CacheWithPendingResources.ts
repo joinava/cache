@@ -1,8 +1,8 @@
 import type { PublicInterface } from "type-party";
 import type { ReadonlyDeep } from "type-fest";
 
-import type Cache from "../Cache.js";
-import type { ReadOptions } from "../Cache.js";
+import type Cache from "./Cache.js";
+import type { ReadOptions } from "./Cache.js";
 import type { SpecForId } from "../types/00_CacheSpec.js";
 import type {
   ResourceTypeName,

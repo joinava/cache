@@ -1,14 +1,81 @@
-# Batcher
+# Scheduling
+
+This folder holds the parts that decide when work runs, which callers share it,
+and when an owner can close. None of them knows about caches, Stores or
+producers. Their owners supply that knowledge through callbacks.
+
+| Module                                                  | What it does                                                             | Who uses it                                                                                |
+| ------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| [`Batcher`](./batcher.ts)                               | Collects items and sends them to one `dispatch` function in batches.     | `Cache`, for Store reads. `BulkProducerScheduler`, for bulk producer calls.                |
+| [`TaskSharer`](./taskSharer.ts)                         | Lets requests with the same key share one pending task.                  | Both producer schedulers. `collapsedTaskCreator`.                                          |
+| [`collapsedTaskCreator`](./collapsedTaskCreator.ts)     | Wraps a task-starting function so that equal calls share a pending task. | Package users. It is the only public export here.                                          |
+| [`PendingPromisesTracker`](./pendingPromisesTracker.ts) | Tracks promises until they settle, so that `close` can wait for them.    | `Cache`, `Batcher`, `SqliteStore`, `CacheWithPendingResources`, and the producer wrappers. |
+
+The pieces compose like this:
+
+- A single producer uses a `TaskSharer` and sends each task at once. It has
+  nothing to batch.
+- A bulk producer uses a `TaskSharer` in front of a `Batcher`. The sharer
+  decides which requests start new tasks. The batcher groups the new tasks
+  into producer calls.
+- `Cache` uses a `Batcher` alone. It does not share Store reads between
+  requests.
+
+Everything except `collapsedTaskCreator` is internal (`@internal`). The
+package does not export it.
+
+## TaskSharer
+
+A `TaskSharer` takes a batch of task requests in one `startOrRideTasks` call.
+Each task request is an input plus an optional `AbortSignal`. For each one,
+the sharer either starts a new task or rides a pending task with the same key.
+
+- `makeKey` derives each input's key. A key of `undefined` means the input
+  never shares work.
+- A task request rides a pending task only if the task started no more than
+  `collapseTasksMs` ago, has not settled, and is not cancelled.
+- The tasks that one call starts go to the owner's `schedule` callback in one
+  call. So a bulk caller's new inputs become one unit of work.
+- Each task has its own signal. It aborts only when every request on the task
+  is cancelled. A request without a signal can never be cancelled, so it keeps
+  the task alive.
+- The sharer counts the requests that ride each task, for diagnostics.
+- `drain` waits until every task has settled, including tasks started while it
+  waits.
+
+The sharer does not queue, batch, or limit work. The `schedule` callback owns
+that.
+
+## collapsedTaskCreator
+
+`collapsedTaskCreator` wraps a function that starts a task and returns a
+promise. A later call with the same arguments gets the pending task's promise
+instead of a new task, but only while the task still runs and only within
+`collapseTasksMs` of its start. It is a mix of memoizing, throttling, and
+promise sharing. It runs on `TaskSharer`, with one task request per call.
+
+## PendingPromisesTracker
+
+An owner tracks each piece of accepted work, then drains the tracker in its
+`close`.
+
+- `track(promise)` tracks a promise until it settles. Tracking never creates
+  an unhandled rejection.
+- `run(start)` tracks before it calls `start`, and turns a synchronous throw
+  into a rejection.
+- `drain()` waits until no tracked promise is pending, including promises
+  tracked while it waits.
+
+The tracker has no closed state. Each owner decides what happens to work that
+arrives after its `close` starts, and in what order it drains its trackers.
+
+## Batcher
 
 `Batcher` collects units of work and sends them to one `dispatch` function in
 batches. It replaces [DataLoader](https://github.com/graphql/dataloader) in
-this library. `Cache` uses it directly for Store reads.
-`BulkProducerScheduler` uses it, together with `TaskSharer`, for bulk producer
-calls. A single producer has nothing to batch, so it uses no batcher.
+this library.
 
-The batcher is internal (`@internal`). The package does not export it.
-
-## Same as DataLoader
+### Same as DataLoader
 
 When no signal aborts and nobody calls `flush`, `close` or `dispatchNow`, a
 `Batcher` behaves like a DataLoader built with `cache: false`:
@@ -34,7 +101,7 @@ When no signal aborts and nobody calls `flush`, `close` or `dispatchNow`, a
 DataLoader's own tests, ported to the batcher. The file header lists the
 tests that it leaves out, and why.
 
-## Added to DataLoader
+### Added to DataLoader
 
 - **Cancellation.** An item can carry an `AbortSignal`. When the signal
   aborts while the item waits in a batch, the item leaves the batch and its
@@ -62,7 +129,7 @@ tests that it leaves out, and why.
   `batchScheduleFn` runs its callbacks from an unrelated context, or when
   `flush` must not run a batch in the closer's context.
 
-## Not in the Batcher
+### Not in the Batcher
 
 - **No cache.** The batcher has no `clear`, `clearAll`, `prime`,
   `cacheKeyFn` or `cacheMap`. `Cache` and `TaskSharer` own caching and work
@@ -70,7 +137,7 @@ tests that it leaves out, and why.
 - **No `name` and no `batch: false`.** Use `maxBatchSize: 1` to send each item
   alone.
 
-## Known differences from DataLoader
+### Known differences from DataLoader
 
 These differences remain on purpose. No test covers them.
 

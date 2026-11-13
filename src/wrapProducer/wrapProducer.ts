@@ -8,7 +8,7 @@
  */
 import type { PublicInterface } from "type-party";
 
-import type Cache from "../Cache.js";
+import type Cache from "../cache/Cache.js";
 import {
   type IdOfResourceType,
   type ResourceTypeName,
@@ -24,7 +24,7 @@ import type {
   Logger,
   PartialReadonlyConsumerRequest,
 } from "../types/index.js";
-import type { BatchOptions } from "../batcher/batcher.js";
+import type { BatchOptions } from "../scheduling/batcher.js";
 import type { OnStore } from "./producerClient.js";
 import { wrapBulkProducer } from "./wrapBulkProducer.js";
 import { wrapSingleProducer } from "./wrapSingleProducer.js";
