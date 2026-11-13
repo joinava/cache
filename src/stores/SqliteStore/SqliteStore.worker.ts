@@ -16,7 +16,7 @@ import type {
   NormalizedParams,
   NormalizedVary,
 } from "../../types/index.js";
-import type { StoreEntryResult } from "../../types/06_Store.js";
+import type { StoreEntryResult } from "../../types/07_Store.js";
 import { validatorsEqual } from "../../utils/normalizedProducerResultResourceHelpers.js";
 import {
   variantMatchesRequest,

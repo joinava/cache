@@ -15,7 +15,7 @@ import type {
   SingleStoreReader,
   StoreGetManyRequest,
   StoreGetManyResult,
-} from "../types/06_Store.js";
+} from "../types/07_Store.js";
 import type { AnyParams, AnyValidators } from "../types/index.js";
 import { components, type Logger } from "../types/index.js";
 export type { JsonOf } from "type-party";

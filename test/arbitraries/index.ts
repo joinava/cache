@@ -6,5 +6,5 @@ export * from "./03_ConsumerRequest.js";
 export * from "./04_ProducerResult.js";
 export * from "./05_Producer.js";
 export * from "./06_Normalization.js";
-export * from "./06_Store.js";
+export * from "./07_Store.js";
 export * from "./utils.js";

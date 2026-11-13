@@ -3,14 +3,14 @@ import { getMany, getOne } from "../../test/fixtures.js";
 import { sortBy, isEqual } from "es-toolkit";
 import { setTimeout as sleep } from "node:timers/promises";
 import { AnyValidatorsArb } from "../../test/arbitraries/02_Validators.js";
-// The change-detection result types are the source of truth in 06_Store.ts per
+// The change-detection result types are the source of truth in 07_Store.ts per
 // the shared contract; import them from there directly so this suite compiles
 // against the contract regardless of whether they're also re-exported from the
 // public barrel.
 import type {
   StoreEntryRelationship,
   StoreEntryResult,
-} from "../types/06_Store.js";
+} from "../types/07_Store.js";
 import fc from "fast-check";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -22,7 +22,7 @@ import {
   NormalizedParamsArb,
   NormalizedProducerDirectivesArb,
 } from "../../test/arbitraries/06_Normalization.js";
-import { StoreEntryInputArb } from "../../test/arbitraries/06_Store.js";
+import { StoreEntryInputArb } from "../../test/arbitraries/07_Store.js";
 import {
   postgresEnvironmentIsConfigured,
   postgresStoreFixture,

@@ -56,5 +56,5 @@ export type {
   StoreEntryResult,
   StoreGetManyRequest,
   StoreGetManyResult,
-} from "./06_Store.js";
-export { components, type ComponentName, type Logger } from "./07_Logger.js";
+} from "./07_Store.js";
+export { components, type ComponentName, type Logger } from "./08_Logger.js";

@@ -2,7 +2,7 @@ import fc from "fast-check";
 import type { CacheSpec } from "../../src/types/00_CacheSpec.js";
 import type { AnyParams } from "../../src/types/01_Params.js";
 import type { AnyValidators } from "../../src/types/02_Validators.js";
-import type { StoreEntryInput } from "../../src/types/06_Store.js";
+import type { StoreEntryInput } from "../../src/types/07_Store.js";
 import { EntryArb } from "./06_Normalization.js";
 
 /**

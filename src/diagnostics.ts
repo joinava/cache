@@ -4,7 +4,7 @@ import type { PickEach } from "type-party";
 import type { AnyParams } from "./types/01_Params.js";
 import type { AnyValidators } from "./types/02_Validators.js";
 import type { Vary } from "./types/04_ProducerResult.js";
-import type { StoreEntryRelationship } from "./types/06_Store.js";
+import type { StoreEntryRelationship } from "./types/07_Store.js";
 import type { CacheSpec } from "./types/index.js";
 import type { CacheLookupResult } from "./utils/cacheHelpers.js";
 

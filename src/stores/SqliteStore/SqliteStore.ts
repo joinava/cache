@@ -22,7 +22,7 @@ import type {
   BulkStoreReader,
   StoreEntryResult,
   StoreGetManyResult,
-} from "../../types/06_Store.js";
+} from "../../types/07_Store.js";
 import type {
   EntryForId,
   Logger,

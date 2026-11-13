@@ -4,7 +4,7 @@ import type {
   StoreEntryResult,
   StoreOperations,
   SingleStoreReader,
-} from "../../types/06_Store.js";
+} from "../../types/07_Store.js";
 import {
   type AnyParams,
   type AnyValidators,
