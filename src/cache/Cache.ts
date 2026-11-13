@@ -20,7 +20,6 @@ import {
   type AnyParams,
   type AnyParamValue,
   type AnyValidators,
-  type CacheOptions,
   type CacheSpec,
   type ConsumerDirectives,
   type Logger,
@@ -52,6 +51,7 @@ import {
   classifyCacheEntries,
   type CacheLookupResult,
 } from "../utils/cacheHelpers.js";
+import type { CacheOptions } from "./CacheOptions.js";
 import { Batcher } from "../scheduling/batcher.js";
 import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
 import {

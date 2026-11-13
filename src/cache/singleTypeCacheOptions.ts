@@ -3,12 +3,12 @@ import { resourceType } from "../resourceTypeClassification.js";
 import type {
   AnyParams,
   AnyValidators,
-  CacheOptions,
   CacheSpec,
   ResourceTypes,
   ResourceTypeSpec,
   Store,
 } from "../types/index.js";
+import type { CacheOptions } from "./CacheOptions.js";
 
 /**
  * The one-entry registry {@link singleTypeCacheOptions} builds. Keyed by an

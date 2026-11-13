@@ -6,6 +6,7 @@ import {
 } from "./utils/normalizedProducerResultResourceHelpers.js";
 
 export { default as Cache, type ReadOptions } from "./cache/Cache.js";
+export type { CacheOptions } from "./cache/CacheOptions.js";
 export {
   singleTypeCacheOptions,
   type SingleTypeCacheOptionsBuilder,

@@ -1,15 +1,15 @@
 import type { InvariantOf } from "type-fest";
 import type { BatchOptions } from "../scheduling/batcher.js";
-import type { CacheSpec } from "./00_CacheSpec.js";
-import type { ResourceTypes, SpecOf } from "./00_ResourceTypes.js";
-import type { AnyParams } from "./01_Params.js";
-import type { AnyValidators } from "./02_Validators.js";
+import type { CacheSpec } from "../types/00_CacheSpec.js";
+import type { ResourceTypes, SpecOf } from "../types/00_ResourceTypes.js";
+import type { AnyParams } from "../types/01_Params.js";
+import type { AnyValidators } from "../types/02_Validators.js";
 import type {
   NormalizeParamName,
   NormalizeParamValue,
-} from "./06_Normalization.js";
-import type { Store } from "./07_Store.js";
-import type { Logger } from "./08_Logger.js";
+} from "../types/06_Normalization.js";
+import type { Store } from "../types/07_Store.js";
+import type { Logger } from "../types/08_Logger.js";
 
 /**
  * A backing store that supports `StoreSupportedTypes` and must cover

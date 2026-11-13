@@ -58,4 +58,3 @@ export type {
   StoreGetManyResult,
 } from "./07_Store.js";
 export { components, type ComponentName, type Logger } from "./08_Logger.js";
-export type { CacheOptions } from "./09_CacheOptions.js";
