@@ -32,6 +32,7 @@ import { wrapSingleProducer } from "./wrapSingleProducer.js";
 export {
   assertResourceTypeCovered,
   coveredTypeSet,
+  getFromGetMany,
   isRequestingCacheBypass,
   notifyStore,
   PRODUCER_ERROR_FALLBACK_WARNING,

@@ -1,4 +1,5 @@
 import {
+  getFromGetMany,
   wrappedReadStartedAt,
   type WrappedReadOptions,
 } from "./wrapProducer.js";
@@ -799,19 +800,7 @@ export function wrapHashedInputProducer(
   };
 
   return {
-    get: async (input: never, callOptions?: HashedReadOptions) => {
-      let stored: Promise<void> | undefined;
-      const [result] = await getMany([input], {
-        ...callOptions,
-        onStore: (promise) => {
-          stored = promise;
-        },
-      });
-
-      if (result instanceof Error) throw result;
-      if (stored !== undefined) callOptions?.onStore?.(stored);
-      return result!;
-    },
+    get: getFromGetMany(getMany),
     getMany,
     close: () => {
       if (closing) return closing;

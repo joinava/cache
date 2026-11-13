@@ -346,6 +346,298 @@ export type ProducerBinding<
   ) => ProducerScheduler<Work, Produced>;
 };
 
+/** A producer invocation's trigger, as one task reports it. */
+type ProducerTrigger = Exclude<CacheProduceMessage["trigger"], "mixed">;
+
+/**
+ * What one request's slot does with its cache lookup. {@link decideSlot}
+ * computes it without side effects, so the direct producer cohort and the
+ * per-slot executor apply one rule.
+ *
+ * - `fail`: the cache read failed and `onCacheReadFailure` is `"throw"`.
+ * - `serve`: a usable entry; no producer work.
+ * - `serve-and-refresh`: serve a stale entry now, and refresh it in the
+ *   background.
+ * - `produce`: wait for the producer. `ifError` is the entry to serve if the
+ *   producer fails.
+ */
+export type SlotDecision<E> =
+  | { readonly action: "fail"; readonly error: Error }
+  | { readonly action: "serve"; readonly entry: E }
+  | { readonly action: "serve-and-refresh"; readonly entry: E }
+  | { readonly action: "produce"; readonly ifError: E | undefined };
+
+/** A decision that needs producer work: a refresh, or a foreground task. */
+type ProducerSlotDecision<E> = Extract<
+  SlotDecision<E>,
+  { action: "serve-and-refresh" | "produce" }
+>;
+
+/** Decides what one slot does with its lookup. See {@link SlotDecision}. */
+export function decideSlot<E>(
+  lookup:
+    | {
+        readonly usable?: E | undefined;
+        readonly usableWhileRevalidate?: E | undefined;
+        readonly usableIfError?: E | undefined;
+      }
+    | Error,
+): SlotDecision<E> {
+  if (lookup instanceof Error) return { action: "fail", error: lookup };
+
+  // We have ready-to-go content from the cache, w/ no refresh required.
+  if (lookup.usable !== undefined) {
+    return { action: "serve", entry: lookup.usable };
+  }
+
+  // If we're here, we either don't have usable content at all, or we
+  // have content that's only usable in the event of an origin error, or
+  // if we make a background request to revalidate it. In any case,
+  // we're gonna need to contact the origin for the result.
+  //
+  // TODO: Support validation requests and invalidation. How to do this
+  // is actually tricker than it seems. There are questions like does
+  // the validation response create a new Entry [potentially leaving the
+  // old entry still there to match on other requests], or should it
+  // update an existing one? [Does this mean entries need some notion of
+  // an id? Who generates that?] What if the existing entry has since
+  // been deleted or aged out of the store? Can the response update more
+  // than one entry? Can it update things about it beyond reseting age
+  // to zero (e.g., changing the producer directives)? Etc. For some
+  // HTTP context, see https://tools.ietf.org/html/rfc7234#section-4.3.4
+  // For invalidation, the idea would be to somehow let request A
+  // passing through the producer trigger the invalidation of other
+  // cached results [a la a POST invalidating a GET in HTTP], but how?
+  // Call a user-provided invalidate function and pass it the just-made
+  // request, the promise for its response, and the entry store, and
+  // can delete entries made invalid by the request that just passed
+  // through?
+  if (lookup.usableWhileRevalidate !== undefined) {
+    return { action: "serve-and-refresh", entry: lookup.usableWhileRevalidate };
+  }
+
+  return { action: "produce", ifError: lookup.usableIfError };
+}
+
+function needsProducer<E>(
+  decision: SlotDecision<E>,
+): decision is ProducerSlotDecision<E> {
+  return (
+    decision.action === "serve-and-refresh" || decision.action === "produce"
+  );
+}
+
+/** The fetch dispositions of a slot that serves an entry it read. */
+type ServedFromCacheDisposition = Extract<
+  CacheFetchDisposition,
+  { vary: unknown }
+>["disposition"];
+
+/**
+ * What one slot settled with: its result, its fetch disposition, and the
+ * write behind the served entry that `onStore` reports. `write` is undefined
+ * for an entry that is already persisted, and for an Error result.
+ */
+type SlotRecord<E> = {
+  readonly result: E | Error;
+  readonly fetch: CacheFetchDisposition;
+  readonly write: Promise<void> | undefined;
+};
+
+/**
+ * The scheduler request for a slot that needs producer work. The trigger
+ * labels the invocation's INITIATING cause; if this request instead rides an
+ * invocation already in flight, that invocation's original trigger stands.
+ * A background refresh gets no signal: it is fire-and-forget work, and the
+ * caller has already been given a (stale) result. So the refresh never
+ * cancels a task that it starts or rides.
+ */
+function producerTask<Request>(
+  item: {
+    readonly request: Request;
+    readonly resourceType: string;
+    readonly bypass: boolean;
+  },
+  decision: ProducerSlotDecision<unknown>,
+  signal: AbortSignal | undefined,
+): {
+  request: { request: Request; resourceType: string; trigger: ProducerTrigger };
+  signal?: AbortSignal | undefined;
+} {
+  const background = decision.action === "serve-and-refresh";
+  return {
+    request: {
+      request: item.request,
+      resourceType: item.resourceType,
+      trigger: item.bypass ? "bypass" : background ? "revalidation" : "miss",
+    },
+    ...(background ? {} : { signal }),
+  };
+}
+
+/**
+ * The key that decides which pending task a request may ride. It covers the
+ * full request (id, normalized params, directives) but not resourceType,
+ * which is derived from the id and so adds nothing. It also omits the
+ * trigger, so a revalidation can ride a pending miss. It names the request's
+ * fields, because the request is the caller's own object (see
+ * ReachesProducerAsIs) and may carry other properties.
+ */
+function producerTaskKey<Params>(
+  request: {
+    readonly id: string;
+    readonly params: Params;
+    readonly directives: unknown;
+  },
+  normalizeParams: (params: Params) => unknown,
+): string | undefined {
+  try {
+    return stableStringify({
+      id: request.id,
+      params: normalizeParams(request.params),
+      directives: request.directives,
+    });
+  } catch {
+    // Failed normalization cannot prove compatibility. Preserve production
+    // with original parameters, but do not share this request's work.
+    return undefined;
+  }
+}
+
+/**
+ * Throws a {@link CacheContractError} unless the producer returned exactly
+ * one defined result per request.
+ *
+ * A producer whose results do not line up 1:1 with the requests it was
+ * given violated its contract, and the positional (result, request)
+ * pairing is no longer trustworthy -- a dropped middle element would
+ * silently pair later results with the wrong requests. So nothing is
+ * stored and the WHOLE invocation fails: this throw rejects it, and
+ * every waiting call rejects with the CacheContractError.
+ *
+ * The `undefined`/`null` test catches a sparse array or an explicit
+ * `undefined` element hiding behind a correct `length`: neither is
+ * ever a legal result -- every `RequestPairedProducerResult` is an
+ * object and every error an `Error` -- so it is unambiguously a
+ * contract violation, not a value a producer meant to return.
+ */
+function assertOneResultPerRequest(
+  results: unknown,
+  requestCount: number,
+): void {
+  const definedCount = Array.isArray(results)
+    ? Array.from(results).filter(
+        (result) => result !== undefined && result !== null,
+      ).length
+    : 0;
+  if (
+    !Array.isArray(results) ||
+    results.length !== requestCount ||
+    definedCount !== requestCount
+  ) {
+    throw new CacheContractError(
+      `producer returned ${String(definedCount)} results for ${String(requestCount)} requests`,
+    );
+  }
+}
+
+/**
+ * Publishes one producer invocation's `produce` message once the producer
+ * settles. `results` is undefined when the producer call rejected, which
+ * fails every request.
+ *
+ * `publish` would discard the message, but not before the argument was
+ * built -- so the test has to be here, not left to the channel. The
+ * argument is O(batch-size), so it is especially worth not building
+ * when nobody is listening. Same reasoning as `Cache.store`.
+ * `collapsedRequestCount` is read here, at settlement, so that riders
+ * that joined while the producer ran count too.
+ */
+function publishProduce(
+  cacheName: string,
+  tasks: readonly DispatchedRequest<{
+    readonly request: { readonly id: string };
+    readonly resourceType: string;
+    readonly trigger: ProducerTrigger;
+  }>[],
+  autoBatched: boolean,
+  startedAt: number,
+  results: readonly unknown[] | undefined,
+): void {
+  if (!cacheProduceChannel.hasSubscribers) return;
+
+  const trigger = tasks[0]!.request.trigger;
+  publishCacheProduce({
+    cache: cacheName,
+    autoBatched,
+    requestCount: tasks.length,
+    queueWaitTotalMs: sumBy(tasks, (task) => task.queueWaitMs),
+    trigger: tasks.every((task) => task.request.trigger === trigger)
+      ? trigger
+      : "mixed",
+    requests: tasks.map(({ request }) => ({
+      resourceType: request.resourceType,
+      resourceId: request.request.id,
+    })),
+    collapsedRequestCount: sumBy(tasks, (task) => task.collapsedRequestCount()),
+    failedRequestCount:
+      results === undefined
+        ? tasks.length
+        : results.filter((result) => result instanceof Error).length,
+    outcome: results === undefined ? "error" : "success",
+    durationMs: performance.now() - startedAt,
+  });
+}
+
+/** A refresh outlives its caller, so nobody awaits its failure. Log it instead. */
+function logRefreshFailure(
+  logger: Logger,
+  refresh: { promise: Promise<unknown> },
+): void {
+  void refresh.promise.catch((error: unknown) =>
+    logger(
+      "wrap-producer",
+      "warn",
+      "error asynchronously requesting refreshed content from producer",
+      error,
+    ),
+  );
+}
+
+/**
+ * Builds a client's `get` from its `getMany`. `get` rejects with its one
+ * slot's Error, and then never calls `onStore`: a caller that saw the call
+ * fail has no write to observe.
+ */
+export function getFromGetMany<
+  Request,
+  Result,
+  Options extends { onStore?: OnStore | undefined },
+>(
+  getMany: (
+    requests: readonly Request[],
+    options?: Options,
+  ) => Promise<readonly (Result | Error)[]>,
+): (request: Request, options?: Options) => Promise<Result> {
+  return async (request, options) => {
+    let stored: Promise<void> | undefined;
+    // SAFETY: only `onStore` is replaced. Without `options`, the object holds
+    // only `onStore`, which is a valid `Options` because every field of both
+    // clients' read options is optional.
+    const forwarded = {
+      ...options,
+      onStore: (promise: Promise<void>) => {
+        stored = promise;
+      },
+    } as Options;
+    const [result] = await getMany([request], forwarded);
+
+    if (result instanceof Error) throw result;
+    if (stored !== undefined) options?.onStore?.(stored);
+    return result!;
+  };
+}
+
 /**
  * Builds the client that `wrapProducer` returns, for the producer that
  * `binding` describes. See `wrapProducer` for the client's behavior.
@@ -386,7 +678,7 @@ export function createProducerClient<
   type Work = {
     request: Request;
     resourceType: string;
-    trigger: Exclude<CacheProduceMessage["trigger"], "mixed">;
+    trigger: ProducerTrigger;
   };
 
   // In-flight work that close() drains, in this order: accepted calls, their
@@ -475,100 +767,24 @@ export function createProducerClient<
   const scheduler = makeScheduler<Work, Produced>({
     logger: options.logger,
     collapseTasksMs: collapseOverlappingRequestsTime * 1000,
-    // The key covers the full request (id, normalized params, directives) but
-    // not resourceType, which is derived from the id and so adds nothing. It
-    // also omits the trigger, so a revalidation can ride a pending miss. It
-    // names the request's fields, because the request is the caller's own
-    // object (see ReachesProducerAsIs) and may carry other properties.
-    makeKey: ({ request }) => {
-      try {
-        return stableStringify({
-          id: request.id,
-          params: cache.normalizeParams(request.params),
-          directives: request.directives,
-        });
-      } catch {
-        // Failed normalization cannot prove compatibility. Preserve production
-        // with original parameters, but do not share this request's work.
-        return undefined;
-      }
-    },
+    makeKey: ({ request }) =>
+      producerTaskKey(request, (params) => cache.normalizeParams(params)),
     dispatch: async (tasks, { autoBatched }) => {
       const startedAt = performance.now();
       let results: readonly (Result | Error)[];
 
-      // Publishes this invocation's one `produce` message once the producer
-      // settles. `results` is undefined when the producer call rejected,
-      // which fails every request.
-      //
-      // `publish` would discard the message, but not before the argument was
-      // built -- so the test has to be here, not left to the channel. The
-      // argument is O(batch-size), so it is especially worth not building
-      // when nobody is listening. Same reasoning as `Cache.store`.
-      // `collapsedRequestCount` is read here, at settlement, so that riders
-      // that joined while the producer ran count too.
-      const publishProduce = (results: readonly unknown[] | undefined) => {
-        if (!cacheProduceChannel.hasSubscribers) return;
-
-        const trigger = tasks[0]!.request.trigger;
-        publishCacheProduce({
-          cache: cache.name,
-          autoBatched,
-          requestCount: tasks.length,
-          queueWaitTotalMs: sumBy(tasks, (task) => task.queueWaitMs),
-          trigger: tasks.every((task) => task.request.trigger === trigger)
-            ? trigger
-            : "mixed",
-          requests: tasks.map(({ request }) => ({
-            resourceType: request.resourceType,
-            resourceId: request.request.id,
-          })),
-          collapsedRequestCount: sumBy(tasks, (task) =>
-            task.collapsedRequestCount(),
-          ),
-          failedRequestCount:
-            results === undefined
-              ? tasks.length
-              : results.filter((result) => result instanceof Error).length,
-          outcome: results === undefined ? "error" : "success",
-          durationMs: performance.now() - startedAt,
-        });
-      };
+      const publish = (results: readonly unknown[] | undefined) =>
+        publishProduce(cache.name, tasks, autoBatched, startedAt, results);
 
       try {
         results = await call(tasks.map(({ request }) => request.request));
 
-        // A producer whose results do not line up 1:1 with the requests it was
-        // given violated its contract, and the positional (result, request)
-        // pairing is no longer trustworthy -- a dropped middle element would
-        // silently pair later results with the wrong requests. So nothing is
-        // stored and the WHOLE invocation fails: this throw rejects it, and
-        // every waiting call rejects with the CacheContractError.
-        //
-        // The `undefined`/`null` test catches a sparse array or an explicit
-        // `undefined` element hiding behind a correct `length`: neither is
-        // ever a legal result -- every `RequestPairedProducerResult` is an
-        // object and every error an `Error` -- so it is unambiguously a
-        // contract violation, not a value a producer meant to return.
-        const definedCount = Array.isArray(results)
-          ? Array.from(results).filter(
-              (result) => result !== undefined && result !== null,
-            ).length
-          : 0;
-        if (
-          !Array.isArray(results) ||
-          results.length !== tasks.length ||
-          definedCount !== tasks.length
-        ) {
-          throw new CacheContractError(
-            `producer returned ${String(definedCount)} results for ${String(tasks.length)} requests`,
-          );
-        }
+        assertOneResultPerRequest(results, tasks.length);
       } catch (error) {
         // A rejected producer call fails every request in the invocation.
         // (A bulk producer should return Error elements for per-request
         // failures instead.)
-        publishProduce(undefined);
+        publish(undefined);
 
         // A by-id-type producer routes ids itself and may throw a special
         // UnroutableIdError if the id can't be classified to a covered type.
@@ -615,7 +831,7 @@ export function createProducerClient<
 
       // Published after normalization, so that a slot that fails to
       // normalize counts as failed.
-      publishProduce(prepared);
+      publish(prepared);
 
       // Extract all resources to store (main resources + supplemental
       // resources), but NOT requests that failed.
@@ -632,18 +848,6 @@ export function createProducerClient<
 
   // Undefined for a scheduler that sends every task at once.
   const startDirect = scheduler.startOrRideDirect?.bind(scheduler);
-
-  /** A refresh outlives its caller, so nobody awaits its failure. Log it instead. */
-  const logRefreshFailure = (refresh: { promise: Promise<unknown> }) => {
-    void refresh.promise.catch((error: unknown) =>
-      logger(
-        "wrap-producer",
-        "warn",
-        "error asynchronously requesting refreshed content from producer",
-        error,
-      ),
-    );
-  };
 
   const run = async (
     requests: readonly PartialReadonlyConsumerRequest<
@@ -677,19 +881,29 @@ export function createProducerClient<
         bypass,
       };
     });
-    // Every abort-caused rejection settles each logical request as `aborted`.
-    if (signal?.aborted) {
-      items.forEach((item) =>
+    // Whether each slot's request rode a pending task. Only a slot that waits
+    // for the producer sets it. It is kept outside the slot's record because
+    // an aborted slot returns no record, but its `aborted` message still
+    // reports it.
+    const rodeBySlot = items.map(() => false);
+
+    // Every abort-caused rejection settles each logical request as `aborted`,
+    // whether the call was aborted before its reads or while its slots ran.
+    const publishAborted = () => {
+      items.forEach((item, index) =>
         publishCacheFetch({
           cache: cache.name,
           resourceType: item.resourceType,
           resourceId: item.request.id,
-          collapsed: false,
+          collapsed: rodeBySlot[index]!,
           disposition: "aborted",
           directivesImpliedBypass: item.bypass,
           durationMs: performance.now() - startedAt,
         }),
       );
+    };
+    if (signal?.aborted) {
+      publishAborted();
       signal.throwIfAborted();
     }
 
@@ -736,73 +950,43 @@ export function createProducerClient<
       }
     });
 
-    const stores: Promise<void>[][] = items.map(() => []);
-    const fetchEvents: (
-      | (CacheFetchDisposition & { collapsed: boolean })
-      | undefined
-    )[] = items.map(() => undefined);
+    // Each slot's decision. A lookup that rejects (an abort, or a contract
+    // violation) rejects its decision too.
+    const decisions = lookups.map(async (lookup) => decideSlot(await lookup));
 
     type TaskOutcome = ReturnType<typeof scheduler.startOrRideTasks>[number];
-    const toTaskRequest = (
-      item: (typeof items)[number],
-      lookup: Lookup,
-      background: boolean,
-    ) => ({
-      request: {
-        request: item.request,
-        resourceType: item.resourceType,
-        // The trigger labels the invocation's INITIATING cause; if this call
-        // instead rides an invocation already in flight, that invocation's
-        // original trigger stands.
-        trigger: item.bypass
-          ? ("bypass" as const)
-          : lookup.usableWhileRevalidate
-            ? ("revalidation" as const)
-            : ("miss" as const),
-      },
-      // No signal for a background refresh: it is fire-and-forget work, and
-      // the caller has already been given a (stale) result. So the refresh
-      // never cancels a task that it starts or rides.
-      ...(background ? {} : { signal }),
-    });
 
     // A direct call to a batching scheduler sends its misses, bypass requests, and
     // stale-while-revalidate refreshes to the producer together, as one
-    // invocation. allSettled waits for every lookup, so one failed lookup does
+    // invocation. allSettled waits for every decision, so one failed lookup does
     // not drop the others from the cohort. The map holds only foreground
     // outcomes. Each foreground slot reads its own entry, and refreshes are
     // logged here because no slot awaits them.
     const directOutcomes =
       startDirect !== undefined && batching?.producer === false
-        ? Promise.allSettled(lookups).then((settled) => {
+        ? Promise.allSettled(decisions).then((settled) => {
             const cohort = items.flatMap((item, index) => {
-              const lookup = settled[index]!;
-              if (
-                lookup.status === "rejected" ||
-                lookup.value instanceof Error ||
-                lookup.value.usable
-              ) {
-                return [];
-              }
-
-              const background =
-                lookup.value.usableWhileRevalidate !== undefined;
-
-              return [{ item, lookup: lookup.value, background }];
+              const decision = settled[index]!;
+              return decision.status === "fulfilled" &&
+                needsProducer(decision.value)
+                ? [{ item, decision: decision.value }]
+                : [];
             });
 
             const outcomes = startDirect(
-              cohort.map(({ item, lookup, background }) =>
-                toTaskRequest(item, lookup, background),
+              cohort.map(({ item, decision }) =>
+                producerTask(item, decision, signal),
               ),
             );
 
             return new Map(
-              cohort.flatMap(({ item, background }, index) => {
+              cohort.flatMap(({ item, decision }, index) => {
                 const outcome = outcomes[index]!;
-                if (!background) return [[item, outcome] as const];
+                if (decision.action === "produce") {
+                  return [[item, outcome] as const];
+                }
 
-                logRefreshFailure(outcome);
+                logRefreshFailure(logger, outcome);
                 return [];
               }),
             );
@@ -813,87 +997,59 @@ export function createProducerClient<
     // function. A call whose slots are all refreshes never awaits it.
     void directOutcomes?.catch(() => {});
 
-    const slotPipelines = items.map(
-      async (item, index): Promise<ResultEntry | Error> => {
-        let rode = false;
-        const publish = (disposition: CacheFetchDisposition) => {
-          fetchEvents[index] = { collapsed: rode, ...disposition };
-        };
+    // Carries out one slot's decision: starts or rides producer work, races it
+    // against the caller's signal, and applies the if-error fallback. It
+    // returns what the slot served, its fetch disposition, and the write that
+    // `onStore` reports, so that no branch has to record them itself.
+    const executeSlot = async (
+      item: (typeof items)[number],
+      index: number,
+      decision: SlotDecision<ResultEntry>,
+    ): Promise<SlotRecord<ResultEntry>> => {
+      const serve = (
+        entry: ResultEntry,
+        disposition: ServedFromCacheDisposition,
+      ): SlotRecord<ResultEntry> => ({
+        result: entry,
+        fetch: { disposition, vary: entry.vary },
+        write: cache.writeFor(entry),
+      });
 
-        const observeEntry = (entry: ResultEntry) => {
-          const write = cache.writeFor(entry);
-          stores[index] = write === undefined ? [] : [write];
-        };
-
-        try {
-          const lookup = await lookups[index]!;
-          if (lookup instanceof Error) {
-            publish({
+      switch (decision.action) {
+        case "fail": {
+          return {
+            result: decision.error,
+            fetch: {
               disposition: "cache-read-error",
               directivesImpliedBypass: false,
-            });
-            return lookup;
+            },
+            write: undefined,
+          };
+        }
+        case "serve": {
+          return serve(decision.entry, "served-from-cache");
+        }
+        case "serve-and-refresh": {
+          // The refresh obligation survives both the stale return and later joiner cancellation.
+          // The direct path starts or rides this refresh through directOutcomes,
+          // so skip it here.
+          if (directOutcomes === undefined) {
+            const [refresh] = scheduler.startOrRideTasks([
+              producerTask(item, decision, signal),
+            ]);
+            logRefreshFailure(logger, refresh!);
           }
 
-          signal?.throwIfAborted();
-          // We have ready-to-go content from the cache, w/ no refresh required.
-          if (lookup.usable) {
-            observeEntry(lookup.usable);
-            publish({
-              disposition: "served-from-cache",
-              vary: lookup.usable.vary,
-            });
-            return lookup.usable;
-          }
-
-          // If we're here, we either don't have usable content at all, or we
-          // have content that's only usable in the event of an origin error, or
-          // if we make a background request to revalidate it. In any case,
-          // we're gonna need to contact the origin for the result.
-          //
-          // TODO: Support validation requests and invalidation. How to do this
-          // is actually tricker than it seems. There are questions like does
-          // the validation response create a new Entry [potentially leaving the
-          // old entry still there to match on other requests], or should it
-          // update an existing one? [Does this mean entries need some notion of
-          // an id? Who generates that?] What if the existing entry has since
-          // been deleted or aged out of the store? Can the response update more
-          // than one entry? Can it update things about it beyond reseting age
-          // to zero (e.g., changing the producer directives)? Etc. For some
-          // HTTP context, see https://tools.ietf.org/html/rfc7234#section-4.3.4
-          // For invalidation, the idea would be to somehow let request A
-          // passing through the producer trigger the invalidation of other
-          // cached results [a la a POST invalidating a GET in HTTP], but how?
-          // Call a user-provided invalidate function and pass it the just-made
-          // request, the promise for its response, and the entry store, and
-          // can delete entries made invalid by the request that just passed
-          // through?
-          if (lookup.usableWhileRevalidate) {
-            // The refresh obligation survives both the stale return and later joiner cancellation.
-            // The direct path starts or rides this refresh through directOutcomes,
-            // so skip it here.
-            if (directOutcomes === undefined) {
-              const [refresh] = scheduler.startOrRideTasks([
-                toTaskRequest(item, lookup, true),
-              ]);
-              logRefreshFailure(refresh!);
-            }
-
-            observeEntry(lookup.usableWhileRevalidate);
-            publish({
-              disposition: "served-stale-while-revalidating",
-              vary: lookup.usableWhileRevalidate.vary,
-            });
-            return lookup.usableWhileRevalidate;
-          }
-
+          return serve(decision.entry, "served-stale-while-revalidating");
+        }
+        case "produce": {
           const outcome: TaskOutcome =
             directOutcomes !== undefined
               ? await directOutcomes.then((outcomes) => outcomes.get(item)!)
               : scheduler.startOrRideTasks([
-                  toTaskRequest(item, lookup, false),
+                  producerTask(item, decision, signal),
                 ])[0]!;
-          rode = outcome.rode;
+          rodeBySlot[index] = outcome.rode;
 
           // The shared producer work doesn't receive the signal directly (since
           // it may be shared with other callers who haven't aborted). However,
@@ -902,12 +1058,14 @@ export function createProducerClient<
           // running, and its result is still stored.
           try {
             const produced = await raceWithSignal(outcome.promise, signal);
-            stores[index] = [produced.stored];
-            publish({
-              disposition: "served-from-producer",
-              directivesImpliedBypass: item.bypass,
-            });
-            return produced.entry;
+            return {
+              result: produced.entry,
+              fetch: {
+                disposition: "served-from-producer",
+                directivesImpliedBypass: item.bypass,
+              },
+              write: produced.stored,
+            };
           } catch (error) {
             // If the error was the signal being aborted, propagate that; don't
             // treat it as a producer failure (or fall back to a cached
@@ -915,76 +1073,63 @@ export function createProducerClient<
             signal?.throwIfAborted();
             if (error instanceof CacheContractError) throw error;
 
-            if (lookup.usableIfError) {
+            if (decision.ifError) {
               logger("wrap-producer", "warn", PRODUCER_ERROR_FALLBACK_WARNING, {
                 error,
-                entry: lookup.usableIfError,
+                entry: decision.ifError,
               });
-              observeEntry(lookup.usableIfError);
-              publish({
-                disposition: "served-stale-after-error",
-                vary: lookup.usableIfError.vary,
-              });
-              return lookup.usableIfError;
+              return serve(decision.ifError, "served-stale-after-error");
             }
 
-            publish({
-              disposition: "producer-error",
-              directivesImpliedBypass: item.bypass,
-            });
-            return asError(error);
+            return {
+              result: asError(error),
+              fetch: {
+                disposition: "producer-error",
+                directivesImpliedBypass: item.bypass,
+              },
+              write: undefined,
+            };
           }
-        } catch (error) {
-          if (signal?.aborted) {
-            publish({
-              disposition: "aborted",
-              directivesImpliedBypass: item.bypass,
-            });
-            signal.throwIfAborted();
-          }
-
-          throw error;
         }
-      },
-    );
+        default: {
+          return assertUnreachable(decision);
+        }
+      }
+    };
+
+    const slotPipelines = items.map(async (item, index) => {
+      const decision = await decisions[index]!;
+      signal?.throwIfAborted();
+      return executeSlot(item, index, decision);
+    });
 
     slotPipelines.forEach((pipeline) => {
       void pipelines.track(pipeline);
     });
 
-    const results = await Promise.all(slotPipelines).catch((error: unknown) => {
-      if (signal?.aborted) {
-        items.forEach((item, index) =>
-          publishCacheFetch({
-            cache: cache.name,
-            resourceType: item.resourceType,
-            resourceId: item.request.id,
-            collapsed: fetchEvents[index]?.collapsed ?? false,
-            disposition: "aborted",
-            directivesImpliedBypass: item.bypass,
-            durationMs: performance.now() - startedAt,
-          }),
-        );
-      }
+    const records = await Promise.all(slotPipelines).catch((error: unknown) => {
+      if (signal?.aborted) publishAborted();
       throw error;
     });
     signal?.throwIfAborted();
 
-    items.forEach((item, index) => {
-      const event = fetchEvents[index];
-      if (event !== undefined) {
-        publishCacheFetch({
-          cache: cache.name,
-          resourceType: item.resourceType,
-          resourceId: item.request.id,
-          ...event,
-          durationMs: performance.now() - startedAt,
-        });
-      }
+    records.forEach(({ fetch }, index) => {
+      const item = items[index]!;
+      publishCacheFetch({
+        cache: cache.name,
+        resourceType: item.resourceType,
+        resourceId: item.request.id,
+        collapsed: rodeBySlot[index]!,
+        ...fetch,
+        durationMs: performance.now() - startedAt,
+      });
     });
 
-    notifyStore(stores.flat(), callOptions.onStore);
-    return results;
+    notifyStore(
+      records.flatMap(({ write }) => (write === undefined ? [] : [write])),
+      callOptions.onStore,
+    );
+    return records.map(({ result }) => result);
   };
 
   const getMany = (
@@ -1021,19 +1166,7 @@ export function createProducerClient<
   // reads narrow by id, and each producer's request-paired result is stamped
   // with its own request's id.
   return {
-    get: async (request, callOptions) => {
-      let stored: Promise<void> | undefined;
-      const [result] = await getMany([request], {
-        ...callOptions,
-        onStore: (promise) => {
-          stored = promise;
-        },
-      });
-
-      if (result instanceof Error) throw result;
-      if (stored !== undefined) callOptions?.onStore?.(stored);
-      return result!;
-    },
+    get: getFromGetMany(getMany),
     getMany,
     close: () => {
       if (closing) return closing;

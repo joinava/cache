@@ -921,6 +921,61 @@ describe("diagnostics channels (§6.5)", () => {
       }
     });
 
+    it("aborted while riding another caller's task: the fetch reports collapsed: true", async () => {
+      const { name, cache } = makeHarness("fetch-abort-rider");
+      const capture = captureChannels(name);
+      const release = Promise.withResolvers<void>();
+      const producer = mock.fn(async () => {
+        await release.promise;
+        return { content: "shared", directives: freshFor100 };
+      });
+      const getSite = wrapProducer({
+        cache,
+        produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+      });
+      const controller = new AbortController();
+      try {
+        const starter = getSite.get({ id: "site:a" });
+        await waitUntil(
+          () => producer.mock.callCount() === 1,
+          "producer invoked",
+        );
+        const rider = getSite.get(
+          { id: "site:a" },
+          { signal: controller.signal },
+        );
+        // The rider must finish its cache read and join the task before the
+        // abort, or it would abort during the read and never ride. It joins
+        // in the same microtask chain that follows its read message, and
+        // waitUntil polls on a later timer.
+        await waitUntil(() => capture.read.length === 2, "rider's read");
+        controller.abort(new Error("rider-gone"));
+        await assert.rejects(rider, { message: "rider-gone" });
+
+        await waitUntil(
+          () => capture.fetch.length === 1,
+          "aborted fetch message",
+          500,
+        );
+        expectProducerPathFetch(capture.fetch[0], {
+          cache: name,
+          resourceType: "site_day",
+          resourceId: "site:a",
+          disposition: "aborted",
+          directivesImpliedBypass: false,
+          collapsed: true,
+        });
+
+        release.resolve();
+        expect((await starter).content).to.equal("shared");
+        expect(producer.mock.callCount()).to.equal(1);
+      } finally {
+        release.resolve();
+        capture.stop();
+        await cache.close();
+      }
+    });
+
     it("an abort landing during the cache read settles as 'aborted' (emitted nothing in 1.6.0); the producer is never contacted", async () => {
       const { name, store, cache } = makeHarness("fetch-abort-during-read");
       const { promise: storeRead, resolve: releaseStoreRead } =
