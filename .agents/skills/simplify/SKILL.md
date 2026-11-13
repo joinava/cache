@@ -28,11 +28,13 @@ design.
 
 ## Phase 0 — Gather the diff
 
-Run `git diff @{upstream}...HEAD` (or `git diff main...HEAD` / `git diff HEAD~1`
-if there's no upstream) to get the unified diff under review. If there are
-uncommitted changes, or the range diff is empty, also run `git diff HEAD` and
-include the working-tree changes in scope — the review often runs before the
-commit. If a PR number, branch name, or file path was passed as an argument,
+Run `git diff $(git merge-base origin/main HEAD)` to get the unified diff
+under review. It holds the branch's commits and its uncommitted changes to
+tracked files, because the review often runs before the commit. Do not diff
+against `@{upstream}`: a pushed branch tracks its own remote copy, so that diff
+is empty. Also add each untracked file the task created
+(`git ls-files --others --exclude-standard`) to the scope as a whole-file
+addition. Without that step, a new module skips the review. If a PR number, branch name, or file path was passed as an argument,
 review that target instead. Treat this diff as the review scope for every
 angle except Structure. The Structure angle reviews the whole files, classes,
 and folders that the diff touches.
@@ -188,7 +190,9 @@ Review each file, class, and folder that the diff touches as a whole. Check:
 - **Repeated idioms.** Grep the repository, not only the diff, for the idiom
   the change uses: a set of promises plus a drain, a closed-state check, an
   adapter shim. At 3 or more copies, propose one named abstraction and
-  migrate every copy. After you add an abstraction, grep for hand-written
+  migrate each copy that must evolve with the others. Leave a copy that only
+  looks the same, as "Duplicate Coincidentally-Identical Code" in the
+  `module-and-api-design` skill explains. After you add an abstraction, grep for hand-written
   copies of the pattern that remain.
 - **Placement.**
   - Put a type or an error next to its only owner or thrower.
@@ -313,8 +317,11 @@ abstraction exposes hand-written copies. So one pass is not enough.
 1. Run Phases 1 and 2 again on the result. Scope the next pass to the code
    that the last pass changed, plus the modules it touched.
 2. Stop when a pass yields no fix that you apply, or after 3 passes.
-3. Write each improvement that you defer as a `TODO` at the code it concerns.
-   A deferral that lives only in chat is lost at the next session.
+3. Write each improvement that you defer as a `TODO` at the code it concerns,
+   when that code is inside the task's scope. A deferral that lives only in
+   chat is lost at the next session. A proposal that crosses scope goes only
+   in the summary: adding a `TODO` edits that module too, so it waits for the
+   user's approval like the fix itself.
 
 Finish with a summary that includes:
 
