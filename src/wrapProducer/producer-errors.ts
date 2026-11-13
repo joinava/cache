@@ -11,7 +11,7 @@
  * @module
  */
 import { AmbiguousResourceTypeError, UnclassifiableIdError } from "../Cache.js";
-import { CacheContractError, assertUnreachable } from "./utils.js";
+import { CacheContractError, assertUnreachable } from "../utils/utils.js";
 
 /**
  * Thrown by the producer wrappers (not by Cache) when a request's id

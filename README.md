@@ -268,7 +268,7 @@ A bare `produceMany` receives the **full** set of requests to produce — mixed 
 
 A type with no producer in any client is legal and normal: its entries are written as other producers' supplemental resources (or direct `store()` calls) and read via `Cache.get` — the serve-if-present contract. Partial coverage also makes capability-scoped and split clients honest: a second `wrapProducer` call can cover a different subset of the same cache.
 
-Both per-resource-type helpers live in [`producerByIdType.ts`](./src/utils/producerByIdType.ts) and [`bulkProducerByIdType.ts`](./src/utils/bulkProducerByIdType.ts) — they need no client at runtime, and no `Cache`. The errors the producer factories raise are in [`producer-errors.ts`](./src/utils/producer-errors.ts).
+Both per-resource-type helpers live in [`producerByIdType.ts`](./src/wrapProducer/producerByIdType.ts) and [`bulkProducerByIdType.ts`](./src/wrapProducer/bulkProducerByIdType.ts) — they need no client at runtime, and no `Cache`. The errors the producer factories raise are in [`producer-errors.ts`](./src/utils/producer-errors.ts).
 
 Compatible requests share pending production for up to three seconds by default. `collapseOverlappingRequestsTime` changes that joining age.
 Completed production has no additional sharing window. Compatibility uses the ID, normalized parameters, and directives.
@@ -299,7 +299,7 @@ const extract = wrapHashedInputProducer({
 });
 ```
 
-For several resource types, [`hashedInputProducerByInputType`](./src/utils/hashedInputProducerByInputType.ts) builds a **hashed-input producer** — one `.when` per covered type, dispatching on the input. It takes **no cache**: a hashed-input producer is a value in its own right, buildable (and reusable) before any cache exists, and checked against a cache's registry only where the two are wired together.
+For several resource types, [`hashedInputProducerByInputType`](./src/wrapProducer/hashedInputProducerByInputType.ts) builds a **hashed-input producer** — one `.when` per covered type, dispatching on the input. It takes **no cache**: a hashed-input producer is a value in its own right, buildable (and reusable) before any cache exists, and checked against a cache's registry only where the two are wired together.
 
 ```ts
 const hashedInputProducer = hashedInputProducerByInputType<{

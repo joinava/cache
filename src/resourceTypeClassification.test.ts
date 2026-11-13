@@ -32,7 +32,7 @@ import {
   type ResourceTypes,
   type SpecOf,
 } from "./index.js";
-import wrapProducer from "./utils/wrapProducer.js";
+import wrapProducer from "./wrapProducer/wrapProducer.js";
 
 /**
  * Acceptance tests for the §6.1/§6.2 classification contract: every id a

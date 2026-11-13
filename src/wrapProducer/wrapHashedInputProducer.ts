@@ -34,7 +34,7 @@ import {
   type BulkProducersFor,
 } from "./bulkProducerByIdType.js";
 import { producerByIdType, type ProducersFor } from "./producerByIdType.js";
-import { asError, CacheContractError } from "./utils.js";
+import { asError, CacheContractError } from "../utils/utils.js";
 import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
 
 /**

@@ -4,7 +4,7 @@ import pg from "pg";
 import { mock } from "node:test";
 import Cache from "../src/Cache.js";
 import type { BatchOptions } from "../src/batcher/batcher.js";
-import wrapProducer from "../src/utils/wrapProducer.js";
+import wrapProducer from "../src/wrapProducer/wrapProducer.js";
 
 import fc from "fast-check";
 import type { JSON } from "type-party";

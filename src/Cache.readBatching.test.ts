@@ -21,7 +21,7 @@ import {
 } from "../test/v2AcceptanceHelpers.js";
 import Cache, { singleTypeCacheOptions } from "./Cache.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
-import wrapProducer from "./utils/wrapProducer.js";
+import wrapProducer from "./wrapProducer/wrapProducer.js";
 
 /**
  * The read-batching contract: for a Store with `getMany`, the `get()` calls of

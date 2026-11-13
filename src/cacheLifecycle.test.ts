@@ -12,7 +12,7 @@ import {
 import { freshFor100 } from "../test/v2AcceptanceHelpers.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 import { CacheContractError } from "./utils/utils.js";
-import wrapProducer from "./utils/wrapProducer.js";
+import wrapProducer from "./wrapProducer/wrapProducer.js";
 
 describe("close() drains accepted work", suiteOptions, () => {
   it("drains a sibling read that starts production after the public bulk call rejects", async (t) => {

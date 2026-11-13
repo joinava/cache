@@ -23,7 +23,7 @@ import {
   type ProducerScheduler,
   type ProducerSchedulerOptions,
 } from "./producerClient.js";
-import { asError, assertResultCount } from "./utils.js";
+import { asError, assertResultCount } from "../utils/utils.js";
 import type {
   WrappedProducerClient,
   ProducerClientOptions,

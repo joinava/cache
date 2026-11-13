@@ -25,7 +25,7 @@ import {
   UnroutableIdError,
   type UnroutableIdReason,
 } from "./producer-errors.js";
-import { assertUnreachable } from "./utils.js";
+import { assertUnreachable } from "../utils/utils.js";
 import {
   coveredTypes,
   type AnyParams,

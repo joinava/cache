@@ -16,7 +16,7 @@ import {
   type SpecOf,
 } from "./index.js";
 import type { CacheSpec } from "./types/00_CacheSpec.js";
-import wrapProducer from "./utils/wrapProducer.js";
+import wrapProducer from "./wrapProducer/wrapProducer.js";
 
 /**
  * Sample domain for per-id-typing tests:

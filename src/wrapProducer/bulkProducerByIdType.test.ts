@@ -14,7 +14,7 @@ import {
   type ResourceTypes,
 } from "../index.js";
 import { bulkProducerByIdType } from "./bulkProducerByIdType.js";
-import { CacheContractError } from "./utils.js";
+import { CacheContractError } from "../utils/utils.js";
 import wrapProducer from "./wrapProducer.js";
 
 /**

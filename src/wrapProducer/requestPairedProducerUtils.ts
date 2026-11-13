@@ -11,7 +11,7 @@ import type {
   Vary,
   PartialReadonlyConsumerRequest,
 } from "../types/index.js";
-import { normalizeProducerResultResource } from "./normalization.js";
+import { normalizeProducerResultResource } from "../utils/normalization.js";
 
 /**
  * Replace undefined params + directives w/ empty objects

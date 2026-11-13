@@ -45,9 +45,12 @@ import type {
   RequestPairedProducerResult,
 } from "../types/index.js";
 import type { DispatchInfo } from "../batcher/batcher.js";
-import { normalizeParams, normalizeVary } from "./normalization.js";
+import { normalizeParams, normalizeVary } from "../utils/normalization.js";
 import { PendingResources } from "./pendingResources.js";
-import { classifyCacheEntries, mergeCacheLookups } from "./cacheHelpers.js";
+import {
+  classifyCacheEntries,
+  mergeCacheLookups,
+} from "../utils/cacheHelpers.js";
 import {
   completeRequest,
   primaryNormalizedResultResourceFromRequestPairedProducerResult,
@@ -58,10 +61,10 @@ import {
   CacheContractError,
   defaultLoggersByComponent,
   raceWithSignal,
-} from "./utils.js";
+} from "../utils/utils.js";
 import type { SpecForId } from "../types/00_CacheSpec.js";
 import { coveredTypes } from "../types/index.js";
-import type { CacheLookupResult } from "./cacheHelpers.js";
+import type { CacheLookupResult } from "../utils/cacheHelpers.js";
 import type {
   WrappedProducerClient,
   WrappedReadOptions,

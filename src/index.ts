@@ -48,7 +48,7 @@ export {
   NoProducerForResourceTypeError,
   UnroutableIdError,
   type UnroutableIdReason,
-} from "./utils/producer-errors.js";
+} from "./wrapProducer/producer-errors.js";
 export {
   bulkHashedInputProducerByInputType,
   hashedInputProducerByInputType,
@@ -56,27 +56,27 @@ export {
   type HashedInputProducer,
   type HashedInputProducerBuilder,
   type HashedInputVariant,
-} from "./utils/hashedInputProducerByInputType.js";
+} from "./wrapProducer/hashedInputProducerByInputType.js";
 export {
   producerByIdType,
   type ProducersFor,
-} from "./utils/producerByIdType.js";
+} from "./wrapProducer/producerByIdType.js";
 export {
   bulkProducerByIdType,
   type BulkProducersFor,
-} from "./utils/bulkProducerByIdType.js";
+} from "./wrapProducer/bulkProducerByIdType.js";
 
 export {
   MintedIdResourceTypeMismatchError,
   wrapHashedInputProducer,
   type HashedInputProducerResult,
-} from "./utils/wrapHashedInputProducer.js";
+} from "./wrapProducer/wrapHashedInputProducer.js";
 export {
   default as wrapProducer,
   type WrappedProducerClient,
   type WrappedReadOptions,
   type WrapProducerOptions,
-} from "./utils/wrapProducer.js";
+} from "./wrapProducer/wrapProducer.js";
 
 // Diagnostics channels
 export {
@@ -110,4 +110,4 @@ export {
 } from "./utils/varyHelpers.js";
 export type { VariantKey, VaryKeys } from "./utils/varyHelpers.js";
 
-export type { OnStore } from "./utils/wrapProducer.js";
+export type { OnStore } from "./wrapProducer/wrapProducer.js";

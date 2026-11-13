@@ -25,7 +25,7 @@ import {
   type SpecOf,
 } from "../index.js";
 import type { NormalizedProducerResult } from "../types/06_Normalization.js";
-import { throwIfAnyError, type mapTuple } from "./utils.js";
+import { throwIfAnyError, type mapTuple } from "../utils/utils.js";
 
 // The wrapper takes ONE producer function over a required registry, and a bare
 // function covers the whole registry. This suite's behavior is

@@ -8,9 +8,9 @@ import type {
   ProducerResultResource,
   Vary,
 } from "../types/index.js";
-import { normalizeProducerResultResource } from "./normalization.js";
-import { calculateStoreFor } from "./normalizedProducerResultResourceHelpers.js";
-import { variantMatchesRequest } from "./varyHelpers.js";
+import { normalizeProducerResultResource } from "../utils/normalization.js";
+import { calculateStoreFor } from "../utils/normalizedProducerResultResourceHelpers.js";
+import { variantMatchesRequest } from "../utils/varyHelpers.js";
 
 type PendingEntry<
   Spec extends CacheSpec,

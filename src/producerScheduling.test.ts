@@ -23,7 +23,7 @@ import {
 import Cache from "./Cache.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 import { CacheContractError } from "./utils/utils.js";
-import wrapProducer from "./utils/wrapProducer.js";
+import wrapProducer from "./wrapProducer/wrapProducer.js";
 
 describe("automatic and direct producer dispatch", suiteOptions, () => {
   it("shares overlapping requests and directly dispatches a queued peer without dispatching unrelated work", async (t) => {

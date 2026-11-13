@@ -21,7 +21,7 @@ import type {
   ResourceTypes,
 } from "../types/00_ResourceTypes.js";
 import { resourceTypesEntries } from "../resourceTypeClassification.js";
-import { CacheContractError } from "./utils.js";
+import { CacheContractError } from "../utils/utils.js";
 import {
   emptyProducersRecordMessage,
   resolveCoveredSubProducer,
