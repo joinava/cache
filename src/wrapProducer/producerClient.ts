@@ -56,6 +56,7 @@ import {
   assertUnreachable,
   CacheContractError,
   defaultLoggersByComponent,
+  isContractError,
   raceWithSignal,
 } from "../utils/utils.js";
 import type { SpecForId } from "../types/00_CacheSpec.js";
@@ -866,10 +867,10 @@ export function createProducerClient<
           return { entry, resources };
         } catch (error) {
           // Like an Error slot from the producer, a result that fails to
-          // normalize fails only its own slot, even for a CacheContractError:
+          // normalize fails only its own slot, even for a contract error:
           // automatic batching merges unrelated callers into one invocation.
           // The slot's own callers still reject their whole public call,
-          // through the CacheContractError rethrow in each slot pipeline.
+          // through the contract-error rethrow in each slot pipeline.
           return asError(error);
         }
       });
@@ -986,7 +987,7 @@ export function createProducerClient<
         // If the error was the signal being aborted, propagate that (as an
         // `aborted` settlement); don't assume a read failure.
         signal?.throwIfAborted();
-        if (error instanceof CacheContractError) throw error;
+        if (isContractError(error)) throw error;
         // For "call-producer", pretend the cache returned no results so that
         // we'll fall through to the producer.
         return onCacheReadFailure === "throw"
@@ -1116,7 +1117,7 @@ export function createProducerClient<
             // treat it as a producer failure (or fall back to a cached
             // usable-if-error value).
             signal?.throwIfAborted();
-            if (error instanceof CacheContractError) throw error;
+            if (isContractError(error)) throw error;
 
             if (decision.ifError) {
               logger("wrap-producer", "warn", PRODUCER_ERROR_FALLBACK_WARNING, {

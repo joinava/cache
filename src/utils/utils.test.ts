@@ -9,6 +9,7 @@ import { singleTypeCacheOptions } from "../cache/singleTypeCacheOptions.js";
 import MemoryStore from "../stores/MemoryStore/MemoryStore.js";
 import type { CacheSpec } from "../types/00_CacheSpec.js";
 import { normalizeParams } from "./normalization.js";
+import { SchedulingContractError } from "@zingage/scheduling";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -162,6 +163,37 @@ describe("raw Store adapters", () => {
       getMany(store, [{ id: "a", params: emptyParams }]),
       CacheContractError,
     );
+  });
+
+  it("rejects a bulk read that throws a SchedulingContractError instead of converting it to slots", async (t) => {
+    const store = bulkMemoryStore();
+    t.after(async () => await store.close());
+    const contractError = new SchedulingContractError("broken batch");
+    t.mock.method(store, "getMany", async () => {
+      throw contractError;
+    });
+    await assert.rejects(
+      getMany(store, [{ id: "a", params: emptyParams }]),
+      (error) => error === contractError,
+    );
+  });
+
+  it("rejects a single read that throws a SchedulingContractError instead of converting it to a slot", async () => {
+    const memory = new MemoryStore<CacheSpec<string, string>>();
+    const contractError = new SchedulingContractError("broken single read");
+    const store = {
+      get: async () => {
+        throw contractError;
+      },
+      store: memory.store.bind(memory),
+      delete: memory.delete.bind(memory),
+      close: memory.close.bind(memory),
+    };
+    await assert.rejects(
+      getMany(store, [{ id: "a", params: emptyParams }]),
+      (error) => error === contractError,
+    );
+    await memory.close();
   });
 
   it("does not dispatch an empty known set", async (t) => {

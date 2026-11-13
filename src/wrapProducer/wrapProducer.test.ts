@@ -2,6 +2,7 @@ import { expect } from "chai";
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
+import { SchedulingContractError } from "@zingage/scheduling";
 import { setTimeout as delay } from "timers/promises";
 import { staleWhileRevalidating } from "../../test/v2AcceptanceHelpers.js";
 import Cache from "../cache/Cache.js";
@@ -388,6 +389,28 @@ describe("wrapProducer", () => {
       expect(res.content).to.eq("test");
     });
 
+    it("rethrows a SchedulingContractError from the cache read instead of calling the producer", async () => {
+      const contractError = new SchedulingContractError("broken read");
+      mockCache.get = async () => {
+        throw contractError;
+      };
+      const mockProducer = mock.fn(async ({ id }: { id: string }) => ({
+        content: id,
+        directives: { freshUntilAge: 1 },
+      }));
+      const wrappedProducer = wrapProducer({
+        cache: mockCache,
+        onCacheReadFailure: "call-producer",
+        produce: mockProducer,
+      });
+
+      await assert.rejects(
+        wrappedProducer.get({ id: "test" }),
+        (error) => error === contractError,
+      );
+      assert.equal(mockProducer.mock.callCount(), 0);
+    });
+
     it("should call the producer by default if cache's get method rejects", async () => {
       const mockProducer = mock.fn(async ({ id }: { id: string }) => ({
         content: id,
@@ -402,6 +425,35 @@ describe("wrapProducer", () => {
       const res = await wrappedProducer.get({ id: "test" });
       expect(res.content).to.eq("test");
     });
+  });
+
+  it("rethrows a SchedulingContractError from the producer instead of serving the if-error entry", async () => {
+    const contractError = new SchedulingContractError("broken producer");
+    const produce = mock.fn(async () => {
+      if (produce.mock.callCount() > 0) throw contractError;
+      return {
+        content: "fallback",
+        date: new Date(Date.now() - 10_000),
+        directives: {
+          freshUntilAge: 1,
+          maxStale: { whileRevalidate: 0, ifError: 60, withoutRevalidation: 0 },
+        },
+      };
+    });
+    const fallbackCache = makeTestCache();
+    const wrapped = wrapProducer({ cache: fallbackCache, produce });
+    const stored = Promise.withResolvers<void>();
+    await wrapped.get(
+      { id: "x" },
+      { onStore: (write) => stored.resolve(write) },
+    );
+    await stored.promise;
+    await assert.rejects(
+      wrapped.get({ id: "x" }),
+      (error) => error === contractError,
+    );
+    assert.equal(produce.mock.callCount(), 2);
+    await fallbackCache.close();
   });
 
   describe("AbortSignal support", () => {

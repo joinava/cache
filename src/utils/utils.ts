@@ -1,4 +1,5 @@
 import {
+  SchedulingContractError,
   TimeSliceBudget,
   timeSlicedForEach,
   timeSlicedMap,
@@ -156,6 +157,21 @@ export class CacheContractError extends Error {
 }
 
 /**
+ * Whether `error` reports a broken contract. A {@link CacheContractError} comes
+ * from this package. A `SchedulingContractError` comes from the
+ * `@zingage/scheduling` primitives that the cache uses. Both must propagate,
+ * and neither may become an operational slot error or a fallback.
+ */
+export function isContractError(
+  error: unknown,
+): error is CacheContractError | SchedulingContractError {
+  return (
+    error instanceof CacheContractError ||
+    error instanceof SchedulingContractError
+  );
+}
+
+/**
  * Throws a {@link CacheContractError} unless a batched call returned exactly
  * one result per request.
  */
@@ -252,7 +268,7 @@ export async function readStoreObserved<
     });
 
     signal?.throwIfAborted();
-    if (failure instanceof CacheContractError) throw failure;
+    if (isContractError(failure)) throw failure;
 
     const error = asError(failure);
     return requests.map(() => error) as StoreGetManyResult<
@@ -371,7 +387,7 @@ async function readSingleStore<
         });
 
         options?.signal?.throwIfAborted();
-        if (error instanceof CacheContractError) throw error;
+        if (isContractError(error)) throw error;
 
         return asError(error);
       }
@@ -383,7 +399,7 @@ async function readSingleStore<
   options?.signal?.throwIfAborted();
 
   const res = settled.map((result) => {
-    // The only rejections should be CacheContractErrors.
+    // The only rejections should be contract errors (see isContractError).
     if (result.status === "rejected") throw result.reason;
     return result.value;
   });
