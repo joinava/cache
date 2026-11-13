@@ -37,16 +37,13 @@ import type {
   ConsumerDirectives,
   Entry,
   Logger,
-  Vary,
   PartialReadonlyConsumerRequest,
 } from "../types/index.js";
 import type { DispatchInfo } from "../batcher/batcher.js";
-import { normalizeParams, normalizeVary } from "../utils/normalization.js";
-import { PendingResources } from "./pendingResources.js";
 import {
-  classifyCacheEntries,
-  mergeCacheLookups,
-} from "../utils/cacheHelpers.js";
+  CacheWithPendingResources,
+  type LookupFor,
+} from "../cacheWithPendingResources/CacheWithPendingResources.js";
 import {
   completeRequest,
   primaryNormalizedResultResourceFromRequestPairedProducerResult,
@@ -62,7 +59,6 @@ import {
 import type { SpecForId } from "../types/00_CacheSpec.js";
 import type { LooseRequestFor, LooseResultFor } from "../types/05_Producer.js";
 import { coveredTypes } from "../types/index.js";
-import type { CacheLookupResult } from "../utils/cacheHelpers.js";
 import type {
   WrappedProducerClient,
   WrappedReadOptions,
@@ -245,17 +241,6 @@ export type LooseEntryFor<
   Params extends AnyParams,
 > = Entry<SpecForId<SpecOf<RT>, SpecOf<RT>["id"]>, Validators, Params>;
 
-/** A cache lookup result as the wrappers' id-erased internals see it. */
-export type LooseLookupResultFor<
-  RT extends ResourceTypes,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-> = CacheLookupResult<
-  SpecForId<SpecOf<RT>, SpecOf<RT>["id"]>,
-  Validators,
-  Params
->;
-
 /** One task as a {@link ProducerScheduler} hands it to `dispatch`. */
 export type DispatchedRequest<Work> = {
   /**
@@ -406,17 +391,19 @@ export function createProducerClient<
   { producer, call, makeScheduler }: ProducerBinding<RT, Validators, Params>,
 ): WrappedProducerClient<RT, Covered, Validators, Params> {
   const {
-    cache,
     collapseOverlappingRequestsTime = 3,
     onCacheReadFailure = "call-producer",
     logger = defaultLoggersByComponent["wrap-producer"],
   } = options;
   const covered = coveredTypeSet(producer);
+  // The client reads and writes only through this view, which overlays the
+  // entries whose write is still in flight; see CacheWithPendingResources.
+  const cache = new CacheWithPendingResources(options.cache, logger);
 
   type Request = LooseRequestFor<RT, Params>;
   type Result = LooseResultFor<RT, Validators, Params>;
   type ResultEntry = LooseEntryFor<RT, Validators, Params>;
-  type Lookup = LooseLookupResultFor<RT, Validators, Params>;
+  type Lookup = LookupFor<RT, Validators, Params>;
   type Produced = { entry: ResultEntry; stored: Promise<void> };
   // Carries the classified type so the produce message can attribute each
   // request to its own type without re-classifying. The scheduler keeps the
@@ -428,18 +415,10 @@ export function createProducerClient<
     trigger: Exclude<CacheProduceMessage["trigger"], "mixed">;
   };
 
-  const normalizeVaryBound = (vary: Vary<Params>) =>
-    normalizeVary(cache.normalizeParamName, cache.normalizeParamValue, vary);
-  // Entries whose cache.store() is still in flight, consulted on every
-  // ordinary lookup; see `wrapProducer`'s docs and PendingResources.
-  const pendingResources = new PendingResources<SpecOf<RT>, Validators, Params>(
-    normalizeVaryBound,
-  );
-
   // In-flight work that close() drains, in this order: accepted calls, their
-  // per-slot pipelines, the producer scheduler, then cache writes. Writes are
-  // separate because they outlive the call that started them.
-  const writes = new Set<Promise<void>>();
+  // per-slot pipelines, the producer scheduler, then cache writes (which
+  // `cache.drain()` covers). Writes come last because they outlive the call
+  // that started them.
   const calls = new Set<Promise<unknown>>();
   const pipelines = new Set<Promise<unknown>>();
   // `closed` rejects new calls from the first close(). `closing` lets a
@@ -512,9 +491,9 @@ export function createProducerClient<
   // Because the store is not awaited, the pending-task map alone leaves a
   // window -- from the producer resolving until the write lands -- in which an
   // identical call would read the store, miss, and run the producer again.
-  // The entries handed to cache.store() are therefore also held in
-  // `pendingResources` until that store call settles (see PendingResources),
-  // and every ordinary lookup merges that overlay with the store's candidates.
+  // `cache` is therefore a CacheWithPendingResources: it holds the entries
+  // handed to store() until that write settles, and every ordinary lookup
+  // merges them with the Store's candidates.
   //
   // Each dispatch also publishes one `produce` diagnostics message when the
   // producer settles (one message per actual invocation; requests that
@@ -535,11 +514,7 @@ export function createProducerClient<
       try {
         return stableStringify({
           ...request,
-          params: normalizeParams(
-            cache.normalizeParamName,
-            cache.normalizeParamValue,
-            request.params,
-          ),
+          params: cache.normalizeParams(request.params),
         });
       } catch {
         // Failed normalization cannot prove compatibility. Preserve production
@@ -656,7 +631,7 @@ export function createProducerClient<
               Validators,
               Params,
               SpecOf<RT>["id"]
-            >(normalizeVaryBound, result, id, now);
+            >((vary) => cache.normalizeVary(vary), result, id, now);
           return { entry, resources };
         } catch (error) {
           // Like an Error slot from the producer, a result that fails to
@@ -677,23 +652,7 @@ export function createProducerClient<
       const resources = prepared.flatMap((result) =>
         result instanceof Error ? [] : result.resources,
       );
-      const stored =
-        resources.length === 0
-          ? Promise.resolve()
-          : Promise.try(() => cache.store(resources)).then(() => {});
-
-      writes.add(stored);
-      void stored
-        .finally(() => writes.delete(stored))
-        .catch((error: unknown) =>
-          logger(
-            "wrap-producer",
-            "trace",
-            "error storing producer's response",
-            error,
-          ),
-        );
-      pendingResources.track(resources, stored, now);
+      const stored = cache.store(resources);
 
       return prepared.map((result) =>
         result instanceof Error ? result : { entry: result.entry, stored },
@@ -742,49 +701,12 @@ export function createProducerClient<
       assertResourceTypeCovered(cache.name, covered, resourceType, request.id);
 
       const bypass = isRequestingCacheBypass(request.directives);
-      // Keep the pending snapshot across the read. The store can snapshot a
-      // miss before a write lands and removes its entry from the overlay. The
-      // snapshot also retains the selected entries' write promises after the
-      // shared overlay removes its records, so onStore can observe those
-      // writes.
-      const snapshot = (() => {
-        try {
-          const pending =
-            !signal?.aborted &&
-            !bypass &&
-            !cache.closed &&
-            pendingResources.has(request.id)
-              ? pendingResources.matching(
-                  request.id,
-                  normalizeParams(
-                    cache.normalizeParamName,
-                    cache.normalizeParamValue,
-                    complete.params,
-                  ),
-                )
-              : [];
-          const pendingLookup = classifyCacheEntries(
-            pending.map(({ entry }) => entry),
-            request.directives,
-            new Date(),
-          ).result;
-          return { pending, pendingLookup, failure: undefined };
-        } catch (error) {
-          signal?.throwIfAborted();
-          return {
-            pending: [],
-            pendingLookup: { validatable: [] } satisfies Lookup,
-            failure: asError(error),
-          };
-        }
-      })();
 
       return {
         request,
         readRequest: complete,
         resourceType,
         bypass,
-        ...snapshot,
       };
     });
     // Every abort-caused rejection settles each logical request as `aborted`.
@@ -803,9 +725,7 @@ export function createProducerClient<
       signal.throwIfAborted();
     }
 
-    const eligible = items.filter(
-      ({ bypass, failure }) => !bypass && failure === undefined,
-    );
+    const eligible = items.filter(({ bypass }) => !bypass);
 
     // A direct known set uses one Cache call. Automatic reads settle independently
     // when their own Store invocation finishes, without a whole-set barrier.
@@ -813,14 +733,14 @@ export function createProducerClient<
       batching?.store === false && eligible.length > 0
         ? cache.getUnbatched(
             eligible.map(({ readRequest }) => readRequest),
-            signal === undefined ? {} : { signal },
+            { signal },
           )
         : undefined;
     const readByItem = new Map(
       eligible.map((item, index) => [
         item,
         directReads === undefined
-          ? cache.get(item.readRequest, signal === undefined ? {} : { signal })
+          ? cache.get(item.readRequest, { signal })
           : directReads.then((results) => {
               const result = results[index]!;
               if (result instanceof Error) throw result;
@@ -834,11 +754,7 @@ export function createProducerClient<
       if (item.bypass) return { validatable: [] };
 
       try {
-        if (item.failure !== undefined) throw item.failure;
-        const stored = await readByItem.get(item)!;
-        // Stored candidates precede pending candidates. The canonical selector
-        // chooses the later pending candidate when birth dates are equal.
-        return mergeCacheLookups([stored, item.pendingLookup]);
+        return await readByItem.get(item)!;
       } catch (error) {
         // If the error was the signal being aborted, propagate that (as an
         // `aborted` settlement); don't assume a read failure.
@@ -937,9 +853,8 @@ export function createProducerClient<
         };
 
         const observeEntry = (entry: ResultEntry) => {
-          stores[index] = item.pending
-            .filter((candidate) => candidate.entry === entry)
-            .map(({ stored }) => stored);
+          const write = cache.writeFor(entry);
+          stores[index] = write === undefined ? [] : [write];
         };
 
         try {
@@ -1166,7 +1081,7 @@ export function createProducerClient<
         await Promise.allSettled(calls);
         await Promise.allSettled(pipelines);
         await scheduler.close();
-        await Promise.allSettled(writes);
+        await cache.drain();
       })();
 
       return closing;

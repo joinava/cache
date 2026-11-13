@@ -41,9 +41,9 @@ type PendingEntry<
  * for the producer twice.
  *
  * This overlay closes that window: every entry handed to `cache.store()` is
- * held here until that store call settles, and the wrapper consults the
- * overlay before reading the store. The wrapper retains that snapshot across
- * the read and merges it with the stored candidates. Both sources use the
+ * held here until that store call settles. `CacheWithPendingResources` takes a
+ * snapshot of the overlay before each Store read, keeps it across the read,
+ * and merges it with the stored candidates. Both sources use the
  * same freshness classification and selection rules.
  *
  * The overlay models an idealized store that retains every eligible pending
