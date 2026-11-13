@@ -214,21 +214,16 @@ Review each file, class, and folder that the diff touches as a whole. Check:
   `performance.now()` timestamp. Propose a branded type. Then look for
   runtime type checks that the brand makes unnecessary.
 - **The smallest mechanism.** For each new option, field, or protocol, check
-  whether callers can compose a tool they already have instead (wrapping a
-  producer in `pLimit`, or keying a `WeakMap` on an object that already
-  exists). Prefer no new surface plus a doc note. The same holds for a new
+  whether callers can easily compose a tool they already have instead
+  (wrapping a producer in `pLimit`, or keying a `WeakMap` on an object that
+  already exists). Prefer no new surface plus a doc note. The exception is a
+  helper whose whole point is to do that composition for the caller, usually
+  because it is tricky to do correctly. The same holds for a new
   flag, mode, sentinel, hook, or backstop: check whether reshaping an existing
   operation or type gives the same guarantee. (Real case: a proposed
   `maxConcurrentBatches` option was dropped, because callers can wrap their
   own producer in `pLimit`. A proposed request-context field was replaced by
   a `WeakMap` from the request object to its input.)
-
-(Real case for this whole angle: joinava/cache PR #27. The user asked for
-more than 20 changes of these kinds by hand. Examples are deleting a
-`RequestScheduler` that had one consumer, splitting `wrapProducer` into single
-and bulk variants, splitting a 780-line client function into decide and
-execute steps, moving builder types out of the wrapper, and extracting
-`PendingPromisesTracker` from 8 hand-written copies.)
 
 ### State & docs (auditability)
 
