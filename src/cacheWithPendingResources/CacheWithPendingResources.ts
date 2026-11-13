@@ -50,6 +50,23 @@ import { PendingResources } from "./pendingResources.js";
  * places and run the producer again. The snapshot is classified at snapshot
  * time, like the Store's candidates are classified at read time.
  *
+ * ## Every read also reaches the Store
+ *
+ * The overlay adds candidates; it never answers a request alone. `get` and
+ * `getUnbatched` read the Store for every request, also when a pending entry
+ * already matches, because the Store can hold a better candidate:
+ *
+ * - a newer persisted entry, from another client or process, which wins
+ *   under the canonical selection rules;
+ * - a fresh `usable` entry where the pending one is only usable while
+ *   revalidating or on error;
+ * - more `validatable` entries.
+ *
+ * Each read also emits its `read` diagnostics message. Skipping the read when
+ * the pending lookup has a fresh `usable` entry would be correct for the
+ * caller's directives, but a newer persisted entry would then lose. That saves
+ * a round trip only while a write is in flight, so this class does not do it.
+ *
  * ## Scope
  *
  * One instance per producer client: two clients over the same cache do not
@@ -117,8 +134,9 @@ export class CacheWithPendingResources<
 
   /**
    * Like {@link Cache.get}, with this instance's pending resources merged in.
-   * Rejects without reading the Store if the request's parameters cannot be
-   * normalized for the pending match.
+   * It reads the Store even when a pending entry matches (see "Every read also
+   * reaches the Store"). Rejects without reading the Store if the request's
+   * parameters cannot be normalized for the pending match.
    */
   async get(
     request: ReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>,
@@ -135,7 +153,9 @@ export class CacheWithPendingResources<
 
   /**
    * Like {@link Cache.getUnbatched}, with this instance's pending resources
-   * merged in. A request whose parameters cannot be normalized for the pending
+   * merged in. Every request whose snapshot succeeds is read from the Store,
+   * also when a pending entry matches (see "Every read also reaches the
+   * Store"). A request whose parameters cannot be normalized for the pending
    * match gets that error in its slot and is left out of the Store call.
    */
   async getUnbatched(
