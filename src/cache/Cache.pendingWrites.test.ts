@@ -16,6 +16,7 @@ import {
 } from "../../test/fixtures.js";
 import {
   ACCEPT_ANY_REGISTRY,
+  captureChannels,
   freshFor100,
   uniqueCacheName,
 } from "../../test/v2AcceptanceHelpers.js";
@@ -135,7 +136,7 @@ describe("Cache pending writes", suiteOptions, () => {
     assert.deepEqual(await cache.get(lookup("a")), { validatable: [] });
   });
 
-  it("fails only the getUnbatched slot whose params cannot be normalized, and leaves it out of the Store call", async (t) => {
+  it("rejects a call whose params cannot be normalized the same way with or without a pending write", async (t) => {
     const writeGate = Promise.withResolvers<void>();
     const { store, getManyRequestCounts } = spiedStore();
     const cache = new Cache({
@@ -147,26 +148,44 @@ describe("Cache pending writes", suiteOptions, () => {
         return value;
       },
     });
-    t.after(() => cache.close());
     const write = store.store.bind(store);
     mock.method(store, "store", async (...args: Parameters<typeof write>) => {
       await writeGate.promise;
       return await write(...args);
     });
-    // Only an id with pending resources needs its params normalized.
     const pendingWrite = cache.store([resource("a", "pending")]);
+    t.after(async () => {
+      writeGate.resolve();
+      await pendingWrite;
+      await cache.close();
+    });
+    const failed = { message: "normalization failed" };
+    const capture = captureChannels(cache.name);
+    t.after(() => capture.stop());
 
-    const [failed, read] = await cache.getUnbatched([
-      lookup("a", { language: "bad" }),
-      lookup("b"),
-    ]);
-    writeGate.resolve();
-    await pendingWrite;
+    // "a" has a pending write and "c" does not.
+    await assert.rejects(
+      cache.getUnbatched([lookup("a", { language: "bad" }), lookup("b")]),
+      failed,
+    );
+    await assert.rejects(
+      cache.getUnbatched([lookup("c", { language: "bad" }), lookup("b")]),
+      failed,
+    );
+    await assert.rejects(cache.get(lookup("a", { language: "bad" })), failed);
+    await assert.rejects(cache.get(lookup("c", { language: "bad" })), failed);
 
-    assert.ok(failed instanceof Error);
-    assert.equal(failed.message, "normalization failed");
-    assert.ok(!(read instanceof Error));
-    assert.equal(read?.usable, undefined);
-    assert.deepEqual(getManyRequestCounts(), [1]);
+    assert.deepEqual(getManyRequestCounts(), []);
+    // Each getUnbatched call reports every request as read-failed, and each
+    // get rejects before its read, so it reports nothing.
+    assert.deepEqual(
+      capture.read.map(({ resourceId, found }) => [resourceId, found]),
+      [
+        ["a", "read-failed"],
+        ["b", "read-failed"],
+        ["c", "read-failed"],
+        ["b", "read-failed"],
+      ],
+    );
   });
 });

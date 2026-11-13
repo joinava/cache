@@ -57,7 +57,6 @@ import { PendingResources } from "./pendingResources.js";
 import { Batcher } from "../scheduling/batcher.js";
 import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
 import {
-  asError,
   readStoreObserved,
   raceWithSignal,
   assertUnreachable,
@@ -98,18 +97,18 @@ export type ReadOptions = { signal?: AbortSignal | undefined };
  *
  * For (critical) background details on the HTTP caching model, see the docs.
  *
- * The cache is parameterized over a {@link ResourceTypes} registry, which
- * names each kind of resource the cache can hold and pairs it with a runtime
+ * The cache is parameterized over a {@link ResourceTypes} registry, which names
+ * each kind of resource the cache can hold and pairs it with a runtime
  * classifier for its id sub-space plus a (phantom) content type. The cache's
- * {@link CacheSpec} union is derived from the registry via {@link SpecOf}:
- * the get/getUnbatched/store methods narrow the content type based on the id of
- * each request, and reject mismatched (id, content) pairs at compile time.
- * At runtime, every id the cache sees (requests, stored entries -- primary
- * and supplemental -- and deletes) is classified against the registry, and
- * ids that match zero or multiple resource types are loudly rejected.
+ * {@link CacheSpec} union is derived from the registry via {@link SpecOf}: the
+ * get/getUnbatched/store methods narrow the content type based on the id of
+ * each request, and reject mismatched (id, content) pairs at compile time. At
+ * runtime, every id the cache sees (requests, stored entries -- primary and
+ * supplemental -- and deletes) is classified against the registry, and ids that
+ * match zero or multiple resource types are loudly rejected.
  *
- * TODO: support the concept of warnings.
- * See https://tools.ietf.org/html/rfc7234#section-5.5
+ * TODO: support the concept of warnings. See
+ * https://tools.ietf.org/html/rfc7234#section-5.5
  */
 export default class Cache<
   const RT extends ResourceTypes = ResourceTypes,
@@ -356,14 +355,14 @@ export default class Cache<
    *    response is held by the cache, or the usable response requires
    *    background re-validation), this array holds all entries in the cache
    *    that have validation info -- including, possibly, responses present in
-   *    the other returned keys -- and that would be usable were the producer
-   *    to confirm (revalidate) that the resource's current state matches the
-   *    state identified by the validation info. Otherwise, this array is empty.
-   *    These are returned so that the user can make a conditional request for
-   *    the latest content that takes into account the validation info (e.g.,
-   *    the etags w/ `If-None-Match`) of these saved responses. These responses
-   *    are probably stale, but it's possible they're not (e.g., if consumer
-   *    used a maxAge directive shorter than the producer's freshness lifetime).
+   *    the other returned keys -- and that would be usable were the producer to
+   *    confirm (revalidate) that the resource's current state matches the state
+   *    identified by the validation info. Otherwise, this array is empty. These
+   *    are returned so that the user can make a conditional request for the
+   *    latest content that takes into account the validation info (e.g., the
+   *    etags w/ `If-None-Match`) of these saved responses. These responses are
+   *    probably stale, but it's possible they're not (e.g., if consumer used a
+   *    maxAge directive shorter than the producer's freshness lifetime).
    *
    * The result's content type is narrowed to the spec variants whose id is
    * compatible with `req.id`. So, e.g., if the cache's `Spec` is a union and
@@ -379,23 +378,21 @@ export default class Cache<
    * Store calls. Use {@link Cache.getUnbatched} to send a known set as one
    * Store call instead.
    *
-   * This is a hot path. A wrapped client's `getMany` calls `get` once per
-   * item, in a loop, and lets the read scheduler batch the Store calls. So
-   * `get` keeps per-call work small: one request, no per-call arrays, and no
-   * time slicing or awaits beyond the Store read. That is why it does not
-   * share `getUnbatched`'s pipeline. The two share their per-request steps
-   * instead: the closed-cache check, the `read` messages, and the lookup.
+   * This is a hot path. A wrapped client's `getMany` calls `get` once per item,
+   * in a loop, and lets the read scheduler batch the Store calls. So `get`
+   * keeps per-call work small: one request, no per-call arrays, and no time
+   * slicing or awaits beyond the Store read. That is why it does not share
+   * `getUnbatched`'s pipeline. The two share their per-request steps instead:
+   * the closed-cache check, the `read` messages, and the lookup.
    *
    * If Store.getMany returns an Error in this request's slot, only this caller
    * rejects. Other callers in the automatic batch retain their hits or misses.
    * A rejected store promise rejects every non-cancelled caller in the batch.
    *
-   * The result also considers the entries of every `store` call whose write
-   * has not settled. The Store is read even when a pending entry matches (see
-   * `#pending`). Rejects without reading the Store if the request's
-   * parameters cannot be normalized for the pending match. While a write is
-   * in flight, `validatable` can list one resource twice: once from the Store
-   * and once from the pending write.
+   * The result also considers the entries of every `store` call whose write has
+   * not settled. The Store is read even when a pending entry matches (see
+   * `#pending`). While a write is in flight, `validatable` can list one
+   * resource twice: once from the Store and once from the pending write.
    */
   public async get<Id extends SpecOf<RT>["id"]>(
     req: ReadonlyConsumerRequest<Params, Id>,
@@ -528,10 +525,8 @@ export default class Cache<
    * emitting nothing.
    *
    * Like {@link Cache.get}, each result also considers the pending writes.
-   * Every request whose pending snapshot succeeds is read from the Store,
-   * also when a pending entry matches. A request whose parameters cannot be
-   * normalized for the pending match gets that error in its slot and is left
-   * out of the Store call. As in `get`, a slot's `validatable` can list one
+   * Every request is read from the Store, also when a pending entry matches.
+   * As in `get`, a slot's `validatable` can list one
    * resource twice while its write is in flight.
    *
    * @param requests Array of consumer requests to process
@@ -550,35 +545,13 @@ export default class Cache<
     options?.signal?.throwIfAborted();
     // All snapshots precede the one Store read (see "Read order" on
     // `#pending`).
-    const pending = requests.map((request) => {
-      try {
-        return this.#pendingLookup(request);
-      } catch (error) {
-        return asError(error);
-      }
-    });
-    const readIndexes = pending.flatMap((lookup, index) =>
-      lookup instanceof Error ? [] : [index],
-    );
-    const stored =
-      readIndexes.length === 0
-        ? []
-        : await this.#getUnbatchedWithoutPending(
-            readIndexes.map((index) => requests[index]!),
-            options,
-          );
-    const storedByIndex = new Map(
-      readIndexes.map((requestIndex, readIndex) => [
-        requestIndex,
-        stored[readIndex]!,
-      ]),
-    );
+    const pending = requests.map((request) => this.#pendingLookup(request));
+    const stored = await this.#getUnbatchedWithoutPending(requests, options);
 
     // SAFETY: slot i holds request i's lookup, or an Error. The mapped type
     // narrows each slot by its own request's id, which a `map` cannot express.
-    return pending.map((lookup, index) => {
-      if (lookup instanceof Error) return lookup;
-      const storedLookup = storedByIndex.get(index)!;
+    return stored.map((storedLookup, index) => {
+      const lookup = pending[index];
       return storedLookup instanceof Error || lookup === undefined
         ? storedLookup
         : mergeCacheLookups([storedLookup, lookup]);
@@ -871,23 +844,47 @@ export default class Cache<
 
   /**
    * The pending candidates for one request, classified now, or `undefined`
-   * when no pending entry matches. Throws if the request's parameters cannot
-   * be normalized. Records each candidate's write for {@link Cache.writeFor}.
+   * when no pending entry matches. Records each candidate's write for
+   * {@link Cache.writeFor}.
+   *
+   * A request whose parameters cannot be normalized also gets `undefined`.
+   * The Store read normalizes them again and fails the same way it does when
+   * nothing is pending: after classification, as a rejection of the whole
+   * call, with the same `read` messages.
    */
   #pendingLookup<Id extends SpecOf<RT>["id"]>(
     request: ReadonlyConsumerRequest<Params, Id>,
   ):
     | CacheLookupResult<SpecForId<SpecOf<RT>, Id>, Validators, Params>
     | undefined {
-    if (this.#closed || !this.#pending.has(request.id)) return undefined;
-    const pending = this.#pending.matching(
-      request.id,
-      this.normalizeParams(request.params),
-    );
-    if (pending.length === 0) return undefined;
+    if (this.#closed || !this.#pending.has(request.id)) {
+      return undefined;
+    }
+
+    // The raw store reads will fail on normalization errors, so we don't fail
+    // here. (We don't want to have different errors thrown depending on whether
+    // writes for an id are pending, which is the only time this runs -- see the
+    // `#pending.has() check above.
+    const normalizedParams = (() => {
+      try {
+        return this.normalizeParams(request.params);
+      } catch {
+        return undefined;
+      }
+    })();
+    if (normalizedParams === undefined) {
+      return undefined;
+    }
+
+    const pending = this.#pending.matching(request.id, normalizedParams);
+    if (pending.length === 0) {
+      return undefined;
+    }
+
     pending.forEach(({ entry, stored }) => {
       this.#writeByEntry.set(entry, stored);
     });
+
     return classifyCacheEntries(
       // SAFETY: the overlay holds entries by id, so these are entries for
       // `request.id`.
