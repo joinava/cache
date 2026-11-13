@@ -24,6 +24,7 @@ import {
   mergeCacheLookups,
   type CacheLookupResult,
 } from "../utils/cacheHelpers.js";
+import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
 import { normalizeParams, normalizeVary } from "../utils/normalization.js";
 import { asError } from "../utils/utils.js";
 import { PendingResources } from "./pendingResources.js";
@@ -94,7 +95,7 @@ export class CacheWithPendingResources<
   readonly #logger: Logger;
   readonly #pending: PendingResources<SpecOf<RT>, Validators, Params>;
   /** Writes that {@link drain} waits for. Each one leaves when it settles. */
-  readonly #writes = new Set<Promise<void>>();
+  readonly #writes = new PendingPromisesTracker();
   /**
    * The write behind each pending entry that a read returned. Filled at
    * snapshot time, because the overlay drops an entry once its write settles,
@@ -231,9 +232,8 @@ export class CacheWithPendingResources<
         ? Promise.resolve()
         : Promise.try(() => this.#cache.store(dated)).then(() => {});
 
-    this.#writes.add(stored);
-    void stored
-      .finally(() => this.#writes.delete(stored))
+    void this.#writes
+      .track(stored)
       .catch((error: unknown) =>
         this.#logger(
           "wrap-producer",
@@ -260,7 +260,7 @@ export class CacheWithPendingResources<
    * because other clients may share it.
    */
   async drain(): Promise<void> {
-    await Promise.allSettled(this.#writes);
+    await this.#writes.drain();
   }
 
   /**

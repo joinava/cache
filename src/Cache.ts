@@ -54,6 +54,7 @@ import {
   type CacheLookupResult,
 } from "./utils/cacheHelpers.js";
 import { Batcher, type BatchOptions } from "./batcher/batcher.js";
+import { PendingPromisesTracker } from "./scheduling/pendingPromisesTracker.js";
 import {
   CacheContractError,
   readStoreObserved,
@@ -289,7 +290,7 @@ export default class Cache<
    * every step of a public call that ends in a Store call, including steps
    * such as normalization that run before the call starts.
    */
-  readonly #operations = new Set<Promise<unknown>>();
+  readonly #operations = new PendingPromisesTracker();
   readonly #onGetAfterClose: "throw" | "act-empty";
   readonly #onStoreAfterClose: "throw" | "no-op";
   readonly #resourceTypeEntries: ResourceTypesEntries<RT>;
@@ -668,7 +669,7 @@ export default class Cache<
     // The call is accepted, so close() must wait for its read. Normalization
     // can yield to the event loop before the read starts, so one tracked
     // operation covers normalization and the read.
-    const storeRead = this.#track(async () =>
+    const storeRead = this.#operations.run(async () =>
       this.#readStore(
         await timeSlicedMapNonEmpty(requests, (req) => ({
           id: req.id,
@@ -748,7 +749,7 @@ export default class Cache<
   public async store(
     data: readonly ProducerResultResource<SpecOf<RT>, Validators, Params>[],
   ): Promise<readonly StoreEntryResult[]> {
-    return await this.#track(() => this.#store(data));
+    return await this.#operations.run(() => this.#store(data));
   }
 
   async #store(
@@ -851,7 +852,7 @@ export default class Cache<
       return;
     }
 
-    return this.#track(() => this.#dataStore.delete(id));
+    return this.#operations.run(() => this.#dataStore.delete(id));
   }
 
   /** Whether close has started; pending-write overlays must not bypass closure. */
@@ -869,7 +870,7 @@ export default class Cache<
     const readsClosed = this.#readBatcher?.close();
     this.#closePromise = (async () => {
       await readsClosed;
-      await Promise.allSettled(this.#operations);
+      await this.#operations.drain();
       await this.#dataStore.close();
     })();
 
@@ -891,7 +892,7 @@ export default class Cache<
     batch?: { autoBatched: boolean; queueWaitTotalMs: number },
   ) {
     const observed = cacheReadStoreChannel.hasSubscribers;
-    return this.#track(() =>
+    return this.#operations.run(() =>
       readStoreObserved(
         this.#dataStore,
         requests,
@@ -913,23 +914,6 @@ export default class Cache<
           : undefined,
       ),
     );
-  }
-
-  #track<T>(start: () => Promise<T>): Promise<T> {
-    const { promise, resolve, reject } = Promise.withResolvers<T>();
-    this.#operations.add(promise);
-    void promise.then(
-      () => this.#operations.delete(promise),
-      () => this.#operations.delete(promise),
-    );
-
-    try {
-      resolve(start());
-    } catch (error) {
-      reject(error);
-    }
-
-    return promise;
   }
 
   /**

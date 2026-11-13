@@ -38,6 +38,7 @@ import {
   keepMaxPerGroup,
 } from "../../utils/utils.js";
 import { resultVariantKey } from "../../utils/varyHelpers.js";
+import { PendingPromisesTracker } from "../../scheduling/pendingPromisesTracker.js";
 import type {
   ReadWorkerRequestInput,
   WorkerEntryJson,
@@ -89,7 +90,7 @@ export default class SqliteStore<
     WorkerResultForRequest<ReadWorkerRequestInput>
   >;
 
-  readonly #pending = new Set<Promise<unknown>>();
+  readonly #pending = new PendingPromisesTracker();
   #status: "open" | "closing" | "closed" = "open";
   #closePromise: Promise<void> | undefined;
   #lazyCleanupPromise: Promise<void> | undefined;
@@ -246,7 +247,7 @@ export default class SqliteStore<
     this.#status = "closing";
 
     // Drain first: Piscina.close has an implicit deadline and may abandon work.
-    await Promise.allSettled(this.#pending);
+    await this.#pending.drain();
 
     const failures: unknown[] = [];
     try {
@@ -278,16 +279,6 @@ export default class SqliteStore<
 
   public async [Symbol.asyncDispose](): Promise<void> {
     return this.close();
-  }
-
-  #track<T>(pending: Promise<T>): Promise<T> {
-    this.#pending.add(pending);
-    void pending.then(
-      () => this.#pending.delete(pending),
-      () => this.#pending.delete(pending),
-    );
-
-    return pending;
   }
 
   #prepareEntries(
@@ -414,7 +405,7 @@ export default class SqliteStore<
       return Promise.reject(new Error("SqliteStore is closed"));
     }
 
-    return this.#track(this.#writerPool.run(message)) as Promise<
+    return this.#pending.track(this.#writerPool.run(message)) as Promise<
       WorkerResultForRequest<Message>
     >;
   }
@@ -426,7 +417,7 @@ export default class SqliteStore<
       return Promise.reject(new Error("SqliteStore is closed"));
     }
 
-    return this.#track(this.#readPool.run(message)) as Promise<
+    return this.#pending.track(this.#readPool.run(message)) as Promise<
       WorkerResultForRequest<Message>
     >;
   }

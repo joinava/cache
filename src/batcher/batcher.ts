@@ -6,6 +6,7 @@ import {
   defaultLoggersByComponent,
 } from "../utils/utils.js";
 import { partition } from "es-toolkit";
+import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
 
 /**
  * Accumulation settings for a bulk target. `Cache` exposes them as
@@ -239,7 +240,7 @@ export class Batcher<Input, Result> {
    */
   readonly #pendingBatches = new Set<Batch<Input, Result>>();
   /** Dispatches that have not settled, so `#drain` can wait for them. */
-  readonly #running = new Set<Promise<unknown>>();
+  readonly #running = new PendingPromisesTracker();
   /**
    * `"closing"` from the call to `close` until the batcher is idle. Then
    * `"closed"`, and `enqueue` warns.
@@ -448,7 +449,7 @@ export class Batcher<Input, Result> {
   async #drain(): Promise<void> {
     while (this.#running.size > 0 || this.#pendingBatches.size > 0) {
       this.#pendingBatches.forEach((batch) => batch.dispatch());
-      await Promise.allSettled(this.#running);
+      await this.#running.drain();
     }
   }
 
@@ -573,7 +574,6 @@ export class Batcher<Input, Result> {
         });
       });
 
-    this.#running.add(operation);
-    void operation.finally(() => this.#running.delete(operation));
+    void this.#running.track(operation);
   }
 }

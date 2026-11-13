@@ -36,6 +36,7 @@ import {
   producerByIdType,
   type ProducersFor,
 } from "../producer-builders/producerByIdType.js";
+import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
 import { asError, CacheContractError } from "../utils/utils.js";
 import wrapProducer, { type WrapProducerOptions } from "./wrapProducer.js";
 
@@ -602,18 +603,15 @@ export function wrapHashedInputProducer(
     }
     return entry.input;
   };
-  const hashingTasks = new Set<Promise<unknown>>();
-  const ownHashing = <T>(promise: Promise<T>): Promise<T> => {
-    hashingTasks.add(promise);
-    void promise.finally(() => hashingTasks.delete(promise)).catch(() => {});
-    return promise;
-  };
+  // Hashing that close() waits for: input hashing, and supplemental hashing
+  // inside production.
+  const hashingTasks = new PendingPromisesTracker();
 
   const hashSupplementals = makeSupplementalHasher<never>(
     "wrapHashedInputProducer",
     branchEntries,
     cache,
-    ownHashing,
+    hashingTasks,
   );
   // Bound concurrent input hashing (see HASH_CONCURRENCY); shared across calls.
   const hashLimit = pLimit(HASH_CONCURRENCY);
@@ -720,8 +718,8 @@ export function wrapHashedInputProducer(
               ),
       });
 
-  const calls = new Set<Promise<unknown>>();
-  const admissions = new Set<Promise<void>>();
+  const calls = new PendingPromisesTracker();
+  const admissions = new PendingPromisesTracker();
   let closed = false;
   let closing: Promise<void> | undefined;
 
@@ -744,7 +742,7 @@ export function wrapHashedInputProducer(
     }));
     const ids = await Promise.all(
       routed.map(({ input, branch: [, branch] }) =>
-        ownHashing(hashLimit(async () => branch.hashInput(input))),
+        hashingTasks.track(hashLimit(async () => branch.hashInput(input))),
       ),
     );
     signal?.throwIfAborted();
@@ -787,8 +785,7 @@ export function wrapHashedInputProducer(
     }
 
     const admission = Promise.withResolvers<void>();
-    admissions.add(admission.promise);
-    void admission.promise.then(() => admissions.delete(admission.promise));
+    void admissions.track(admission.promise);
 
     const startedAt = performance.now();
     const promise = Promise.resolve()
@@ -796,8 +793,7 @@ export function wrapHashedInputProducer(
         run(inputs, () => admission.resolve(), startedAt, callOptions),
       )
       .finally(() => admission.resolve());
-    calls.add(promise);
-    void promise.finally(() => calls.delete(promise)).catch(() => {});
+    void calls.track(promise);
 
     return promise;
   };
@@ -824,11 +820,11 @@ export function wrapHashedInputProducer(
 
       // Finish hashing and admission before closing the underlying producer client.
       closing = (async () => {
-        await Promise.allSettled(admissions);
-        await Promise.allSettled(hashingTasks);
+        await admissions.drain();
+        await hashingTasks.drain();
         await wrapped.close();
-        await Promise.allSettled(hashingTasks);
-        await Promise.allSettled(calls);
+        await hashingTasks.drain();
+        await calls.drain();
       })();
 
       return closing;
@@ -853,7 +849,7 @@ function makeSupplementalHasher<Input>(
     Pick<LooseBranch<Input>, "matchesInput" | "hashInput">,
   ])[],
   cache: { readonly name: string; classify: (id: string) => string },
-  ownHashing: <T>(promise: Promise<T>) => Promise<T>,
+  hashing: PendingPromisesTracker,
 ) {
   // One limiter shared across every call of the returned resolver.
   const limit = pLimit(HASH_CONCURRENCY);
@@ -896,7 +892,7 @@ function makeSupplementalHasher<Input>(
           // slot loudly (named branch) instead of a silent store-time
           // rejection behind the wrappers' fire-and-forget store.
           const { input, ...rest } = resource;
-          return ownHashing(
+          return hashing.track(
             limit(async () => {
               const [branchName, branch] = findBranch(
                 wrapperName,

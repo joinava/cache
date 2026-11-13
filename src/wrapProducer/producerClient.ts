@@ -40,6 +40,7 @@ import type {
   PartialReadonlyConsumerRequest,
 } from "../types/index.js";
 import type { DispatchInfo } from "../batcher/batcher.js";
+import { PendingPromisesTracker } from "../scheduling/pendingPromisesTracker.js";
 import {
   CacheWithPendingResources,
   type LookupFor,
@@ -392,8 +393,8 @@ export function createProducerClient<
   // per-slot pipelines, the producer scheduler, then cache writes (which
   // `cache.drain()` covers). Writes come last because they outlive the call
   // that started them.
-  const calls = new Set<Promise<unknown>>();
-  const pipelines = new Set<Promise<unknown>>();
+  const calls = new PendingPromisesTracker();
+  const pipelines = new PendingPromisesTracker();
   // `closed` rejects new calls from the first close(). `closing` lets a
   // repeated close() share one drain.
   let closed = false;
@@ -948,8 +949,7 @@ export function createProducerClient<
     );
 
     slotPipelines.forEach((pipeline) => {
-      pipelines.add(pipeline);
-      void pipeline.finally(() => pipelines.delete(pipeline)).catch(() => {});
+      void pipelines.track(pipeline);
     });
 
     const results = await Promise.all(slotPipelines).catch((error: unknown) => {
@@ -1011,8 +1011,7 @@ export function createProducerClient<
       run(requests, callOptions, startedAt),
     );
 
-    calls.add(promise);
-    void promise.finally(() => calls.delete(promise)).catch(() => {});
+    void calls.track(promise);
 
     return promise;
   };
@@ -1045,8 +1044,8 @@ export function createProducerClient<
       scheduler.flush();
 
       closing = (async () => {
-        await Promise.allSettled(calls);
-        await Promise.allSettled(pipelines);
+        await calls.drain();
+        await pipelines.drain();
         await scheduler.close();
         await cache.drain();
       })();
