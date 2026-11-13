@@ -3,6 +3,7 @@ import { readStoreObserved } from "../src/utils/utils.js";
 import pg from "pg";
 import { mock } from "node:test";
 import Cache from "../src/Cache.js";
+import type { BatchOptions } from "../src/scheduling/batcher.js";
 import wrapProducer from "../src/utils/wrapProducer.js";
 
 import fc from "fast-check";
@@ -358,10 +359,7 @@ export const cacheOver = (
   store: BulkMemoryStore | MemoryStore<Spec> = new MemoryStore<Spec>(),
   options: {
     name?: string;
-    readBatching?: {
-      maxBatchSize?: number;
-      batchScheduleFn?: (dispatch: () => void) => void;
-    };
+    readBatching?: BatchOptions;
   } = {},
 ) =>
   new Cache({
@@ -382,10 +380,7 @@ export async function recordingClient(
     name?: string;
     store?: BulkMemoryStore | MemoryStore<Spec>;
     readBatching?: { maxBatchSize: number };
-    producerBatching?: {
-      maxBatchSize?: number;
-      batchScheduleFn?: (dispatch: () => void) => void;
-    };
+    producerBatching?: BatchOptions;
     seed?: Parameters<ReturnType<typeof cacheOver>["store"]>[0];
     content?: (id: string) => string;
     onProduce?: (ids: readonly string[]) => Promise<void>;

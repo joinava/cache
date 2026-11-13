@@ -522,6 +522,8 @@ export function wrapHashedInputProducer<
     produce: HashedInputProducer<Meta>;
     produceMany?: never;
     hashInput?: never;
+    // A single-request producer never batches.
+    producerBatching?: never;
   },
 ): [HashedInputProducerProblems<RT, Meta>] extends [never]
   ? WrappedHashedBranches<RT, Meta>
@@ -536,6 +538,8 @@ export function wrapHashedInputProducer<
   options: WrapProducerOptions<RT, Validators, Params> & {
     produceMany?: never;
     hashInput: (input: Input) => MintedId | Promise<MintedId>;
+    // A single-request producer never batches.
+    producerBatching?: never;
     produce: (
       input: ReadonlyDeep<Input>,
     ) => Promise<
@@ -601,8 +605,14 @@ export function wrapHashedInputProducer(
       | HashedInputProducer<HashedInputProducerMeta>;
   },
 ): unknown {
-  const { cache, produce, produceMany, hashInput, ...producerOptions } =
-    options;
+  const {
+    cache,
+    produce,
+    produceMany,
+    hashInput,
+    producerBatching,
+    ...producerOptions
+  } = options;
   const bulk = produceMany !== undefined;
   const primitive = produce ?? produceMany!;
 
@@ -699,6 +709,7 @@ export function wrapHashedInputProducer(
   const wrapped = bulk
     ? wrapProducer({
         ...producerOptions,
+        ...(producerBatching === undefined ? {} : { producerBatching }),
         cache,
         produceMany: Object.assign(
           descriptor === undefined

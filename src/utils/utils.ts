@@ -154,6 +154,19 @@ export class CacheContractError extends Error {
   override readonly name: string = "CacheContractError";
 }
 
+/**
+ * Throws a {@link CacheContractError} unless a batched call returned exactly
+ * one result per request.
+ */
+export function assertResultCount(
+  results: readonly unknown[],
+  requestCount: number,
+): void {
+  if (results.length !== requestCount) {
+    throw new CacheContractError("Result count must match request count");
+  }
+}
+
 export function asError(error: unknown): Error {
   return error instanceof Error
     ? error

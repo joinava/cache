@@ -243,7 +243,7 @@ describe("Cache read batching", suiteOptions, () => {
     }
   });
 
-  it("preserves each batch's first reader context when close forces dispatch", async () => {
+  it("with preserveAsyncContext, keeps each batch's first reader context when close forces dispatch", async () => {
     const context = new AsyncLocalStorage<string>();
     const observed: (string | undefined)[] = [];
     const scheduled: (() => void)[] = [];
@@ -256,6 +256,7 @@ describe("Cache read batching", suiteOptions, () => {
       name: "context",
       readBatching: {
         maxBatchSize: 1,
+        preserveAsyncContext: true,
         batchScheduleFn: (dispatch) => {
           scheduled.push(dispatch);
         },

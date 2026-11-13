@@ -36,9 +36,9 @@ import type {
   PartialReadonlyConsumerRequest,
 } from "../types/index.js";
 import {
-  createRequestScheduler,
+  RequestScheduler,
   type BatchOptions,
-} from "./requestScheduler.js";
+} from "../scheduling/requestScheduler.js";
 import { normalizeParams, normalizeVary } from "./normalization.js";
 import { PendingResources } from "./pendingResources.js";
 import {
@@ -545,6 +545,8 @@ export default function wrapProducer<
       | {
           produce: CoveringProducer<RT, Covered, Validators, Params>;
           produceMany?: never;
+          // A single-request producer never batches.
+          producerBatching?: never;
         }
       | {
           produce?: never;
@@ -570,7 +572,7 @@ export default function wrapProducer<
   type Produced = { entry: ResultEntry; stored: Promise<void> };
   // Carries the classified type so the produce message can attribute each
   // request to its own type without re-classifying. The scheduler keeps the
-  // Work of the attachment that creates a task, so the creator's trigger
+  // Work of the request that starts a task, so the starting request's trigger
   // labels the invocation.
   type Work = {
     request: Request;
@@ -675,9 +677,9 @@ export default function wrapProducer<
   // Each dispatch also publishes one `produce` diagnostics message when the
   // producer settles (one message per actual invocation; requests that
   // collapse onto it share it).
-  const scheduler = createRequestScheduler<Work, Produced>({
-    bulk: bulk !== undefined,
-    ...options.producerBatching,
+  const scheduler = new RequestScheduler<Work, Produced>({
+    batching: bulk === undefined ? false : (options.producerBatching ?? {}),
+    logger: options.logger,
     collapseTasksMs: collapseOverlappingRequestsTime * 1000,
     // The key covers the full request (id, normalized params, directives) but
     // not resourceType, which is derived from the id and so adds nothing. It
@@ -708,7 +710,7 @@ export default function wrapProducer<
 
       return () => {};
     },
-    dispatch: async (tasks) => {
+    dispatch: async (tasks, { autoBatched }) => {
       const startedAt = performance.now();
       let results: readonly (Result | Error)[];
 
@@ -730,7 +732,7 @@ export default function wrapProducer<
         const trigger = tasks[0]!.request.trigger;
         publishCacheProduce({
           cache: cache.name,
-          autoBatched: tasks[0]!.autoBatched,
+          autoBatched,
           requestCount: tasks.length,
           queueWaitTotalMs: sumBy(tasks, (task) => task.queueWaitMs),
           trigger: tasks.every((task) => task.request.trigger === trigger)
@@ -1021,8 +1023,8 @@ export default function wrapProducer<
       | undefined
     )[] = items.map(() => undefined);
 
-    type Attachment = ReturnType<typeof scheduler.attach>[number];
-    const attach = (
+    type TaskOutcome = ReturnType<typeof scheduler.startOrRideTasks>[number];
+    const toTaskRequest = (
       item: (typeof items)[number],
       lookup: Lookup,
       background: boolean,
@@ -1039,9 +1041,9 @@ export default function wrapProducer<
             ? ("revalidation" as const)
             : ("miss" as const),
       },
-      background,
       // No signal for a background refresh: it is fire-and-forget work, and
-      // the caller has already been given a (stale) result.
+      // the caller has already been given a (stale) result. So the refresh
+      // never cancels a task that it starts or rides.
       ...(background ? {} : { signal }),
     });
 
@@ -1049,9 +1051,9 @@ export default function wrapProducer<
     // stale-while-revalidate refreshes to the producer together, as one
     // invocation. allSettled waits for every lookup, so one failed lookup does
     // not drop the others from the cohort. The map holds only foreground
-    // attachments. Each foreground slot reads its own entry, and refreshes are
+    // outcomes. Each foreground slot reads its own entry, and refreshes are
     // logged here because no slot awaits them.
-    const directAttachments =
+    const directOutcomes =
       bulk !== undefined && batching?.producer === false
         ? Promise.allSettled(lookups).then((settled) => {
             const cohort = items.flatMap((item, index) => {
@@ -1067,35 +1069,31 @@ export default function wrapProducer<
               const background =
                 lookup.value.usableWhileRevalidate !== undefined;
 
-              // After a cancel, leave out foreground requests: attach() would
-              // throw on their aborted signal and drop the whole cohort,
-              // refreshes included. With no cancel, this filter does nothing.
-              if (!background && signal?.aborted) return [];
               return [{ item, lookup: lookup.value, background }];
             });
 
-            const attachments = scheduler.attach(
+            const outcomes = scheduler.startOrRideTasks(
               cohort.map(({ item, lookup, background }) =>
-                attach(item, lookup, background),
+                toTaskRequest(item, lookup, background),
               ),
-              false,
+              { autoBatch: false },
             );
 
             return new Map(
               cohort.flatMap(({ item, background }, index) => {
-                const attachment = attachments[index]!;
-                if (!background) return [[item, attachment] as const];
+                const outcome = outcomes[index]!;
+                if (!background) return [[item, outcome] as const];
 
-                logRefreshFailure(attachment);
+                logRefreshFailure(outcome);
                 return [];
               }),
             );
           })
         : undefined;
 
-    // The barrier rejects only if attach() throws, for example from a user key
+    // The barrier rejects only if startOrRideTasks() throws, for example from a user key
     // function. A call whose slots are all refreshes never awaits it.
-    void directAttachments?.catch(() => {});
+    void directOutcomes?.catch(() => {});
 
     const slotPipelines = items.map(
       async (item, index): Promise<ResultEntry | Error> => {
@@ -1155,12 +1153,14 @@ export default function wrapProducer<
           // through?
           if (lookup.usableWhileRevalidate) {
             // The refresh obligation survives both the stale return and later joiner cancellation.
-            // The direct path attaches this refresh through directAttachments,
+            // The direct path starts or rides this refresh through directOutcomes,
             // so skip it here.
-            if (directAttachments === undefined) {
-              const [refresh] = scheduler.attach(
-                [attach(item, lookup, true)],
-                true,
+            if (directOutcomes === undefined) {
+              const [refresh] = scheduler.startOrRideTasks(
+                [toTaskRequest(item, lookup, true)],
+                {
+                  autoBatch: true,
+                },
               );
               logRefreshFailure(refresh!);
             }
@@ -1173,16 +1173,16 @@ export default function wrapProducer<
             return lookup.usableWhileRevalidate;
           }
 
-          // The cohort leaves out foreground requests after a cancel, so check
-          // the signal before reading this slot's entry.
-          const attachment: Attachment =
-            directAttachments !== undefined
-              ? await directAttachments.then((attachments) => {
-                  signal?.throwIfAborted();
-                  return attachments.get(item)!;
-                })
-              : scheduler.attach([attach(item, lookup, false)], true)[0]!;
-          rode = attachment.rode;
+          const outcome: TaskOutcome =
+            directOutcomes !== undefined
+              ? await directOutcomes.then((outcomes) => outcomes.get(item)!)
+              : scheduler.startOrRideTasks(
+                  [toTaskRequest(item, lookup, false)],
+                  {
+                    autoBatch: true,
+                  },
+                )[0]!;
+          rode = outcome.rode;
 
           // The shared producer work doesn't receive the signal directly (since
           // it may be shared with other callers who haven't aborted). However,
@@ -1190,7 +1190,7 @@ export default function wrapProducer<
           // so they can bail out immediately. Dispatched producer work keeps
           // running, and its result is still stored.
           try {
-            const produced = await raceWithSignal(attachment.promise, signal);
+            const produced = await raceWithSignal(outcome.promise, signal);
             stores[index] = [produced.stored];
             publish({
               disposition: "served-from-producer",
@@ -1330,12 +1330,14 @@ export default function wrapProducer<
       if (closing) return closing;
 
       closed = true;
+      // Accepted calls still start or ride tasks after this point, so only flush
+      // now, and close the scheduler once they finish.
       scheduler.flush();
 
       closing = (async () => {
         await Promise.allSettled(calls);
         await Promise.allSettled(pipelines);
-        await scheduler.drain();
+        await scheduler.close();
         await Promise.allSettled(writes);
       })();
 

@@ -68,7 +68,7 @@ describe("automatic and direct producer dispatch", suiteOptions, () => {
   });
 
   it("waits for the direct known set but feeds automatic misses from independent Store invocations", async (t) => {
-    for (const automatic of [true, false]) {
+    for (const autoBatch of [true, false]) {
       const slowRead = Promise.withResolvers<void>();
       const started = Promise.withResolvers<void>();
       const { store } = spiedStore({
@@ -80,21 +80,21 @@ describe("automatic and direct producer dispatch", suiteOptions, () => {
         },
       });
       const { client, calls } = await recordingClient(t, {
-        name: `producer-readiness-${String(automatic)}`,
+        name: `producer-readiness-${String(autoBatch)}`,
         store,
         readBatching: { maxBatchSize: 1 },
       });
       const read = client.getMany(
         [{ id: "ready" }, { id: "slow" }],
-        automatic ? {} : { autoBatch: { producer: false } },
+        autoBatch ? {} : { autoBatch: { producer: false } },
       );
       await started.promise;
       await nextTurn();
-      assert.equal(calls.length, automatic ? 1 : 0);
-      if (automatic) assert.deepEqual(calls[0], ["ready"]);
+      assert.equal(calls.length, autoBatch ? 1 : 0);
+      if (autoBatch) assert.deepEqual(calls[0], ["ready"]);
       slowRead.resolve();
       await read;
-      if (!automatic) assert.deepEqual(calls[0], ["ready", "slow"]);
+      if (!autoBatch) assert.deepEqual(calls[0], ["ready", "slow"]);
     }
   });
 });

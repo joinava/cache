@@ -8,7 +8,10 @@ import {
 } from "./taskSharer.js";
 
 type Handle = { readonly ids: readonly string[] };
-type ScheduleTasks = ScheduleTasksFor<string, string, Handle>;
+/** One call's `schedule`. It needs no context, so it takes only `toStart`. */
+type ScheduleTasks = (
+  toStart: Parameters<ScheduleTasksFor<string, string, Handle>>[0],
+) => ReturnType<ScheduleTasksFor<string, string, Handle>>;
 
 /**
  * A recording `schedule` that resolves each started task with its input, after
@@ -32,6 +35,15 @@ function recordingSchedule() {
   return { calls, seen, schedule, release: () => gate.resolve() };
 }
 
+/**
+ * The signal that `schedule` received for a task. Fails the test when the
+ * task has none, which happens only when its starting request has no signal.
+ */
+function signalOf(view: SharedTaskView<string>): AbortSignal {
+  assert.ok(view.signal, "the task has no signal");
+  return view.signal;
+}
+
 const sharing = {
   collapseTasksMs: 1_000,
   makeKey: (input: string) => input,
@@ -41,8 +53,8 @@ const sharing = {
  * A sharer whose `startOrRideTasks` takes the `schedule` for that call. The
  * sharer takes one `schedule` for every call, but many tests need a
  * different `schedule` per call, for example one that throws or cancels a
- * signal. The constructor's `schedule` runs the current call's `schedule`.
- * A nested call restores the outer call's `schedule` when it returns.
+ * signal. Each call passes its `schedule` as the context, and the
+ * constructor's `schedule` runs it.
  */
 function testSharer(
   options: Pick<
@@ -50,29 +62,10 @@ function testSharer(
     "collapseTasksMs" | "makeKey"
   > = sharing,
 ) {
-  let current: ScheduleTasks | undefined;
-  const sharer = new TaskSharer<string, string, Handle>({
+  return new TaskSharer<string, string, Handle, string, ScheduleTasks>({
     ...options,
-    schedule: (toStart) => {
-      if (current === undefined) throw new Error("no schedule for this call");
-      return current(toStart);
-    },
+    schedule: (toStart, schedule) => schedule(toStart),
   });
-  return {
-    startOrRideTasks(
-      taskRequests: Parameters<typeof sharer.startOrRideTasks>[0],
-      schedule: ScheduleTasks,
-    ) {
-      const outer = current;
-      current = schedule;
-      try {
-        return sharer.startOrRideTasks(taskRequests);
-      } finally {
-        current = outer;
-      }
-    },
-    drain: () => sharer.drain(),
-  };
 }
 
 describe("TaskSharer", () => {
@@ -261,7 +254,7 @@ describe("TaskSharer", () => {
     const b = new AbortController();
     sharer.startOrRideTasks([{ input: "x", signal: a.signal }], schedule);
     sharer.startOrRideTasks([{ input: "x", signal: b.signal }], schedule);
-    const signal = seen[0]!.signal;
+    const signal = signalOf(seen[0]!);
 
     a.abort(new Error("a cancelled"));
     assert.equal(signal.aborted, false);
@@ -285,7 +278,7 @@ describe("TaskSharer", () => {
     );
     sharer.startOrRideTasks([{ input: "x" }], schedule);
     controller.abort();
-    assert.equal(seen[0]!.signal.aborted, false);
+    assert.equal(signalOf(seen[0]!).aborted, false);
   });
 
   it("makes a task uncancellable, and removes its abort listeners, when a task request without a signal joins it", () => {
@@ -304,7 +297,7 @@ describe("TaskSharer", () => {
 
     first.abort();
     later.abort();
-    assert.equal(seen[0]!.signal.aborted, false);
+    assert.equal(signalOf(seen[0]!).aborted, false);
   });
 
   it("removes its abort listeners when the task settles", async () => {
@@ -328,7 +321,7 @@ describe("TaskSharer", () => {
     // The settled task's signal no longer follows its requests' signals.
     first.abort();
     rider.abort();
-    assert.equal(seen[0]!.signal.aborted, false);
+    assert.equal(signalOf(seen[0]!).aborted, false);
   });
 
   it("ignores a deferred cancellation after a task request without a signal in the same call makes the task uncancellable", () => {
@@ -342,12 +335,12 @@ describe("TaskSharer", () => {
         return schedule(toStart);
       },
     );
-    assert.equal(seen[0]!.signal.aborted, false);
+    assert.equal(signalOf(seen[0]!).aborted, false);
     const [rider] = sharer.startOrRideTasks([{ input: "x" }], schedule);
     assert.equal(rider!.rode, true);
   });
 
-  it("gives every task whose starting task request has no signal one shared signal that never aborts", () => {
+  it("gives schedule no signal for a task whose starting task request has no signal", () => {
     const sharer = testSharer();
     const { seen, schedule } = recordingSchedule();
     sharer.startOrRideTasks([{ input: "x" }, { input: "y" }], schedule);
@@ -358,28 +351,58 @@ describe("TaskSharer", () => {
     );
     controller.abort();
 
-    assert.equal(seen[0]!.signal, seen[1]!.signal);
-    assert.equal(seen[0]!.signal.aborted, false);
+    assert.equal(seen[0]!.signal, undefined);
+    assert.equal(seen[1]!.signal, undefined);
     // A rider's abort does not make the task unridable.
     const [rider] = sharer.startOrRideTasks([{ input: "x" }], schedule);
     assert.equal(rider!.rode, true);
   });
 
-  it("validates every task request before it changes any state", () => {
-    const sharer = testSharer();
-    const { calls, schedule } = recordingSchedule();
+  it("rejects only an already-cancelled task request, which starts and rides nothing", async () => {
+    const keyed: string[] = [];
+    const sharer = testSharer({
+      collapseTasksMs: 1_000,
+      makeKey: (input) => {
+        keyed.push(input);
+        return input;
+      },
+    });
+    const { calls, schedule, release } = recordingSchedule();
+    sharer.startOrRideTasks([{ input: "y" }], schedule);
     const reason = new Error("already aborted");
-    assert.throws(
-      () =>
-        sharer.startOrRideTasks(
-          [{ input: "x" }, { input: "y", signal: AbortSignal.abort(reason) }],
-          schedule,
-        ),
-      reason,
+    const [x, y] = sharer.startOrRideTasks(
+      [{ input: "x" }, { input: "y", signal: AbortSignal.abort(reason) }],
+      schedule,
     );
-    assert.deepEqual(calls, []);
-    const [x] = sharer.startOrRideTasks([{ input: "x" }], schedule);
+    assert.deepEqual(calls, [["y"], ["x"]]);
+    assert.deepEqual(keyed, ["y", "x"], "a cancelled request needs no key");
+    assert.deepEqual(
+      { handle: y!.handle, rode: y!.rode },
+      { handle: undefined, rode: false },
+    );
+    await assert.rejects(y!.result, reason);
+    release();
+    assert.equal(await x!.result, "x");
+  });
+
+  it("treats a task request whose signal aborts during makeKey as cancelled", async () => {
+    const controller = new AbortController();
+    const reason = new Error("aborted by makeKey");
+    const sharer = testSharer({
+      collapseTasksMs: 1_000,
+      makeKey: (input) => {
+        if (input === "x") controller.abort(reason);
+        return input;
+      },
+    });
+    const { calls, schedule } = recordingSchedule();
+    const [y, x] = sharer.startOrRideTasks(
+      [{ input: "y", signal: controller.signal }, { input: "x" }],
+      schedule,
+    );
+    assert.deepEqual(calls, [["x"]]);
     assert.equal(x!.rode, false);
+    await assert.rejects(y!.result, reason);
   });
 
   it("throws and changes nothing when schedule throws", () => {
@@ -464,7 +487,7 @@ describe("TaskSharer", () => {
         return schedule(toStart);
       },
     );
-    const signal = seen[0]!.signal;
+    const signal = signalOf(seen[0]!);
     // The second request keeps the task alive.
     assert.equal(signal.aborted, false);
     late.abort(new Error("late"));
@@ -485,7 +508,7 @@ describe("TaskSharer", () => {
       },
     );
     assert.equal(ride!.rode, true);
-    const signal = seen[0]!.signal;
+    const signal = signalOf(seen[0]!);
     assert.equal(signal.aborted, false);
     rider.abort(new Error("rider"));
     assert.equal(signal.aborted, true);
@@ -505,8 +528,8 @@ describe("TaskSharer", () => {
         }),
       { message: "schedule failed" },
     );
-    assert.equal(seen[0]!.signal.aborted, true);
-    assert.deepEqual(seen[0]!.signal.reason, new Error("first"));
+    assert.equal(signalOf(seen[0]!).aborted, true);
+    assert.deepEqual(signalOf(seen[0]!).reason, new Error("first"));
   });
 
   it("does not cancel a task when another task's cancellation in the same call cancels its earlier requests", () => {
@@ -524,14 +547,14 @@ describe("TaskSharer", () => {
         { input: "x", signal: xRider.signal },
       ],
       (toStart) => {
-        toStart[0]!.signal.addEventListener("abort", () => xFirst.abort());
+        signalOf(toStart[0]!).addEventListener("abort", () => xFirst.abort());
         yOnly.abort();
         return schedule(toStart);
       },
     );
-    assert.equal(seen[1]!.signal.aborted, true);
+    assert.equal(signalOf(seen[1]!).aborted, true);
     assert.equal(xFirst.signal.aborted, true);
-    assert.equal(seen[0]!.signal.aborted, false);
+    assert.equal(signalOf(seen[0]!).aborted, false);
   });
 
   it("aborts a task with the reason of a signal that aborted during schedule", () => {
@@ -545,8 +568,8 @@ describe("TaskSharer", () => {
         return schedule(toStart);
       },
     );
-    assert.equal(seen[0]!.signal.aborted, true);
-    assert.deepEqual(seen[0]!.signal.reason, new Error("during schedule"));
+    assert.equal(signalOf(seen[0]!).aborted, true);
+    assert.deepEqual(signalOf(seen[0]!).reason, new Error("during schedule"));
   });
 
   it("lets an abort listener that runs when the call releases its tasks request a key the call started", () => {
@@ -557,7 +580,7 @@ describe("TaskSharer", () => {
     sharer.startOrRideTasks(
       [{ input: "x", signal: controller.signal }],
       (toStart) => {
-        toStart[0]!.signal.addEventListener("abort", () => {
+        signalOf(toStart[0]!).addEventListener("abort", () => {
           nested.push(...sharer.startOrRideTasks([{ input: "x" }], schedule));
         });
         controller.abort();

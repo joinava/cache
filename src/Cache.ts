@@ -53,11 +53,7 @@ import {
   type CacheLookupResult,
   type CacheReadOutcome,
 } from "./utils/cacheHelpers.js";
-import {
-  createRequestScheduler,
-  type BatchOptions,
-  type RequestScheduler,
-} from "./utils/requestScheduler.js";
+import { Batcher, type BatchOptions } from "./scheduling/batcher.js";
 import {
   CacheContractError,
   readStoreObserved,
@@ -258,9 +254,13 @@ export default class Cache<
 > {
   readonly #logger: Bind1<Logger, "cache">;
   readonly #dataStore: Store<StoreSupportedTypes, Validators, Params>;
-  /** Set iff the Store has getMany. A get-only Store reads each request directly. */
-  readonly #readScheduler:
-    | RequestScheduler<
+  /**
+   * Batches the reads of `get`. Set iff the Store has getMany. A get-only
+   * Store reads each request directly. Reads never share work (see the Store
+   * read in get), so a batcher is all that reads need.
+   */
+  readonly #readBatcher:
+    | Batcher<
         StoreGetManyRequest<StoreSupportedTypes, Params>,
         EntryForId<
           StoreSupportedTypes,
@@ -308,18 +308,23 @@ export default class Cache<
     const unboundLogger = options.logger ?? defaultLoggersByComponent.cache;
     this.#logger = unboundLogger.bind(null, "cache");
     this.#dataStore = options.store;
-    // No makeKey: reads never share work (see the Store read in get).
-    this.#readScheduler =
+    this.#readBatcher =
       this.#dataStore.getMany === undefined
         ? undefined
-        : createRequestScheduler({
-            bulk: true,
+        : new Batcher({
             ...options.readBatching,
-            dispatch: (reads) =>
+            ...(options.logger ? { logger: options.logger } : {}),
+            dispatch: (reads, { autoBatched }) =>
               this.#readStore(
-                reads.map(({ request }) => request),
+                reads.map(({ input }) => input),
                 undefined,
-                reads.reduce((sum, read) => sum + read.queueWaitMs, 0),
+                {
+                  autoBatched,
+                  queueWaitTotalMs: reads.reduce(
+                    (sum, read) => sum + read.queueWaitMs,
+                    0,
+                  ),
+                },
               ),
           });
     this.#onGetAfterClose = options.onGetAfterClose ?? "throw";
@@ -513,22 +518,19 @@ export default class Cache<
     // promise share is sound, which bounds the skew to the read's own
     // duration.
     const read =
-      this.#readScheduler === undefined
+      this.#readBatcher === undefined
         ? this.#readStore([storeRequest] as const, options).then(
             ([entries]) => {
               if (entries instanceof Error) throw entries;
               return entries;
             },
           )
-        : this.#readScheduler.attach(
-            [
-              {
-                request: storeRequest,
-                ...(options?.signal ? { signal: options.signal } : {}),
-              },
-            ],
-            true,
-          )[0]!.promise;
+        : this.#readBatcher.enqueue([
+            {
+              input: storeRequest,
+              ...(options?.signal ? { signal: options.signal } : {}),
+            },
+          ])[0]!.result;
 
     const cacheEntries = await raceWithSignal(read, options?.signal).catch(
       (error: unknown) => {
@@ -836,11 +838,12 @@ export default class Cache<
     if (this.#closePromise !== undefined) return this.#closePromise;
 
     this.#closed = true;
-    // A batched read that `get()` accepted before this call still runs: start
-    // the queued ones now, so that they are in flight when close() waits for
-    // tracked Store calls, as unbatched reads would be.
-    this.#readScheduler?.flush();
+    // A batched read that `get()` accepted before this call still runs. The
+    // batcher's close sends the queued ones synchronously, and waits for
+    // every read it accepted.
+    const readsClosed = this.#readBatcher?.close();
     this.#closePromise = (async () => {
+      await readsClosed;
       await Promise.allSettled(this.#operations);
       await this.#dataStore.close();
     })();
@@ -860,7 +863,7 @@ export default class Cache<
   >(
     requests: Requests,
     options?: { signal?: AbortSignal },
-    queueWaitTotalMs?: number,
+    batch?: { autoBatched: boolean; queueWaitTotalMs: number },
   ) {
     const observed = cacheReadStoreChannel.hasSubscribers;
     return this.#track(() =>
@@ -873,13 +876,13 @@ export default class Cache<
               cacheReadStoreChannel.publish({
                 cache: this.name,
                 operation: event.operation,
-                autoBatched: queueWaitTotalMs !== undefined,
+                autoBatched: batch?.autoBatched ?? false,
                 outcome: event.outcome,
                 requestCount: event.requestCount,
                 failedRequestCount: event.failedRequestCount,
                 entryCount: event.entryCount,
                 durationMs: event.durationMs,
-                queueWaitTotalMs: queueWaitTotalMs ?? 0,
+                queueWaitTotalMs: batch?.queueWaitTotalMs ?? 0,
               });
             }
           : undefined,

@@ -1,0 +1,263 @@
+import assert from "node:assert/strict";
+import { it } from "node:test";
+import type { Logger } from "../types/index.js";
+import { RequestScheduler, type DispatchInfo } from "./requestScheduler.js";
+
+const sharing = {
+  collapseTasksMs: 1_000,
+  makeKey: (request: string) => request,
+};
+
+it(
+  "skips a queued task that an earlier chunk's producer cancels synchronously",
+  { timeout: 5_000 },
+  async () => {
+    const scheduled = Promise.withResolvers<() => void>();
+    const controller = new AbortController();
+    const failure = new Error("cancelled during production");
+    const calls: string[] = [];
+    const scheduler = new RequestScheduler<string, string>({
+      batching: {
+        maxBatchSize: 1,
+        batchScheduleFn: (dispatch) => scheduled.resolve(dispatch),
+      },
+      collapseTasksMs: 3_000,
+      makeKey: (request) => request,
+      dispatch: async (requests) => {
+        const values = requests.map(({ request }) => request);
+        calls.push(...values);
+        if (values.includes("a")) controller.abort(failure);
+        return await Promise.resolve(values);
+      },
+    });
+    const outcomes = scheduler.startOrRideTasks(
+      ["a", "b", "c"].map((request) => ({
+        request,
+        ...(request === "b" ? { signal: controller.signal } : {}),
+      })),
+      { autoBatch: true },
+    );
+    const results = Promise.allSettled(outcomes.map(({ promise }) => promise));
+    (await scheduled.promise)();
+    await scheduler.close();
+    assert.deepEqual(calls, ["a", "c"]);
+    assert.deepEqual(await results, [
+      { status: "fulfilled", value: "a" },
+      { status: "rejected", reason: failure },
+      { status: "fulfilled", value: "c" },
+    ]);
+  },
+);
+
+it(
+  "does not redispatch tasks that an earlier chunk's producer flushes synchronously",
+  { timeout: 5_000 },
+  async () => {
+    const scheduled = Promise.withResolvers<() => void>();
+    const calls: string[] = [];
+    const scheduler = new RequestScheduler<string, string>({
+      batching: {
+        maxBatchSize: 1,
+        batchScheduleFn: (dispatch) => scheduled.resolve(dispatch),
+      },
+      collapseTasksMs: 3_000,
+      makeKey: (request) => request,
+      dispatch: async (requests) => {
+        const values = requests.map(({ request }) => request);
+        calls.push(...values);
+        if (values.includes("a")) scheduler.flush();
+        return await Promise.resolve(values);
+      },
+    });
+    const outcomes = scheduler.startOrRideTasks(
+      ["a", "b", "c"].map((request) => ({
+        request,
+      })),
+      { autoBatch: true },
+    );
+    (await scheduled.promise)();
+    await scheduler.close();
+    assert.deepEqual(calls, ["a", "b", "c"]);
+    assert.deepEqual(
+      await Promise.all(outcomes.map(({ promise }) => promise)),
+      ["a", "b", "c"],
+    );
+  },
+);
+
+it(
+  "defaults producer batches to at most 20 requests",
+  { timeout: 5_000 },
+  async () => {
+    const scheduled = Promise.withResolvers<() => void>();
+    const calls: number[][] = [];
+    const scheduler = new RequestScheduler<number, number>({
+      batching: { batchScheduleFn: (dispatch) => scheduled.resolve(dispatch) },
+      collapseTasksMs: 0,
+      makeKey: (request) => String(request),
+      dispatch: async (requests) => {
+        const values = requests.map(({ request }) => request);
+        calls.push(values);
+        return await Promise.resolve(values);
+      },
+    });
+    const requests = Array.from({ length: 21 }, (_, index) => index);
+    const outcomes = scheduler.startOrRideTasks(
+      requests.map((request) => ({ request })),
+      { autoBatch: true },
+    );
+    (await scheduled.promise)();
+    await scheduler.close();
+    assert.deepEqual(calls, [requests.slice(0, 20), requests.slice(20)]);
+    assert.deepEqual(
+      await Promise.all(outcomes.map(({ promise }) => promise)),
+      requests,
+    );
+  },
+);
+
+it(
+  "gives every request its own task when makeKey returns undefined",
+  { timeout: 5_000 },
+  async () => {
+    const scheduled = Promise.withResolvers<() => void>();
+    const calls: string[][] = [];
+    const scheduler = new RequestScheduler<string, string>({
+      batching: { batchScheduleFn: (dispatch) => scheduled.resolve(dispatch) },
+      collapseTasksMs: 1_000,
+      makeKey: () => undefined,
+      dispatch: async (requests) => {
+        const values = requests.map(({ request }) => request);
+        calls.push(values);
+        return await Promise.resolve(values);
+      },
+    });
+    const outcomes = scheduler.startOrRideTasks(
+      ["a", "a"].map((request) => ({ request })),
+      { autoBatch: true },
+    );
+    (await scheduled.promise)();
+    await scheduler.close();
+    assert.deepEqual(calls, [["a", "a"]]);
+    assert.deepEqual(
+      outcomes.map(({ rode }) => rode),
+      [false, false],
+    );
+  },
+);
+
+it(
+  "gives the owner's logger the warnings for work started after close",
+  { timeout: 5_000 },
+  async () => {
+    const warnings: string[] = [];
+    const logger: Logger = (component, level, message) => {
+      if (level === "warn") warnings.push(`${component}: ${message}`);
+    };
+    const dispatch = async (requests: readonly { request: string }[]) =>
+      requests.map(({ request }) => request);
+    const bulk = new RequestScheduler<string, string>({
+      ...sharing,
+      batching: {},
+      logger,
+      dispatch,
+    });
+    const single = new RequestScheduler<string, string>({
+      ...sharing,
+      batching: false,
+      logger,
+      dispatch,
+    });
+
+    await Promise.all([bulk.close(), single.close()]);
+    const late = [bulk, single].map(
+      (scheduler) =>
+        scheduler.startOrRideTasks([{ request: "late" }], {
+          autoBatch: true,
+        })[0]!.promise,
+    );
+    assert.deepEqual(await Promise.all(late), ["late", "late"]);
+    assert.deepEqual(warnings, [
+      "batcher: dispatchNow called after close",
+      "batcher: dispatchNow called after close",
+    ]);
+  },
+);
+
+it(
+  "close dispatches queued tasks at once, and waits for them",
+  { timeout: 5_000 },
+  async () => {
+    const infos: DispatchInfo[] = [];
+    const scheduler = new RequestScheduler<string, string>({
+      ...sharing,
+      batching: { batchScheduleFn: () => {} },
+      dispatch: async (requests, info) => {
+        infos.push(info);
+        return requests.map(({ request }) => request);
+      },
+    });
+    const [queued] = scheduler.startOrRideTasks([{ request: "a" }], {
+      autoBatch: true,
+    });
+    const closed = scheduler.close();
+    assert.equal(scheduler.close(), closed);
+    assert.deepEqual(infos, [{ autoBatched: true }]);
+    await closed;
+    assert.equal(await queued!.promise, "a");
+  },
+);
+
+it(
+  "dispatches the other requests of a call when one request's signal already aborted",
+  { timeout: 5_000 },
+  async () => {
+    const calls: string[][] = [];
+    const scheduler = new RequestScheduler<string, string>({
+      batching: {},
+      collapseTasksMs: 1_000,
+      makeKey: (request) => request,
+      dispatch: async (requests) => {
+        const values = requests.map(({ request }) => request);
+        calls.push(values);
+        return values;
+      },
+    });
+    const reason = new Error("cancelled");
+    const [cancelled, kept] = scheduler.startOrRideTasks(
+      [{ request: "a", signal: AbortSignal.abort(reason) }, { request: "b" }],
+      { autoBatch: false },
+    );
+    await assert.rejects(cancelled!.promise, reason);
+    assert.equal(await kept!.promise, "b");
+    assert.deepEqual(calls, [["b"]]);
+  },
+);
+
+it(
+  "sends a direct call as one unsplit dispatch, even when batchScheduleFn runs its callback at once",
+  { timeout: 5_000 },
+  async () => {
+    const calls: { values: string[]; autoBatched: boolean }[] = [];
+    const scheduler = new RequestScheduler<string, string>({
+      ...sharing,
+      batching: { maxBatchSize: 2, batchScheduleFn: (dispatch) => dispatch() },
+      dispatch: async (requests, { autoBatched }) => {
+        const values = requests.map(({ request }) => request);
+        calls.push({ values, autoBatched });
+        return values;
+      },
+    });
+    const outcomes = scheduler.startOrRideTasks(
+      ["a", "b", "c", "d", "e"].map((request) => ({ request })),
+      { autoBatch: false },
+    );
+    assert.deepEqual(
+      await Promise.all(outcomes.map(({ promise }) => promise)),
+      ["a", "b", "c", "d", "e"],
+    );
+    assert.deepEqual(calls, [
+      { values: ["a", "b", "c", "d", "e"], autoBatched: false },
+    ]);
+  },
+);

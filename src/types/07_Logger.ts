@@ -16,6 +16,7 @@ export const components = [
   "cache",
   "wrap-producer",
   "collapsed-task-creator",
+  "batcher",
   "redis-store",
   "sqlite-store",
   "postgres-store",
