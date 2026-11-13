@@ -77,8 +77,10 @@ Also flag what a change leaves behind:
 
 **Counter-check: a helper must not hide control flow.** Flag a new helper
 that contains an early return, a swallowed error, or an abort check that a
-reader of the call site needs to see. Extract a helper only when it removes
-more than it hides. (Real case: `#publishReadFailed` silently returned when
+reader of the call site needs to see. Extract a helper only when it makes
+the code more readable and predictable at the use site, by replacing inline
+logic with a helper that performs a logical, independent unit of work and
+uses a clear name. (Real case: `#publishReadFailed` silently returned when
 the signal was aborted. The user re-inlined it, because the hidden abort
 handling was more confusing than the duplication it removed.)
 
@@ -110,14 +112,9 @@ entry point must remember the funnel — only a comment says so"; the very
 next entry point added forgot both the funnel and the shutdown guard, and
 shipped in the same PR.)
 
-Also flag **shared code that branches on a variant flag** (`batches:
-boolean`, `mode: "single" | "bulk"`) to decide what to do. Ask for a
-capability instead, such as an optional method that only one variant
-supplies.
-
 Also flag **preconditions enforced only by a comment** in a contract
 between two modules: "callers must pass an already-completed request". Ask
-whether a type (a brand, a `#private` class) can carry it. Verify a brand
+whether a type (a brand, with `Tagged` or a class type with a `#private` field) can carry it. Verify a brand
 with a type probe before you rely on it: a `type-fest` `Tagged` brand
 survives an object spread, so it cannot prove object identity.
 
