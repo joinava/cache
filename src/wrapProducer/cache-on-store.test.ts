@@ -94,10 +94,11 @@ function makeWrappedProducer(
   });
 }
 
-
 type WrapperKind = "single" | "bulk" | "hashed" | "bulk-hashed";
 function makeCall(kind: WrapperKind, store: MemoryStore) {
-  const cache = new Cache(singleTypeCacheOptions<string>()({ name: kind, store }));
+  const cache = new Cache(
+    singleTypeCacheOptions<string>()({ name: kind, store }),
+  );
   const result = { content: "value", directives: { freshUntilAge: 60 } };
   const call = (onStore: OnStore) =>
     kind === "single"
@@ -131,10 +132,16 @@ describe("onStore across all producer wrappers", () => {
       const { call, cache } = makeCall(kind, store.store);
       const captured = Promise.withResolvers<{ stored: Promise<void> }>();
       let calls = 0;
-      await call((stored) => { calls += 1; captured.resolve({ stored }); });
+      await call((stored) => {
+        calls += 1;
+        captured.resolve({ stored });
+      });
       const { stored } = await captured.promise;
       assert.equal(calls, 1);
-      assert.equal(await Promise.race([stored.then(() => true), nextTurn(false)]), false);
+      assert.equal(
+        await Promise.race([stored.then(() => true), nextTurn(false)]),
+        false,
+      );
       store.release();
       await stored;
       assert.equal(store.isStored(), true);
@@ -159,7 +166,9 @@ describe("onStore across all producer wrappers", () => {
     const second = deferred();
     const original = memory.store.bind(memory);
     memory.store = async (entries) => {
-      await (entries[0]?.entry.id === "bypass" ? first.promise : second.promise);
+      await (entries[0]?.entry.id === "bypass"
+        ? first.promise
+        : second.promise);
       return await original(entries);
     };
     const captured = Promise.withResolvers<{ stored: Promise<void> }>();
@@ -171,7 +180,16 @@ describe("onStore across all producer wrappers", () => {
     const failure = new Error("first store failed");
     const rejected = assert.rejects(stored, (error) => error === failure);
     first.reject(failure);
-    assert.equal(await Promise.race([stored.then(() => true, () => true), nextTurn(false)]), false);
+    assert.equal(
+      await Promise.race([
+        stored.then(
+          () => true,
+          () => true,
+        ),
+        nextTurn(false),
+      ]),
+      false,
+    );
     second.resolve();
     await rejected;
     await memory.close();
@@ -182,14 +200,24 @@ describe("onStore across all producer wrappers", () => {
     store.release();
     const captured = Promise.withResolvers<{ stored: Promise<void> }>();
     await call((stored) => captured.resolve({ stored }));
-    await (await captured.promise).stored;
+    await (
+      await captured.promise
+    ).stored;
     let calls = 0;
-    await call((stored) => { calls += 1; assert.ok(stored instanceof Promise); });
+    await call((stored) => {
+      calls += 1;
+      assert.ok(stored instanceof Promise);
+    });
     assert.equal(calls, 1);
     await cache.close();
   });
   it("reports a fulfilled promise for empty bulk calls", async () => {
-    const cache = new Cache(singleTypeCacheOptions<string>()({ name: "empty", store: new MemoryStore() }));
+    const cache = new Cache(
+      singleTypeCacheOptions<string>()({
+        name: "empty",
+        store: new MemoryStore(),
+      }),
+    );
     const captured = Promise.withResolvers<{ stored: Promise<void> }>();
     const produce = wrapProducer({ cache, produceMany: async () => [] });
     assert.deepEqual(
@@ -220,7 +248,10 @@ it("collapsed callers observe the same pending write", async () => {
   ]);
   const a = (await first.promise).stored;
   const b = (await second.promise).stored;
-  assert.equal(await Promise.race([Promise.all([a, b]).then(() => true), nextTurn(false)]), false);
+  assert.equal(
+    await Promise.race([Promise.all([a, b]).then(() => true), nextTurn(false)]),
+    false,
+  );
   store.release();
   await Promise.all([a, b]);
 });
@@ -255,8 +286,12 @@ it("ignored rejected store promises do not reject the wrapper", async () => {
 for (const mode of ["background", "fallback"] as const) {
   it(`single ${mode} exposes no foreground writes`, async () => {
     const memory = new MemoryStore();
-    const cache = new Cache(singleTypeCacheOptions<string>()({ name: mode, store: memory }));
-    await cache.store([{ id: "key", content: "cached", directives: { freshUntilAge: 60 } }]);
+    const cache = new Cache(
+      singleTypeCacheOptions<string>()({ name: mode, store: memory }),
+    );
+    await cache.store([
+      { id: "key", content: "cached", directives: { freshUntilAge: 60 } },
+    ]);
     const originalGet = cache.get.bind(cache);
     cache.get = async (request, options) => {
       const lookup = await originalGet(request, options);
@@ -289,7 +324,9 @@ for (const mode of ["background", "fallback"] as const) {
       { onStore: (stored) => captured.resolve({ stored }) },
     );
     assert.equal(result.content, "cached");
-    await (await captured.promise).stored;
+    await (
+      await captured.promise
+    ).stored;
     if (mode === "background") {
       await started.promise;
       gate.resolve();

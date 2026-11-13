@@ -23,7 +23,7 @@ export type ReadonlyConsumerRequest<
 > = {
   // ReadonlyDeep<Id> == Id for any concrete instantiation of Id extends string,
   // but TS can't always figure that out when Id is generic/unbound, so we don't
-  // apply the `ReadonlyDeep` wrapper to it. 
+  // apply the `ReadonlyDeep` wrapper to it.
   readonly id: Id;
   readonly params: ReadonlyDeep<Partial<Params>>;
   readonly directives: ReadonlyDeep<ConsumerDirectives>;
@@ -31,8 +31,11 @@ export type ReadonlyConsumerRequest<
 
 export type PartialReadonlyConsumerRequest<
   Params extends AnyParams,
-  Id extends string
-> = MakeKeysOptional<ReadonlyConsumerRequest<Params, Id>, "directives" | "params">;
+  Id extends string,
+> = MakeKeysOptional<
+  ReadonlyConsumerRequest<Params, Id>,
+  "directives" | "params"
+>;
 
 /**
  * The consumer's staleness policy. This object allows the consumer to express:
@@ -146,4 +149,3 @@ export type ConsumerDirectives = {
   maxAge?: number;
   maxStale?: ConsumerMaxStale;
 };
-

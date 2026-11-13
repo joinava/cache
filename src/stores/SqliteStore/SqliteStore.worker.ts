@@ -292,11 +292,13 @@ function initialize(data: WorkerInitData): SqliteStoreWorkerContext {
 
         try {
           const rows = db
-            .prepare(`
+            .prepare(
+              `
             SELECT resource_id, vary, entry FROM cache_entries
             WHERE resource_id IN (${chunk.map(() => "?").join(", ")})
               AND (expires_at IS NULL OR expires_at > ?)
-          `)
+          `,
+            )
             .all(...chunk, expiryCutoff()) as CacheRow[];
           const grouped = Map.groupBy(rows, (row) => row.resource_id);
           chunk.forEach((id) => results.set(id, grouped.get(id) ?? []));

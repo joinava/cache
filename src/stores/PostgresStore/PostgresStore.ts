@@ -417,23 +417,42 @@ export default class PostgresStore<
     const readOldAndUpsert = (batch: typeof rows) =>
       this.db
         .with("old", (db) =>
-          db.selectFrom(this.tableName)
-            .where((eb) => eb.or(batch.map((row) => eb.and([
-              eb("resource_id", "=", row.resource_id),
-              eb("vary", "=", sql<Readonly<NormalizedVary<Params>>>`${row.vary}::jsonb`),
-            ]))))
+          db
+            .selectFrom(this.tableName)
+            .where((eb) =>
+              eb.or(
+                batch.map((row) =>
+                  eb.and([
+                    eb("resource_id", "=", row.resource_id),
+                    eb(
+                      "vary",
+                      "=",
+                      sql<Readonly<NormalizedVary<Params>>>`${row.vary}::jsonb`,
+                    ),
+                  ]),
+                ),
+              ),
+            )
             .select((eb) => [
               "resource_id",
               "vary",
-              sql<Partial<Validators>>`${eb.ref("entry")} -> 'validators'`.as("validators"),
+              sql<Partial<Validators>>`${eb.ref("entry")} -> 'validators'`.as(
+                "validators",
+              ),
             ]),
         )
         .with("upsert", (db) =>
-          db.insertInto(this.tableName).values(batch)
-            .onConflict((oc) => oc.columns(["resource_id", "vary"])
-              .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") }))),
+          db
+            .insertInto(this.tableName)
+            .values(batch)
+            .onConflict((oc) =>
+              oc
+                .columns(["resource_id", "vary"])
+                .doUpdateSet((eb) => ({ entry: eb.ref("excluded.entry") })),
+            ),
         )
-        .selectFrom("old").selectAll("old");
+        .selectFrom("old")
+        .selectAll("old");
     const batchSize = 1_000;
     // Keep the one-statement fast path for ordinary small cache writes.
     const oldRows = (await (
@@ -445,7 +464,9 @@ export default class PostgresStore<
             // Each batch reads only its own slots before replacing them.
             for (let start = 0; start < rows.length; start += batchSize) {
               const result = await trx.executeQuery<OldRow>(
-                readOldAndUpsert(rows.slice(start, start + batchSize)).compile(),
+                readOldAndUpsert(
+                  rows.slice(start, start + batchSize),
+                ).compile(),
               );
               previous.push(...result.rows);
             }
