@@ -1,18 +1,21 @@
 import type { Channel } from "node:diagnostics_channel";
 import * as diagnosticsChannel from "node:diagnostics_channel";
+import type { PickEach } from "type-party";
 import type { AnyParams } from "./types/01_Params.js";
 import type { AnyValidators } from "./types/02_Validators.js";
 import type { Vary } from "./types/04_ProducerResult.js";
-import type { StoreEntryRelationship } from "./types/06_Store.js";
+import type { StoreEntryRelationship } from "./types/07_Store.js";
+import type { CacheSpec } from "./types/index.js";
+import type { CacheLookupResult } from "./utils/cacheHelpers.js";
 
 /**
  * @fileoverview The package's diagnostics channels. There are five:
  *
  * - `@zingage/cache:read` -- what did a cache lookup find? Published by
- *   `Cache.get`/`Cache.getMany` (including direct callers that never touch a
+ *   `Cache.get`/`Cache.getUnbatched` (including direct callers that never touch a
  *   wrapper).
- * - `@zingage/cache:read-batch` -- one actual Store read, automatic or direct,
- *   with queue wait, Store duration, and request/entry/failure counts.
+ * - `@zingage/cache:read-store` -- one message per physical Store read. Only a
+ *   `Cache` reads a Store, so every message carries a cache name.
  * - `@zingage/cache:fetch` -- how was a logical wrapped-producer request
  *   answered? Published by the producer wrappers, once per call of the
  *   wrapped function (per request element, for bulk), at settlement.
@@ -22,10 +25,9 @@ import type { StoreEntryRelationship } from "./types/06_Store.js";
  * - `@zingage/cache:store-entry` -- one message per entry passed to
  *   `Cache.store()`.
  *
- * Store-read messages carry only the cache name because they can mix resource
- * types. Other messages carry the same two attribution fields ({@link Attribution};
- * `produce` carries them per element of `requests[]` instead): the cache
- * instance's `name` and the resource-type name from the cache's registry.
+ * Logical messages carry the cache name and resource-type name. `produce`
+ * carries resource types per element of `requests[]`. `read-store` carries
+ * only the cache name because a physical read can cover several types.
  *
  * ## `vary`: the variant key shared by `read`, `fetch`, and `store-entry`
  *
@@ -58,8 +60,8 @@ import type { StoreEntryRelationship } from "./types/06_Store.js";
  * event already shipped, and an `aborted` fetch settles *before* its
  * invocation does (the collapsed producer call keeps running and stores in
  * the background). The durations also mean different things:
- * `produce.durationMs` is invocation time, while any fetch-level duration
- * would be caller wait (riders wait less than the invocation took).
+ * `produce.durationMs` is invocation time, while `fetch.durationMs`
+ * measures caller wait (riders wait less than the invocation took).
  */
 
 /**
@@ -103,14 +105,14 @@ const typedChannel =
 /**
  * Name of the diagnostics channel that fires once per cache lookup --
  * i.e., once per `Cache.get()` call and once per request in a
- * `Cache.getMany()` call -- reporting what the lookup found.
+ * `Cache.getUnbatched()` call -- reporting what the lookup found.
  *
  * Wrapper requests with bypass directives (`maxAge: 0`) never appear here:
  * they skip the cache read entirely.
  *
  * A read that itself **fails** (the store threw) publishes `found:
  * "read-failed"` carrying the `error`, one message per request in the failed
- * call, and *then* the error propagates (`Cache.get`/`getMany` still reject).
+ * call, and *then* the error propagates (`Cache.get`/`getUnbatched` still reject).
  * This keeps the channel's one-message-per-lookup invariant total, so a
  * subscriber can use it as a complete denominator. It matters most under the
  * wrappers' default `onCacheReadFailure: "call-producer"`, which absorbs the
@@ -120,35 +122,6 @@ const typedChannel =
  * signal naming the cause.
  */
 export const CACHE_READ_CHANNEL_NAME = "@zingage/cache:read";
-
-/**
- * The lookup results that SELECTED a stored entry:
- * - "usable":                  satisfiable from cache alone
- * - "usable-while-revalidate": only usable if paired with a background refresh
- * - "usable-if-error":         only usable as a producer-failure fallback
- *
- * Split out of {@link CacheReadFound} because these are exactly the results
- * that can identify a variant: a selected entry has a `vary`, and "none" has
- * no entry to take one from.
- */
-export type CacheReadFoundWithEntry =
-  | "usable"
-  | "usable-while-revalidate"
-  | "usable-if-error";
-
-/**
- * What a *completed* lookup found, evaluated against the request's directives:
- * either one of the entry-selecting results ({@link CacheReadFoundWithEntry})
- * or "none" -- nothing this request could use.
- *
- * (Reserved for future conditional revalidation: entries that are merely
- * `validatable` report "none" today.)
- *
- * Deliberately excludes `"read-failed"`, which is not a lookup *result* -- see
- * {@link CacheReadMessage}. Keeping the two apart lets the mapping from a
- * lookup result to a `found` value stay total.
- */
-export type CacheReadFound = CacheReadFoundWithEntry | "none";
 
 /**
  * The message type published to the read diagnostics channel.
@@ -164,23 +137,40 @@ export type CacheReadFound = CacheReadFoundWithEntry | "none";
  */
 export type CacheReadMessage = Attribution & {
   resourceId: string;
-  /** Elapsed lookup time through classification, in milliseconds. Bulk slots share a start time. */
+  /** Elapsed lookup time after classification, in milliseconds. Slots of one call share a start time. */
   durationMs: number;
 } & (
     | {
-        found: CacheReadFoundWithEntry;
+        /**
+         * The lookup SELECTED a stored entry, evaluated against the request's
+         * directives:
+         * - "usable":                  satisfiable from cache alone
+         * - "usable-while-revalidate": only usable if paired with a background refresh
+         * - "usable-if-error":         only usable as a producer-failure fallback
+         */
+        found: "usable" | "usable-while-revalidate" | "usable-if-error";
         /** The selected entry's normalized vary identifies its stored variant. */
         vary: Vary<AnyParams>;
+        /** The lookup completed, so there is no error. */
+        error?: undefined;
       }
     | {
+        /**
+         * The lookup completed and found nothing this request could use.
+         *
+         * (Reserved for future conditional revalidation: entries that are
+         * merely `validatable` report "none" today.)
+         */
         found: "none";
         /** No entry was selected, so there is no variant. */
         vary?: undefined;
+        /** The lookup completed, so there is no error. */
+        error?: undefined;
       }
     | {
         /**
          * The store threw; no lookup result exists. The error still propagates
-         * to the `Cache.get`/`getMany` caller after this message is published.
+         * to the `Cache.get`/`getUnbatched` caller after this message is published.
          */
         found: "read-failed";
         /** Whatever the store threw. Unknown by design -- stores may reject with anything. */
@@ -206,6 +196,38 @@ export const cacheReadChannel = typedChannel<CacheReadMessage>()(
 export function publishCacheRead(message: CacheReadMessage): void {
   cacheReadChannel.publish(message);
 }
+
+/**
+ * The `found` and `vary` fields of the read message for a lookup that
+ * completed. A lookup that failed publishes `found: "read-failed"` instead.
+ * @internal
+ */
+export function readOutcomeOf<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+>(result: CacheLookupResult<Spec, Validators, Params>): CompletedReadOutcome {
+  // The checks follow the selection order in `selectCacheLookup`
+  // (utils/cacheHelpers.ts), so the outcome names the entry that the lookup
+  // selected. Keep the two orders the same.
+  if (result.usable) return { found: "usable", vary: result.usable.vary };
+  if (result.usableWhileRevalidate) {
+    return {
+      found: "usable-while-revalidate",
+      vary: result.usableWhileRevalidate.vary,
+    };
+  }
+  if (result.usableIfError) {
+    return { found: "usable-if-error", vary: result.usableIfError.vary };
+  }
+  return { found: "none" };
+}
+
+/** The outcome fields of a {@link CacheReadMessage} for a completed lookup. */
+type CompletedReadOutcome = Exclude<
+  PickEach<CacheReadMessage, "found" | "vary" | "error">,
+  { found: "read-failed" }
+>;
 
 /**
  * Name of the diagnostics channel that fires once per call of a wrapped
@@ -247,7 +269,6 @@ export type CacheFetchDisposition =
       // A pending entry can therefore produce a cache-served disposition even
       // when the store read reported a miss. The read channel reports the
       // actual store lookup; this channel reports the combined caller result.
-      /** Includes entries selected from the wrapper's pending-write overlay. */
       disposition:
         | "served-from-cache"
         | "served-stale-while-revalidating"
@@ -270,7 +291,11 @@ export type CacheFetchDisposition =
       vary: Vary<AnyParams>;
     }
   | {
-      disposition: "served-from-producer" | "producer-error" | "aborted";
+      disposition:
+        | "served-from-producer"
+        | "producer-error"
+        | "cache-read-error"
+        | "aborted";
       /**
        * True iff the consumer's directives forced producer contact
        * regardless of cache contents (`isRequestingCacheBypass`:
@@ -302,15 +327,20 @@ export type CacheFetchDisposition =
  * The message type published to the fetch diagnostics channel.
  */
 export type CacheFetchMessage = Attribution & {
+  /** Logical public-call duration, including all slots in a known set. */
+  durationMs: number;
   resourceId: string;
   /**
    * True if this request's own SETTLEMENT rode an already-in-flight producer
-   * call -- it was answered (or errored/aborted) via an invocation some
-   * other caller initiated. Cache-served settlements report false even when
-   * the request attached a background revalidation to an in-flight
-   * invocation: a `served-stale-while-revalidating` rider counts in the
-   * produce channel's `collapsedCallerCount` but not here, because its
-   * settlement was the cached entry, not the invocation.
+   * call -- it was answered (or errored/aborted) via an invocation that
+   * another request initiated. Each `collapsed: true` fetch is one of the
+   * rides that the produce channel's `collapsedRequestCount` counts.
+   *
+   * A cache-served settlement reports false: no producer call served it. That
+   * holds even when the fetch also started a background revalidation that
+   * rode an in-flight invocation. The revalidation is a separate request with
+   * no fetch message of its own, so its ride appears only in
+   * `collapsedRequestCount`.
    *
    * In the base (not the union) because it doesn't co-vary with the bypass
    * flag: e.g. `served-stale-after-error` can be collapsed (a rider on a
@@ -351,15 +381,34 @@ export const CACHE_PRODUCE_CHANNEL_NAME = "@zingage/cache:produce";
 export type CacheProduceMessage = {
   cache: string;
   /**
-   * Why the producer was contacted -- the invocation's INITIATING cause.
-   * Bypass never mixes with the other two (the collapse key includes the
-   * request's directives, so a `maxAge: 0` caller and a plain-miss caller
-   * never share an invocation), but miss and revalidation callers use
+   * True when the producer scheduler dispatched this invocation from its
+   * automatic queue, including the flush that `close()` starts. False when it
+   * ran directly: a single `produce` call, or a call with
+   * `autoBatch: { producer: false }`.
+   */
+  autoBatched: boolean;
+  /** Requests in this invocation. */
+  requestCount: number;
+  /** Failed result slots, or every request when the invocation rejects. */
+  failedRequestCount: number;
+  /**
+   * Time the requests waited in the automatic queue, summed over requests.
+   * Zero for direct invocations.
+   */
+  queueWaitTotalMs: number;
+  /**
+   * Why the producer was contacted. Compatible requests keep their initiating
+   * cause when callers join them. A bulk invocation reports `mixed` when its
+   * distinct requests have different initiating causes.
+   *
+   * Bypass never shares a request with the other two causes: the collapse key
+   * includes the request's directives, so a `maxAge: 0` caller and a
+   * plain-miss caller never share one. Miss and revalidation callers use
    * identical directives and CAN share one: a same-key miss arriving while a
    * revalidation is in flight rides it (and vice versa) without re-labeling
    * the trigger.
    */
-  trigger: "miss" | "revalidation" | "bypass";
+  trigger: "miss" | "revalidation" | "bypass" | "mixed";
   /**
    * The requests this invocation covered, in the order the producer received
    * them. Length 1 except for bulk producers, whose batches MAY span resource
@@ -368,20 +417,30 @@ export type CacheProduceMessage = {
    */
   requests: readonly { resourceType: string; resourceId: string }[];
   /**
-   * Total logical callers this invocation served: the initiator plus every
-   * rider that collapsed onto it (≥ 1; a background revalidation with no
-   * waiting foreground caller reports 1). Counts ATTACHMENT, not settlement
-   * dependence: an SWR caller whose background revalidation rode this
-   * invocation is counted here while its own fetch reports
-   * `collapsed: false` -- so Σ(collapsedCallerCount − 1) ≥ the number of
-   * `collapsed: true` fetches. May also undercount by riders that attach in
-   * the settlement's microtask window (they're served by the just-settled
-   * invocation, but this count was already read).
+   * The requests that rode this invocation's tasks instead of starting their
+   * own producer work, summed over the invocation's requests (≥ 0). Each one
+   * is a producer request that collapsing saved. A request that starts a task
+   * does not count, so a lone single-request call reports 0.
+   *
+   * It counts requests, not callers. So it counts:
+   * - a duplicate request in one wrapped call, which rides the task that the
+   *   call's first copy started;
+   * - a direct call that rides tasks still waiting in the automatic queue;
+   * - a rider that later cancels.
+   *
+   * Requests that automatic batching merges into one invocation do not count,
+   * because each of them starts its own task.
+   *
+   * Every `collapsed: true` fetch is one of these rides. A background
+   * revalidation that rides a task counts too, but it has no fetch message of
+   * its own. So the sum of `collapsedRequestCount` is at least the number of
+   * `collapsed: true` fetches.
+   *
+   * May undercount by riders that attach in the settlement's microtask window:
+   * the just-settled invocation serves them, but this count was already read.
    */
-  collapsedCallerCount: number;
+  collapsedRequestCount: number;
   outcome: "success" | "error";
-  /** Error slots in a resolved result; all requests when the invocation rejects or violates its contract. */
-  failedRequestCount: number;
   durationMs: number;
 };
 
@@ -462,30 +521,54 @@ export function publishCacheStoreEntry(message: CacheStoreEntryMessage): void {
 }
 
 /**
- * One actual Store read invoked by Cache: automatic getMany batches, direct
- * getMany calls, or unbatched get calls. Empty or entirely cancelled automatic
- * batches emit nothing. Requests cancelled before dispatch do not count.
- * Duration covers the Store call and automatic result-length validation,
- * excluding Cache classification. Direct calls have zero queue wait. Automatic
- * queue wait is summed across dispatched requests; divide by requestCount for
- * the mean. Entry errors count as failed requests while successful slots still
- * contribute entries. Whole-operation failures report no returned entries and
- * fail every dispatched request. Direct Store rejection after caller cancellation
- * reports cancelled with zero failed requests. Cancellation after dispatch does not erase
- * the underlying Store operation's eventual result.
- * No resource IDs, payloads, or error values are included.
+ * One physical Store read by a `Cache`: an automatic batch, a
+ * `getUnbatched` call, or one `get` call to a Store that has no `getMany`.
+ * Empty calls and entirely cancelled automatic batches emit nothing. Requests
+ * cancelled before dispatch do not count. No resource IDs, payloads, or error
+ * values are included.
  */
-export type CacheReadBatchMessage = {
+export type CacheReadStoreMessage = {
+  /** Cache instance name (constructor `options.name`). */
   cache: string;
+  /** The Store method the Cache called. */
   operation: "get" | "getMany";
+  /**
+   * True when the Cache's read batcher dispatched this read after it
+   * accumulated requests from one or more callers. False when the read ran
+   * directly: a `getUnbatched` call, or a Store that has no `getMany`.
+   */
+  autoBatched: boolean;
+  /**
+   * `failure` when any slot holds an Error or the whole call failed.
+   * `cancelled` when a direct Store call rejects after its caller cancels.
+   * Cancellation after automatic dispatch keeps the Store's eventual outcome.
+   */
   outcome: "success" | "failure" | "cancelled";
+  /** Dispatched request slots, including duplicate requests. */
   requestCount: number;
-  entryCount: number;
+  /**
+   * Error slots, or every dispatched request when the whole call fails.
+   * Zero for a cancelled direct call.
+   */
   failedRequestCount: number;
+  /**
+   * Entries returned in successful slots, even when another slot fails.
+   * Zero when the whole call fails.
+   */
+  entryCount: number;
+  /**
+   * Time spent in the Store call and the Cache's result-shape check, without
+   * Cache classification. Not database execution time or a query count: a
+   * Store can run several queries or use no database.
+   */
   durationMs: number;
+  /**
+   * Time the dispatched requests waited in the automatic queue, summed over
+   * requests. Divide by `requestCount` for the mean. Zero for direct reads.
+   */
   queueWaitTotalMs: number;
 };
-export const CACHE_READ_BATCH_CHANNEL_NAME = "@zingage/cache:read-batch";
-export const cacheReadBatchChannel = typedChannel<CacheReadBatchMessage>()(
-  CACHE_READ_BATCH_CHANNEL_NAME,
+export const CACHE_READ_STORE_CHANNEL_NAME = "@zingage/cache:read-store";
+export const cacheReadStoreChannel = typedChannel<CacheReadStoreMessage>()(
+  CACHE_READ_STORE_CHANNEL_NAME,
 );

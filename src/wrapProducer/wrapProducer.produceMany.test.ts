@@ -1,0 +1,1138 @@
+/* eslint-disable max-lines */
+import { describe, it, mock } from "node:test";
+
+import { omit } from "es-toolkit";
+import fc from "fast-check";
+import assert from "node:assert/strict";
+import { setTimeout as delay } from "timers/promises";
+import {
+  UnusableEntryArb,
+  UsableEntryArb,
+  UsableIfErrorEntryArb,
+  UsableWhileRevalidateEntryArb,
+} from "../../test/fixtures.js";
+import {
+  contents,
+  RESOURCE_PREFIX_REGISTRY,
+} from "../../test/v2AcceptanceHelpers.js";
+import Cache from "../cache/Cache.js";
+import {
+  MemoryStore,
+  wrapProducer,
+  type ProducerDirectives,
+  resourceType,
+  type ResourceTypes,
+  type SpecOf,
+} from "../index.js";
+import type { NormalizedProducerResult } from "../types/06_Normalization.js";
+import { throwIfAnyError, type mapTuple } from "../utils/utils.js";
+
+// The wrapper takes ONE producer function over a required registry, and a bare
+// function covers the whole registry. This suite's behavior is
+// id-structure-agnostic (fixture ids are arbitrary strings), so it uses a
+// sole-type registry and passes its producers bare; per-type dispatch
+// (`bulkProducerByIdType`) lives in coverageRuntime.test.ts and
+// diagnosticsChannels.test.ts.
+const testRegistry = {
+  resources: resourceType<unknown>()({
+    matches: (id): id is string => typeof id === "string",
+  }),
+} satisfies ResourceTypes;
+const testCacheOptions = {
+  name: "wrap-bulk-producer-test",
+  resourceTypes: testRegistry,
+};
+
+// Every test needs the store as well as the cache (to seed entries and to spy
+// on writes), so the factory hands back both. Instantiated at a concrete
+// registry, which is why it needs no cast.
+const makeTestStoreAndCache = () => {
+  const store = new MemoryStore<SpecOf<typeof testRegistry>>();
+  return {
+    store,
+    cache: new Cache({
+      store,
+      ...testCacheOptions,
+    }),
+  };
+};
+
+describe("wrapProducer with produceMany", () => {
+  describe("one request given", () => {
+    describe("the requested id is usable in the cache", () => {
+      it("serves a usable cached entry without calling the producer", async () => {
+        await fc.assert(
+          fc.asyncProperty(UsableEntryArb, async ({ entry, consumerDirs }) => {
+            const { store, cache } = makeTestStoreAndCache();
+            try {
+              await store.store([{ entry, maxStoreForSeconds: 100 }]);
+
+              const producer = mock.fn(function (_) {
+                throw new Error("not called");
+              });
+              const wrappedProducer = wrapProducer({
+                cache,
+                collapseOverlappingRequestsTime: 0,
+                produce: producer,
+              });
+              const wrappedBulkProducer = wrapProducer({
+                cache,
+                collapseOverlappingRequestsTime: 0,
+                produceMany: producer,
+              });
+
+              const request = { id: entry.id, directives: consumerDirs };
+              const [result, bulkResult] = await Promise.all([
+                wrappedProducer.get(request),
+                wrappedBulkProducer.getMany([request]),
+              ]);
+
+              assert.deepEqual(result, bulkResult[0]);
+              assert.equal(result.content, entry.content);
+              assert.equal(producer.mock.callCount(), 0);
+            } finally {
+              await cache.close();
+            }
+          }),
+        );
+      });
+    });
+
+    describe("the requested id is usable while revalidating in the cache", () => {
+      it("should return the cached result immediately and trigger background refresh", async () => {
+        const producerBase = async function (req: { id: string }) {
+          return {
+            content: `refreshed-${req.id}-${Date.now()}`,
+            directives: { freshUntilAge: 1 },
+          };
+        };
+        const bulkProducerBase = bulkProducerFromProducer(producerBase);
+
+        await fc.assert(
+          fc.asyncProperty(
+            UsableWhileRevalidateEntryArb,
+            async ({ entry, consumerDirs }) => {
+              const { store, cache } = makeTestStoreAndCache();
+              const storeMock = mock.method(store, "store");
+              try {
+                await store.store([{ entry, maxStoreForSeconds: 100 }]);
+                storeMock.mock.resetCalls();
+
+                const singleProducer = mock.fn(producerBase);
+                const bulkProducer = mock.fn(bulkProducerBase);
+
+                const wrappedProducer = wrapProducer({
+                  cache,
+                  produce: singleProducer,
+                });
+                const wrappedBulkProducer = wrapProducer({
+                  cache,
+                  produceMany: bulkProducer,
+                });
+
+                const request = { id: entry.id, directives: consumerDirs };
+                const [result, bulkResult] = await Promise.all([
+                  wrappedProducer.get(request),
+                  wrappedBulkProducer.getMany([request]),
+                ]);
+
+                assertResultsApproximatelyEqual(result, bulkResult[0]);
+                assert.equal(result.content, entry.content);
+                await Promise.all([
+                  wrappedProducer.close(),
+                  wrappedBulkProducer.close(),
+                ]);
+                assert.equal(singleProducer.mock.callCount(), 1);
+                assert.equal(bulkProducer.mock.callCount(), 1);
+                assert.equal(storeMock.mock.callCount(), 2);
+              } finally {
+                await cache.close();
+              }
+            },
+          ),
+        );
+      });
+    });
+
+    describe("the requested id is usable if error", () => {
+      it("should return the cached result when the producer errors", async () => {
+        const producerBase = async function (_req: { id: string }) {
+          throw new Error("test");
+        };
+
+        await fc.assert(
+          fc.asyncProperty(
+            UsableIfErrorEntryArb,
+            async ({ entry, consumerDirs }) => {
+              const { store, cache } = makeTestStoreAndCache();
+              const storeMock = mock.method(store, "store");
+              try {
+                await store.store([{ entry, maxStoreForSeconds: 100 }]);
+                storeMock.mock.resetCalls();
+
+                const singleProducer = mock.fn(producerBase);
+                const bulkProducer = mock.fn(
+                  async (reqs: readonly { id: string }[]) => {
+                    return Promise.all(
+                      reqs.map(async (it) => producerBase(it).catch((e) => e)),
+                    );
+                  },
+                );
+
+                const wrappedProducer = wrapProducer({
+                  cache,
+                  produce: singleProducer,
+                });
+                const wrappedBulkProducer = wrapProducer({
+                  cache,
+                  produceMany: bulkProducer,
+                });
+
+                const request = { id: entry.id, directives: consumerDirs };
+                const [result, bulkResult] = await Promise.all([
+                  wrappedProducer.get(request),
+                  wrappedBulkProducer.getMany([request]),
+                ]);
+
+                assertResultsApproximatelyEqual(result, bulkResult[0]);
+                assert.equal(result.content, entry.content);
+                await Promise.all([
+                  wrappedProducer.close(),
+                  wrappedBulkProducer.close(),
+                ]);
+                assert.equal(singleProducer.mock.callCount(), 1);
+                assert.equal(bulkProducer.mock.callCount(), 1);
+                assert.equal(storeMock.mock.callCount(), 0);
+              } finally {
+                await cache.close();
+              }
+            },
+          ),
+        );
+      });
+    });
+
+    describe("the requested id is unusable or there's no entry in the cache", () => {
+      it("should return the result from the producer", async () => {
+        const producerBase = async function (_req: { id: string }) {
+          return { content: "test44", directives: { freshUntilAge: 1 } };
+        };
+        const bulkProducerBase = bulkProducerFromProducer(producerBase);
+
+        await fc.assert(
+          fc.asyncProperty(
+            UnusableEntryArb,
+            fc.boolean(),
+            async ({ entry, consumerDirs }, shouldStoreEntry) => {
+              const { store, cache } = makeTestStoreAndCache();
+              try {
+                if (shouldStoreEntry) {
+                  await store.store([{ entry, maxStoreForSeconds: 100 }]);
+                }
+
+                const singleProducer = mock.fn(producerBase);
+                const bulkProducer = mock.fn(bulkProducerBase);
+
+                const wrappedProducer = wrapProducer({
+                  cache,
+                  produce: singleProducer,
+                });
+                const wrappedBulkProducer = wrapProducer({
+                  cache,
+                  produceMany: bulkProducer,
+                });
+
+                const request = { id: entry.id, directives: consumerDirs };
+                const [result, bulkResult] = await Promise.all([
+                  wrappedProducer.get(request),
+                  wrappedBulkProducer.getMany([request]),
+                ]);
+
+                assertResultsApproximatelyEqual(result, bulkResult[0]);
+                assert.equal(result.content, "test44");
+                assert.equal(singleProducer.mock.callCount(), 1);
+                assert.equal(bulkProducer.mock.callCount(), 1);
+              } finally {
+                await cache.close();
+              }
+            },
+          ),
+        );
+      });
+    });
+  });
+
+  describe("multiple requests given", () => {
+    it("should handle mixed cache states correctly (usable, revalidate, error, unusable)", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc
+            .record({
+              Usable: fc.array(UsableEntryArb, { minLength: 0, maxLength: 5 }),
+              UsableWhileRevalidate: fc.array(UsableWhileRevalidateEntryArb, {
+                minLength: 0,
+                maxLength: 5,
+              }),
+              UsableIfError: fc.array(UsableIfErrorEntryArb, {
+                minLength: 0,
+                maxLength: 5,
+              }),
+              Unusable: fc.array(UnusableEntryArb, {
+                minLength: 0,
+                maxLength: 5,
+              }),
+              Unstored: fc.array(UsableEntryArb, {
+                minLength: 0,
+                maxLength: 5,
+              }),
+            })
+            .filter(
+              ({
+                Usable,
+                UsableWhileRevalidate,
+                UsableIfError,
+                Unusable,
+                Unstored,
+              }) => {
+                const entryIds = new Set(
+                  [
+                    ...Usable,
+                    ...UsableWhileRevalidate,
+                    ...UsableIfError,
+                    ...Unusable,
+                    ...Unstored,
+                  ].map(({ entry }) => entry.id),
+                );
+                return (
+                  entryIds.size ===
+                  Unstored.length +
+                    Usable.length +
+                    UsableIfError.length +
+                    Unusable.length +
+                    UsableWhileRevalidate.length
+                );
+              },
+            ),
+          async ({
+            Usable,
+            UsableWhileRevalidate,
+            UsableIfError,
+            Unusable,
+            Unstored,
+          }) => {
+            const { store, cache } = makeTestStoreAndCache();
+            try {
+              const unstoredIds = Unstored.map(({ entry }) => entry.id);
+
+              const storableGeneratedData = [
+                ...Usable,
+                ...UsableWhileRevalidate,
+                ...UsableIfError,
+                ...Unusable,
+              ];
+
+              await store.store(
+                storableGeneratedData.map(({ entry }) => ({
+                  entry,
+                  maxStoreForSeconds: 10,
+                })),
+              );
+
+              function shouldError(id: string) {
+                return id.includes("9");
+              }
+
+              const storeMock = mock.method(store, "store");
+
+              const bulkProducer = mock.fn(
+                bulkProducerFromProducer(async function (_req: { id: string }) {
+                  if (shouldError(_req.id)) {
+                    throw new Error("test");
+                  }
+
+                  if (unstoredIds.includes(_req.id)) {
+                    return {
+                      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+                      content: Unstored.find(
+                        ({ entry }) => entry.id === _req.id,
+                      )!.entry.content,
+                      directives: { freshUntilAge: 1 },
+                    };
+                  }
+
+                  return {
+                    content: `refreshed-${_req.id}`,
+                    directives: { freshUntilAge: 1 },
+                  };
+                }),
+              );
+
+              const wrappedBulkProducer = wrapProducer({
+                cache,
+                produceMany: bulkProducer,
+              });
+
+              const results = await wrappedBulkProducer.getMany(
+                storableGeneratedData
+                  .concat(Unstored)
+                  .map(({ entry, consumerDirs }) => ({
+                    id: entry.id,
+                    directives: consumerDirs,
+                  })),
+              );
+
+              const error = new Error("test");
+              const expectedResultContentsOrErrors = [
+                // We won't call the producer for this, so doesn't matter if it would error.
+                ...Usable.map(({ entry }) => entry.content),
+                // Same, but we won't call the producer _synchronously_.
+                ...UsableWhileRevalidate.map(({ entry }) => entry.content),
+                // We will call the producer, so we should get refreshed values unless it errors.
+                ...UsableIfError.map(({ entry }) =>
+                  shouldError(entry.id)
+                    ? entry.content
+                    : `refreshed-${entry.id}`,
+                ),
+                ...Unusable.map(({ entry }) =>
+                  shouldError(entry.id) ? error : `refreshed-${entry.id}`,
+                ),
+                ...Unstored.map(({ entry }) =>
+                  shouldError(entry.id) ? error : entry.content,
+                ),
+              ];
+
+              assert.equal(
+                results.length,
+                expectedResultContentsOrErrors.length,
+              );
+              for (let i = 0; i < results.length; i++) {
+                const result = results[i];
+                if (result instanceof Error) {
+                  assert.deepEqual(
+                    results[i],
+                    expectedResultContentsOrErrors[i],
+                  );
+                } else {
+                  assert.deepEqual(
+                    result?.content,
+                    expectedResultContentsOrErrors[i],
+                  );
+                }
+              }
+
+              // Automatic batches can combine readiness classes and split at 20.
+              // Every invocation with successful resources writes those resources once.
+              await wrappedBulkProducer.close();
+              const expectedStoreCalls = bulkProducer.mock.calls.filter(
+                ({ arguments: [requests] }) =>
+                  requests.some(({ id }) => !shouldError(id)),
+              ).length;
+              assert.equal(storeMock.mock.callCount(), expectedStoreCalls);
+            } finally {
+              await cache.close();
+            }
+          },
+        ),
+      );
+    });
+
+    it("should maintain result order matching input request order", async () => {
+      const returnErrorForRequest = (id: string) => id.includes("9");
+
+      // Test that results are returned in the same order as requests, regardless of cache state
+      await fc.assert(
+        fc.asyncProperty(
+          fc.array(
+            fc.record({
+              id: fc
+                .string({ minLength: 1, maxLength: 5 })
+                .filter((it) => !returnErrorForRequest(it)),
+            }),
+            { minLength: 0, maxLength: 3 },
+          ),
+          fc.array(
+            fc.record({
+              id: fc.string({ minLength: 6, maxLength: 10 }),
+            }),
+            { minLength: 0, maxLength: 3 },
+          ),
+          async (cachedRequests, uncachedRequests) => {
+            // Create fresh cache and pre-populate with some entries
+            const { cache } = makeTestStoreAndCache();
+
+            const genericError = new Error("test");
+
+            const requests = [...cachedRequests, ...uncachedRequests].toSorted(
+              (a, b) => a.id.localeCompare(b.id),
+            );
+
+            try {
+              // Pre-populate cache with cached requests to create mixed cache states
+              await cache.store(
+                cachedRequests.map((req) => ({
+                  id: req.id,
+                  content: `cached-${req.id}`,
+                  directives: { freshUntilAge: 100 },
+                })),
+              );
+
+              // Create a bulk producer that maintains order
+              const bulkProducer = mock.fn(
+                async (reqs: readonly { id: string }[]) => {
+                  return Promise.all(
+                    reqs.map(async (req) => {
+                      return returnErrorForRequest(req.id)
+                        ? genericError
+                        : {
+                            content: `fresh-${req.id}`,
+                            directives: { freshUntilAge: 1 },
+                          };
+                    }),
+                  );
+                },
+              );
+
+              // Create wrapped bulk producer
+              const wrappedBulk = wrapProducer({
+                cache,
+                collapseOverlappingRequestsTime: 0,
+                produceMany: bulkProducer,
+              });
+
+              const bulkResults = await wrappedBulk.getMany(requests);
+
+              // Verify results are in the correct order
+              assert.equal(bulkResults.length, requests.length);
+              assert.deepEqual(
+                bulkResults.map((it) => (it instanceof Error ? it : it.id)),
+                requests.map((it) =>
+                  returnErrorForRequest(it.id) ? genericError : it.id,
+                ),
+              );
+            } finally {
+              await cache.close();
+            }
+          },
+        ),
+      );
+    });
+
+    it("should reject the whole invocation, storing nothing, when the producer returns MORE results than requests", async () => {
+      // The extras have no request to pair with, so the positional (result,
+      // request) pairing is no longer trustworthy -- the same reason an
+      // under-return fails the invocation rather than degrading to a per-request
+      // failure. This is the bare-producer path; `bulkProducerByIdType` makes the
+      // equivalent check per sub-producer slice, where it can also name which
+      // sub-producer broke its contract.
+      const { store, cache } = makeTestStoreAndCache();
+      const storeMock = mock.method(store, "store");
+      const bulkProducer = mock.fn(
+        async (reqs: readonly { readonly id: string }[]) => [
+          ...reqs.map((req) => ({
+            content: `ok-${req.id}`,
+            directives: { freshUntilAge: 100 },
+          })),
+          {
+            content: "extra-nobody-asked-for",
+            directives: { freshUntilAge: 100 },
+          },
+        ],
+      );
+      const wrappedBulkProducer = wrapProducer({
+        cache,
+        produceMany: bulkProducer,
+      });
+
+      try {
+        await assert.rejects(
+          async () => wrappedBulkProducer.getMany([{ id: "a" }, { id: "b" }]),
+          /producer returned 3 results for 2 requests/,
+        );
+        // Not even the two results that DO have requests are kept: the whole
+        // batch is suspect, so nothing reaches the store.
+        assert.equal(storeMock.mock.callCount(), 0);
+      } finally {
+        await cache.close();
+      }
+    });
+
+    it("should reject the whole invocation, storing nothing, when a correct-length result array has an undefined element", async () => {
+      // `undefined` is never a legal result -- every result is an object and
+      // every error element an `Error` -- so a hole (or explicit `undefined`)
+      // hiding behind a correct `length` is the same contract violation as a
+      // short array, and must not slip past a length-only check. The message
+      // counts DEFINED results, so it can't read "returned 2 results for 2
+      // requests".
+      const { store, cache } = makeTestStoreAndCache();
+      const storeMock = mock.method(store, "store");
+      const bulkProducer = mock.fn(async () => [
+        { content: "ok-a", directives: { freshUntilAge: 100 } },
+        undefined as never,
+      ]);
+      const wrappedBulkProducer = wrapProducer({
+        cache,
+        produceMany: bulkProducer,
+      });
+
+      try {
+        await assert.rejects(
+          async () => wrappedBulkProducer.getMany([{ id: "a" }, { id: "b" }]),
+          /producer returned 1 results for 2 requests/,
+        );
+        assert.equal(storeMock.mock.callCount(), 0);
+      } finally {
+        await cache.close();
+      }
+    });
+
+    describe("onCacheReadFailure option", () => {
+      it("should throw when cache read fails and onCacheReadFailure is 'throw'", async () => {
+        const { cache } = makeTestStoreAndCache();
+
+        // Mock cache.get, which the wrapper's automatic path calls per
+        // request, to simulate a cache read failure
+        const originalGet = cache.get.bind(cache);
+        cache.get = async () => {
+          throw new Error("Cache read error");
+        };
+
+        try {
+          const producer = mock.fn(async (req: { id: string }) => ({
+            content: `content-${req.id}`,
+            directives: { freshUntilAge: 1 },
+          }));
+
+          const bulkProducer = mock.fn(bulkProducerFromProducer(producer));
+
+          const wrappedBulkProducer = wrapProducer({
+            cache,
+            onCacheReadFailure: "throw",
+            produceMany: bulkProducer,
+          });
+
+          await assert.rejects(
+            async () =>
+              throwIfAnyError(
+                await wrappedBulkProducer.getMany([
+                  { id: "test1" },
+                  { id: "test2" },
+                ]),
+              ),
+            /Cache read error/,
+          );
+
+          // Producer should not have been called
+          assert.equal(bulkProducer.mock.callCount(), 0);
+        } finally {
+          cache.get = originalGet;
+          await cache.close();
+        }
+      });
+
+      it("should fall back to producer when cache read fails and onCacheReadFailure is 'call-producer'", async () => {
+        const { cache } = makeTestStoreAndCache();
+
+        // Mock cache.get, which the wrapper's automatic path calls per
+        // request, to simulate a cache read failure
+        const originalGet = cache.get.bind(cache);
+        cache.get = async () => {
+          throw new Error("Cache read error");
+        };
+
+        try {
+          const producer = mock.fn(async (req: { id: string }) => ({
+            content: `content-${req.id}`,
+            directives: { freshUntilAge: 1 },
+          }));
+
+          const bulkProducer = mock.fn(bulkProducerFromProducer(producer));
+
+          const wrappedBulkProducer = wrapProducer({
+            cache,
+            onCacheReadFailure: "call-producer",
+            produceMany: bulkProducer,
+          });
+
+          const _results = await wrappedBulkProducer.getMany([
+            { id: "test1" },
+            { id: "test2" },
+          ]);
+
+          const results = _results as Exclude<
+            (typeof _results)[number],
+            Error
+          >[];
+
+          assert.equal(results.length, 2);
+          assert.equal(results[0]?.content, "content-test1");
+          assert.equal(results[1]?.content, "content-test2");
+
+          // Producer should have been called
+          assert.equal(bulkProducer.mock.callCount(), 1);
+        } finally {
+          cache.get = originalGet;
+          await cache.close();
+        }
+      });
+    });
+
+    describe("collapseOverlappingRequestsTime option", () => {
+      it("should collapse identical overlapping requests within time window", async () => {
+        const { cache } = makeTestStoreAndCache();
+
+        try {
+          let callCount = 0;
+          const producer = mock.fn(async (req: { id: string }) => {
+            callCount++;
+            await delay(50); // Simulate some processing time
+            return {
+              content: `content-${req.id}-${callCount}`,
+              directives: { freshUntilAge: 0 }, // Force cache miss
+            };
+          });
+
+          const bulkProducer = mock.fn(bulkProducerFromProducer(producer));
+
+          const wrappedBulkProducer = wrapProducer({
+            cache,
+            collapseOverlappingRequestsTime: 1,
+            produceMany: bulkProducer,
+          });
+
+          // Make multiple overlapping requests for the same resources
+          const resultSets = await Promise.all([
+            wrappedBulkProducer.getMany([{ id: "a" }, { id: "b" }]),
+            wrappedBulkProducer.getMany([{ id: "a" }, { id: "b" }]),
+            wrappedBulkProducer.getMany([{ id: "a" }, { id: "b" }]),
+          ]);
+
+          const [results1, results2, results3] = resultSets as ReturnType<
+            typeof mapTuple<
+              typeof resultSets,
+              Exclude<(typeof resultSets)[number][number], Error>[]
+            >
+          >;
+
+          // All results should be identical (from the same producer call)
+          assert.deepEqual(results1[0]?.content, results2[0]?.content);
+          assert.deepEqual(results1[0]?.content, results3[0]?.content);
+          assert.deepEqual(results1[1]?.content, results2[1]?.content);
+          assert.deepEqual(results1[1]?.content, results3[1]?.content);
+
+          // Producer should only have been called once due to collapsing
+          assert.equal(bulkProducer.mock.callCount(), 1);
+        } finally {
+          await cache.close();
+        }
+      });
+
+      it("should not collapse requests outside the time window", async () => {
+        const { cache } = makeTestStoreAndCache();
+
+        try {
+          let callCount = 0;
+          const producer = mock.fn(async (req: { id: string }) => {
+            callCount++;
+            return {
+              content: `content-${req.id}-${callCount}`,
+              directives: { freshUntilAge: 0 }, // Force cache miss
+            };
+          });
+
+          const bulkProducer = mock.fn(bulkProducerFromProducer(producer));
+
+          const wrappedBulkProducer = wrapProducer({
+            cache,
+            collapseOverlappingRequestsTime: 0.05,
+            produceMany: bulkProducer,
+          });
+
+          // Make requests with delay between them
+          const results1 = await wrappedBulkProducer.getMany([{ id: "a" }]);
+          await delay(100); // Wait longer than collapse window
+          const results2 = await wrappedBulkProducer.getMany([{ id: "a" }]);
+
+          // Results should be different (from different producer calls)
+          assert.notEqual(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (results1[0] as any)?.content,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (results2[0] as any)?.content,
+          );
+
+          // Producer should have been called twice
+          assert.equal(bulkProducer.mock.callCount(), 2);
+        } finally {
+          await cache.close();
+        }
+      });
+    });
+
+    describe("supplemental resources", () => {
+      it("should cache supplemental resources returned by the bulk producer", async () => {
+        const { cache } = makeTestStoreAndCache();
+        const writes = mock.method(cache, "store");
+
+        try {
+          const bulkProducer = mock.fn(
+            async (reqs: readonly { id: string }[]) => {
+              return reqs.map((req) => ({
+                content: `main-${req.id}`,
+                directives: { freshUntilAge: 1 },
+                supplementalResources: [
+                  {
+                    id: `supp-${req.id}`,
+                    vary: {},
+                    content: `supplemental-${req.id}`,
+                    directives: { freshUntilAge: 1 },
+                  },
+                ],
+              }));
+            },
+          );
+
+          const wrappedBulkProducer = wrapProducer({
+            cache,
+            produceMany: bulkProducer,
+          });
+
+          // Request main resources
+          const results = await wrappedBulkProducer.getMany([
+            { id: "res1" },
+            { id: "res2" },
+          ]);
+
+          // We know the producer never throws, hence this cast.
+          const [result0, result1] = results as Exclude<
+            (typeof results)[number],
+            Error
+          >[];
+
+          assert.equal(result0?.content, "main-res1");
+          assert.equal(result1?.content, "main-res2");
+
+          assert.equal(writes.mock.callCount(), 1);
+          await writes.mock.calls[0]!.result;
+
+          // Now request the supplemental resources - they should be cached
+          const suppResults = await wrappedBulkProducer.getMany([
+            { id: "supp-res1" },
+            { id: "supp-res2" },
+          ]);
+
+          // We know the producer never throws, hence this cast.
+          const [suppResult0, suppResult1] = suppResults as Exclude<
+            (typeof suppResults)[number],
+            Error
+          >[];
+
+          assert.equal(suppResult0?.content, "supplemental-res1");
+          assert.equal(suppResult1?.content, "supplemental-res2");
+
+          // Producer should only have been called once (for main resources)
+          assert.equal(bulkProducer.mock.callCount(), 1);
+        } finally {
+          await cache.close();
+        }
+      });
+    });
+  });
+
+  describe("AbortSignal support", () => {
+    it("should reject immediately with an already-aborted signal", async () => {
+      const { cache } = makeTestStoreAndCache();
+
+      try {
+        const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
+          reqs.map((req) => ({
+            content: `c-${req.id}`,
+            directives: { freshUntilAge: 1 },
+          })),
+        );
+
+        const wrappedBulk = wrapProducer({ cache, produceMany: producer });
+
+        const controller = new AbortController();
+        controller.abort(new Error("pre-aborted"));
+
+        await assert.rejects(
+          async () =>
+            wrappedBulk.getMany([{ id: "a" }, { id: "b" }], {
+              signal: controller.signal,
+            }),
+          { message: "pre-aborted" },
+        );
+
+        assert.equal(producer.mock.callCount(), 0);
+      } finally {
+        await cache.close();
+      }
+    });
+
+    it(
+      "an abort during a pending cache read prevents producer execution",
+      { timeout: 5_000 },
+      async () => {
+        const { cache } = makeTestStoreAndCache();
+        const requests = [{ id: "abort-during-read" }];
+        const started = Promise.withResolvers<void>();
+        const finish = Promise.withResolvers<void>();
+        const controller = new AbortController();
+        const reason = new Error("abort during cache read");
+        const read = mock.method(cache, "getUnbatched", async () => {
+          started.resolve();
+          await finish.promise;
+          // The Cache completes normally despite cancellation. The wrapper must
+          // still prevent production after this pending read settles.
+          return [{ validatable: [] }];
+        });
+        const producer = mock.fn(async () => []);
+        const wrapped = wrapProducer({ cache, produceMany: producer });
+        try {
+          const pending = wrapped.getMany(requests, {
+            signal: controller.signal,
+            autoBatch: { store: false },
+          });
+          const rejected = assert.rejects(pending, (error) => error === reason);
+          await started.promise;
+          controller.abort(reason);
+          finish.resolve();
+          await rejected;
+          await wrapped.close();
+          assert.equal(read.mock.callCount(), 1);
+          assert.equal(producer.mock.callCount(), 0);
+        } finally {
+          finish.resolve();
+          await wrapped.close();
+          await cache.close();
+        }
+      },
+    );
+
+    it("should reject when signal is aborted mid-producer, but still store the producer's result", async () => {
+      const { cache } = makeTestStoreAndCache();
+
+      try {
+        const controller = new AbortController();
+        const slowProducer = mock.fn(
+          async (reqs: readonly { id: string }[]) =>
+            new Promise<
+              { content: string; directives: { freshUntilAge: number } }[]
+            >((resolve) => {
+              setTimeout(
+                () =>
+                  resolve(
+                    reqs.map((r) => ({
+                      content: `slow-${r.id}`,
+                      directives: { freshUntilAge: 10 },
+                    })),
+                  ),
+                100,
+              );
+            }),
+        );
+
+        const wrappedBulk = wrapProducer({
+          cache,
+          collapseOverlappingRequestsTime: 0,
+          produceMany: slowProducer,
+        });
+
+        const resultPromise = wrappedBulk.getMany([{ id: "mid-abort" }], {
+          signal: controller.signal,
+        });
+
+        await delay(10);
+        controller.abort(new Error("cancelled-mid-producer"));
+
+        await assert.rejects(async () => resultPromise, {
+          message: "cancelled-mid-producer",
+        });
+
+        // Wait for the producer to finish and store its result.
+        await delay(150);
+
+        // Verify the result was still stored.
+        const results = await wrappedBulk.getMany([{ id: "mid-abort" }]);
+        const entries = results as Exclude<(typeof results)[number], Error>[];
+        assert.equal(entries[0]?.content, "slow-mid-abort");
+        assert.equal(slowProducer.mock.callCount(), 1);
+      } finally {
+        await cache.close();
+      }
+    });
+
+    it("should still return cache hits even when signal is provided", async () => {
+      const { cache } = makeTestStoreAndCache();
+      const writes = mock.method(cache, "store");
+
+      try {
+        const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
+          reqs.map((r) => ({
+            content: `fresh-${r.id}`,
+            directives: { freshUntilAge: 10 },
+          })),
+        );
+
+        const wrappedBulk = wrapProducer({
+          cache,
+          collapseOverlappingRequestsTime: 0,
+          produceMany: producer,
+        });
+
+        // Populate cache
+        await wrappedBulk.getMany([{ id: "hit-a" }, { id: "hit-b" }]);
+        assert.equal(producer.mock.callCount(), 1);
+
+        assert.equal(writes.mock.callCount(), 1);
+        await writes.mock.calls[0]!.result;
+
+        // Second call with signal should still get cache hits
+        const controller = new AbortController();
+        const results = await wrappedBulk.getMany(
+          [{ id: "hit-a" }, { id: "hit-b" }],
+          {
+            signal: controller.signal,
+          },
+        );
+
+        const entries = results as Exclude<(typeof results)[number], Error>[];
+        assert.equal(entries[0]?.content, "fresh-hit-a");
+        assert.equal(entries[1]?.content, "fresh-hit-b");
+        assert.equal(producer.mock.callCount(), 1);
+      } finally {
+        await cache.close();
+      }
+    });
+  });
+
+  function bulkProducerFromProducer<C>(
+    producer: (req: {
+      id: string;
+    }) => Promise<{ content: C; directives: ProducerDirectives }>,
+  ) {
+    // TODO: make it possible for the bulk producer to reject, even though that
+    // shouldn't happen.
+    return async (reqs: readonly { id: string }[]) => {
+      return Promise.all(
+        reqs.map(async (it) => producer(it).catch((e) => e as Error)),
+      );
+    };
+  }
+
+  function assertResultsApproximatelyEqual(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    actual: NormalizedProducerResult<any, any, any> | Error | undefined,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expected: NormalizedProducerResult<any, any, any> | Error | undefined,
+  ) {
+    if (
+      actual === undefined ||
+      expected === undefined ||
+      actual instanceof Error ||
+      expected instanceof Error
+    ) {
+      return assert.deepEqual(actual, expected);
+    }
+
+    if (actual.date === expected.date) {
+      return assert.deepEqual(actual, expected);
+      // The two results come from two independent producer invocations (the
+      // single and bulk wrappers don't share a collapse registry), so their
+      // `date` stamps legitimately differ by scheduler latency — observed
+      // >10ms under full-suite load. The bound only needs to reject entries
+      // from a wrong source (the arbitraries' seeded entries carry far-past
+      // dates), so seconds-level is plenty.
+    } else if (
+      Math.abs(actual.date.getTime() - expected.date.getTime()) < 5000
+    ) {
+      return assert.deepEqual(omit(actual, ["date"]), omit(expected, ["date"]));
+    }
+
+    throw new Error(
+      `Data mismatch: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
+    );
+  }
+});
+
+describe("Large bulk producer calls", { timeout: 20_000 }, () => {
+  const batchSize = 10_000;
+  function makeCache() {
+    const store = new MemoryStore<SpecOf<typeof RESOURCE_PREFIX_REGISTRY>>();
+    const cache = new Cache({
+      name: "large-bulk-producer",
+      resourceTypes: RESOURCE_PREFIX_REGISTRY,
+      store,
+    });
+    return { cache, store };
+  }
+  const requests = Array.from({ length: batchSize }, (_, i) => ({
+    id: `resource:${i}` as const,
+  }));
+
+  it("preserves the full producer cohort and result order for a 10k cold batch", async () => {
+    const { cache } = makeCache();
+    const producer = mock.fn(async (reqs: readonly { id: string }[]) =>
+      reqs.map((req) => ({
+        content: Number(req.id.slice("resource:".length)),
+        directives: { freshUntilAge: 60 },
+      })),
+    );
+    const wrapped = wrapProducer({
+      cache,
+      collapseOverlappingRequestsTime: 0,
+      produceMany: producer,
+      producerBatching: { maxBatchSize: 20 },
+    });
+    try {
+      const result = await wrapped.getMany(requests);
+      // Cache reads yield between time slices, so misses can reach the
+      // producer scheduler across turns and leave a batch short. Each request
+      // still reaches the producer exactly once, in a batch of at most 20.
+      const produced = producer.mock.calls.flatMap(({ arguments: [batch] }) =>
+        batch.map(({ id }) => id),
+      );
+      assert.deepEqual(
+        produced.toSorted(),
+        requests.map(({ id }) => id).toSorted(),
+      );
+      assert.ok(
+        producer.mock.calls.every(
+          ({ arguments: [batch] }) => batch.length <= 20,
+        ),
+      );
+      assert.deepEqual(
+        contents(result),
+        requests.map((_, i) => i),
+      );
+    } finally {
+      await wrapped.close();
+      await cache.close();
+    }
+  });
+  it("preserves ordered cache hits for a 10k warm batch", async () => {
+    const { cache } = makeCache();
+    const producer = mock.fn(async () => {
+      throw new Error("warm batch must not produce");
+    });
+    const wrapped = wrapProducer({ cache, produceMany: producer });
+    try {
+      await cache.store(
+        requests.map((req, i) => ({
+          id: req.id,
+          content: i,
+          directives: { freshUntilAge: 60 },
+        })),
+      );
+      const result = await wrapped.getMany(requests);
+      assert.equal(producer.mock.callCount(), 0);
+      assert.deepEqual(
+        contents(result),
+        requests.map((_, i) => i),
+      );
+    } finally {
+      await wrapped.close();
+      await cache.close();
+    }
+  });
+});

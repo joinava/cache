@@ -11,14 +11,13 @@ import {
   TWO_TYPE_REGISTRY,
   freshFor100,
 } from "../test/v2AcceptanceHelpers.js";
-import Cache from "./Cache.js";
+import Cache from "./cache/Cache.js";
 import {
   bulkProducerByIdType,
   MemoryStore,
   producerByIdType,
-  wrapBulkProducer,
+  wrapProducer,
 } from "./index.js";
-import wrapProducer from "./utils/wrapProducer.js";
 
 /**
  * §6.3's bypass-skip-read contract: when the consumer's directives request a
@@ -31,32 +30,30 @@ import wrapProducer from "./utils/wrapProducer.js";
 const makeHarness = (label: string) => {
   const name = uniqueCacheName(label);
   const store = new MemoryStore();
+  // MemoryStore has only get(), so get() calls are every Store read.
   const getSpy = mock.method(store, "get");
-  const getManySpy = mock.method(store, "getMany");
   const cache = new Cache({
-    // These tests inject or count individual store.get calls.
-    batchReads: false,
     store: store,
     name,
     resourceTypes: TWO_TYPE_REGISTRY,
   });
-  return { name, store, getSpy, getManySpy, cache };
+  return { name, store, getSpy, cache };
 };
 
 describe("bypass requests skip the cache read (§6.3)", () => {
   it("a maxAge: 0 request performs NO store read, emits NO read message, reaches the producer, and its result IS stored", async () => {
-    const { name, getSpy, getManySpy, cache } = makeHarness("bypass-basic");
+    const { name, getSpy, cache } = makeHarness("bypass-basic");
     const capture = captureChannels(name);
     const producer = mock.fn(async () => ({
       content: "from-producer",
       directives: freshFor100,
     }));
-    const getSite = wrapProducer(
-      { cache },
-      producerByIdType(cache.resourceTypes, { site_day: producer }),
-    );
+    const getSite = wrapProducer({
+      cache,
+      produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+    });
     try {
-      const res = await getSite({
+      const res = await getSite.get({
         id: "site:a",
         directives: { maxAge: 0 },
       });
@@ -65,7 +62,6 @@ describe("bypass requests skip the cache read (§6.3)", () => {
 
       // No store read of any shape, and nothing on the read channel.
       expect(getSpy.mock.callCount()).to.equal(0);
-      expect(getManySpy.mock.callCount()).to.equal(0);
       expect(capture.read).to.deep.equal([]);
 
       expect(capture.fetch).to.have.lengthOf(1);
@@ -79,9 +75,10 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       });
       expectProduceMessage(capture.produce[0], {
         cache: name,
+        autoBatched: false,
         trigger: "bypass",
         requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-        collapsedCallerCount: 1,
+        collapsedRequestCount: 0,
         outcome: "success",
       });
 
@@ -100,7 +97,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       // second producer call. That plain request also acts as the positive
       // control for the spy: the same store `get` spy that recorded zero
       // calls above records this read.
-      const plain = await getSite({ id: "site:a" });
+      const plain = await getSite.get({ id: "site:a" });
       expect(plain.content).to.equal("from-producer");
       expect(producer.mock.callCount()).to.equal(1);
       expect(getSpy.mock.callCount()).to.equal(1);
@@ -129,12 +126,15 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       content: "regenerated-content",
       directives: freshFor100,
     }));
-    const getSite = wrapProducer(
-      { cache },
-      producerByIdType(cache.resourceTypes, { site_day: producer }),
-    );
+    const getSite = wrapProducer({
+      cache,
+      produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+    });
     try {
-      const res = await getSite({ id: "site:a", directives: { maxAge: 0 } });
+      const res = await getSite.get({
+        id: "site:a",
+        directives: { maxAge: 0 },
+      });
       expect(res.content).to.equal("regenerated-content");
       expect(producer.mock.callCount()).to.equal(1);
       expect(getSpy.mock.callCount()).to.equal(0);
@@ -174,12 +174,12 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       content: "from-producer",
       directives: freshFor100,
     }));
-    const getSite = wrapProducer(
-      { cache },
-      producerByIdType(cache.resourceTypes, { site_day: producer }),
-    );
+    const getSite = wrapProducer({
+      cache,
+      produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+    });
     try {
-      const res = await getSite({
+      const res = await getSite.get({
         id: "site:skewed",
         directives: { maxAge: 0 },
       });
@@ -216,12 +216,12 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       await gate;
       return { content: "produced", directives: freshFor100 };
     });
-    const getSite = wrapProducer(
-      { cache },
-      producerByIdType(cache.resourceTypes, { site_day: producer }),
-    );
+    const getSite = wrapProducer({
+      cache,
+      produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+    });
     try {
-      const bypassCall = getSite({
+      const bypassCall = getSite.get({
         id: "site:a",
         directives: { maxAge: 0 },
       });
@@ -235,7 +235,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       // though the bypass invocation is still in flight. Under the
       // cross-collapse bug this wait times out (callCount stays 1) instead
       // of deadlocking.
-      const plainCall = getSite({ id: "site:a" });
+      const plainCall = getSite.get({ id: "site:a" });
       await waitUntil(
         () => producer.mock.callCount() === 2,
         "the plain request starting its own producer invocation",
@@ -251,7 +251,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       const triggers = capture.produce.map((m) => m.trigger).sort();
       expect(triggers).to.deep.equal(["bypass", "miss"]);
       capture.produce.forEach((m) => {
-        expect(m.collapsedCallerCount).to.equal(1);
+        expect(m.collapsedRequestCount).to.equal(0);
       });
 
       // Only the plain request consulted the cache.
@@ -293,8 +293,8 @@ describe("bypass requests skip the cache read (§6.3)", () => {
     }
   });
 
-  it("wrapBulkProducer: bypass elements skip the read (no read messages) while plain elements in the same call read and cache normally", async () => {
-    const { name, getSpy, getManySpy, cache } = makeHarness("bypass-bulk");
+  it("produceMany: bypass elements skip the read (no read messages) while plain elements in the same call read and cache normally", async () => {
+    const { name, getSpy, cache } = makeHarness("bypass-bulk");
     const capture = captureChannels(name);
     const bulkProducer = mock.fn(
       async (reqs: readonly { readonly id: string }[]) =>
@@ -303,23 +303,21 @@ describe("bypass requests skip the cache read (§6.3)", () => {
           directives: { freshUntilAge: 100 },
         })),
     );
-    const getBulk = wrapBulkProducer(
-      { cache, collapseOverlappingRequestsTime: 0 },
-      bulkProducerByIdType(cache.resourceTypes, { site_day: bulkProducer }),
-    );
+    const getBulk = wrapProducer({
+      cache,
+      collapseOverlappingRequestsTime: 0,
+      produceMany: bulkProducerByIdType(cache.resourceTypes, {
+        site_day: bulkProducer,
+      }),
+    });
     const requests = [
       { id: "site:plain-a" },
       { id: "site:bypass-a", directives: { maxAge: 0 } },
       { id: "site:plain-b" },
     ] as const;
     try {
-      // First call: the bypass element must reach the producer WITHOUT any
-      // cache read; the plain elements read (miss) and then produce. The
-      // collapse key includes directives, so bypass and plain elements never
-      // share a batch -- and the bypass batch
-      // dispatches BEFORE the plain elements' cache read, so it is the first
-      // producer call.
-      const results = await getBulk(requests);
+      // Bypass skips the Store. Independent ready requests may share one producer batch.
+      const results = await getBulk.getMany(requests);
       const contents = results.map((r) => {
         if (r instanceof Error) throw r;
         return r.content;
@@ -330,13 +328,12 @@ describe("bypass requests skip the cache read (§6.3)", () => {
         "content-site:plain-b",
       ]);
 
-      expect(bulkProducer.mock.callCount()).to.equal(2);
+      expect(bulkProducer.mock.callCount()).to.equal(1);
       expect(
-        bulkProducer.mock.calls[0]?.arguments[0]?.map((r) => r.id),
-      ).to.deep.equal(["site:bypass-a"]);
-      expect(
-        bulkProducer.mock.calls[1]?.arguments[0]?.map((r) => r.id).sort(),
-      ).to.deep.equal(["site:plain-a", "site:plain-b"]);
+        bulkProducer.mock.calls[0]?.arguments[0]
+          ?.map((request) => request.id)
+          .toSorted(),
+      ).to.deep.equal(requests.map(({ id }) => id).toSorted());
 
       // Only the plain elements appear on the read channel.
       expect(capture.read.map((m) => m.resourceId).sort()).to.deep.equal([
@@ -353,12 +350,8 @@ describe("bypass requests skip the cache read (§6.3)", () => {
         );
       });
 
-      // Two invocations, one per directive class.
-      expect(capture.produce).to.have.lengthOf(2);
-      expect(capture.produce.map((m) => m.trigger).sort()).to.deep.equal([
-        "bypass",
-        "miss",
-      ]);
+      expect(capture.produce).to.have.lengthOf(1);
+      expect(capture.produce[0]?.trigger).to.equal("mixed");
 
       // Second call: the plain elements now hit the cache; the bypass
       // element STILL reaches the producer (structurally guaranteed contact).
@@ -367,7 +360,7 @@ describe("bypass requests skip the cache read (§6.3)", () => {
         "first call's results stored",
       );
       bulkProducer.mock.resetCalls();
-      const second = await getBulk(requests);
+      const second = await getBulk.getMany(requests);
       const secondContents = second.map((r) => {
         if (r instanceof Error) throw r;
         return r.content;
@@ -383,11 +376,11 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       ).to.deep.equal(["site:bypass-a"]);
 
       // And a PURE-bypass bulk call performs no store read of any shape.
-      const readsBefore = getSpy.mock.callCount() + getManySpy.mock.callCount();
-      await getBulk([{ id: "site:bypass-a", directives: { maxAge: 0 } }]);
-      expect(getSpy.mock.callCount() + getManySpy.mock.callCount()).to.equal(
-        readsBefore,
-      );
+      const readsBefore = getSpy.mock.callCount();
+      await getBulk.getMany([
+        { id: "site:bypass-a", directives: { maxAge: 0 } },
+      ]);
+      expect(getSpy.mock.callCount()).to.equal(readsBefore);
     } finally {
       capture.stop();
       await cache.close();
@@ -401,14 +394,14 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       await delay(80);
       return { content: "produced-once", directives: freshFor100 };
     });
-    const getSite = wrapProducer(
-      { cache },
-      producerByIdType(cache.resourceTypes, { site_day: producer }),
-    );
+    const getSite = wrapProducer({
+      cache,
+      produce: producerByIdType(cache.resourceTypes, { site_day: producer }),
+    });
     try {
-      const first = getSite({ id: "site:a", directives: { maxAge: 0 } });
+      const first = getSite.get({ id: "site:a", directives: { maxAge: 0 } });
       await delay(10);
-      const second = getSite({ id: "site:a", directives: { maxAge: 0 } });
+      const second = getSite.get({ id: "site:a", directives: { maxAge: 0 } });
       const [res1, res2] = await Promise.all([first, second]);
       expect(res1.content).to.equal("produced-once");
       expect(res2.content).to.equal("produced-once");
@@ -420,9 +413,10 @@ describe("bypass requests skip the cache read (§6.3)", () => {
       expect(capture.produce).to.have.lengthOf(1);
       expectProduceMessage(capture.produce[0], {
         cache: name,
+        autoBatched: false,
         trigger: "bypass",
         requests: [{ resourceType: "site_day", resourceId: "site:a" }],
-        collapsedCallerCount: 2,
+        collapsedRequestCount: 1,
         outcome: "success",
         minDurationMs: 50,
       });

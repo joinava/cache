@@ -1,13 +1,25 @@
-import { timeSlicedForEach } from "./time-slicing.js";
+import {
+  SchedulingContractError,
+  TimeSliceBudget,
+  timeSlicedForEach,
+  timeSlicedMap,
+} from "@zingage/scheduling";
 import { default as debug } from "debug";
-import { maxBy } from "es-toolkit";
+import { maxBy, partition, sumBy } from "es-toolkit";
 
 import pLimit from "p-limit";
+import type { NonEmptyArray } from "type-party";
 import type { CacheSpec, SpecForId } from "../types/00_CacheSpec.js";
 import type { Entry, NormalizedParams } from "../types/06_Normalization.js";
-import type { Store, StoreGetManyResult } from "../types/06_Store.js";
+import type {
+  Store,
+  SingleStoreReader,
+  StoreGetManyRequest,
+  StoreGetManyResult,
+} from "../types/07_Store.js";
 import type { AnyParams, AnyValidators } from "../types/index.js";
 import { components, type Logger } from "../types/index.js";
+import { msSince, performanceNow } from "./performanceNow.js";
 export type { JsonOf } from "type-party";
 export { jsonParse, jsonStringify } from "type-party/runtime/json.js";
 
@@ -139,18 +151,174 @@ export async function keepMaxPerGroupCooperatively<T>(opts: {
   return result;
 }
 
+/** Package-detected invalid contracts must not become operational slot errors. */
+export class CacheContractError extends Error {
+  override readonly name: string = "CacheContractError";
+}
+
 /**
- * A naive implementation of the `getMany` method that uses the store's `get`
- * method to fulfill all requests with limited parallelism.
+ * Whether `error` reports a broken contract. A {@link CacheContractError} comes
+ * from this package. A `SchedulingContractError` comes from the
+ * `@zingage/scheduling` primitives that the cache uses. Both must propagate,
+ * and neither may become an operational slot error or a fallback.
+ */
+export function isContractError(
+  error: unknown,
+): error is CacheContractError | SchedulingContractError {
+  return (
+    error instanceof CacheContractError ||
+    error instanceof SchedulingContractError
+  );
+}
+
+/**
+ * Throws a {@link CacheContractError} unless a batched call returned exactly
+ * one result per request.
+ */
+export function assertResultCount(
+  results: readonly unknown[],
+  requestCount: number,
+): void {
+  if (results.length !== requestCount) {
+    throw new CacheContractError("Result count must match request count");
+  }
+}
+
+export function asError(error: unknown): Error {
+  return error instanceof Error
+    ? error
+    : new Error("Cache operation failed", { cause: error });
+}
+
+/** One actual primitive call, before operational failures become positional slots. */
+export type StoreReadObservation = {
+  operation: "get" | "getMany";
+  requestCount: number;
+  failedRequestCount: number;
+  entryCount: number;
+  durationMs: number;
+  outcome: "success" | "failure" | "cancelled";
+};
+
+/** Observe an actual Store invocation without including caller classification. */
+export async function readStoreObserved<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
+>(
+  store: Store<Spec, Validators, Params>,
+  requests: Reqs,
+  options?: { signal?: AbortSignal | undefined },
+  observe?: (event: StoreReadObservation) => void,
+): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
+  // The Store contract types `signal` as present-or-absent, never undefined,
+  // so an explicit `signal: undefined` from a caller is dropped here, at the
+  // one place that calls the Store.
+  const signal = options?.signal;
+  const storeOptions = signal === undefined ? undefined : { signal };
+  signal?.throwIfAborted();
+
+  if (requests.length === 0) {
+    return [] as StoreGetManyResult<Spec, Reqs, Validators, Params>;
+  }
+
+  if (store.getMany === undefined) {
+    return readSingleStore(store, requests, 10, storeOptions, observe);
+  }
+
+  const startedAt = performanceNow();
+  let results: StoreGetManyResult<Spec, Reqs, Validators, Params>;
+
+  try {
+    results = await store.getMany(requests, storeOptions);
+    if (
+      !Array.isArray(results) ||
+      results.length !== requests.length ||
+      // Array.from turns holes into undefined; some() would skip them.
+      Array.from(results).some(
+        (slot) => !(slot instanceof Error) && !Array.isArray(slot),
+      )
+    ) {
+      throw new CacheContractError(
+        "Store.getMany must return one entry array or Error per request",
+      );
+    }
+
+    const [failures, successes] = partition(
+      results,
+      (slot): slot is Error => slot instanceof Error,
+    );
+    observe?.({
+      operation: "getMany",
+      requestCount: requests.length,
+      failedRequestCount: failures.length,
+      entryCount: sumBy(successes, (entries) => entries.length),
+      durationMs: msSince(startedAt),
+      outcome: failures.length > 0 ? "failure" : "success",
+    });
+  } catch (failure) {
+    observe?.({
+      operation: "getMany",
+      requestCount: requests.length,
+      failedRequestCount: signal?.aborted ? 0 : requests.length,
+      entryCount: 0,
+      durationMs: msSince(startedAt),
+      outcome: signal?.aborted ? "cancelled" : "failure",
+    });
+
+    signal?.throwIfAborted();
+    if (isContractError(failure)) throw failure;
+
+    const error = asError(failure);
+    return requests.map(() => error) as StoreGetManyResult<
+      Spec,
+      Reqs,
+      Validators,
+      Params
+    >;
+  }
+
+  signal?.throwIfAborted();
+  return results;
+}
+
+/**
+ * `timeSlicedMap` for a non-empty array, keeping its positional type the way
+ * `mapNonEmpty` does. `timeSlicedMap` returns one result per input, in order.
+ */
+export async function timeSlicedMapNonEmpty<
+  T extends Readonly<NonEmptyArray<unknown>>,
+  U,
+>(
+  items: T,
+  callback: (item: T[number], index: number) => U,
+  budget?: TimeSliceBudget,
+): Promise<{ [K in keyof T]: U }> {
+  return (await timeSlicedMap<T[number], U>(items, callback, budget)) as {
+    [K in keyof T]: U;
+  };
+}
+
+/** Reject the first Error in request order after all results have settled. */
+export function throwIfAnyError<const Results extends readonly unknown[]>(
+  results: Results,
+): { [K in keyof Results]: Exclude<Results[K], Error> } {
+  const failure = results.find((result) => result instanceof Error);
+  if (failure instanceof Error) throw failure;
+
+  return results as { [K in keyof Results]: Exclude<Results[K], Error> };
+}
+
+/**
+ * Reads many requests from a single-read Store with limited parallelism.
  *
- * This implementation is provided as a default fallback for stores that don't
- * implement their own optimized `getMany` method. It calls `store.get` for each
- * request with up to 10 concurrent operations to improve performance.
- * Each failed read becomes an Error in its request slot while other reads
- * continue. Existing Error objects keep their identity. Non-Error rejections
- * are wrapped with their original cause. Request order and duplicate slots
- * are preserved. Caller cancellation still rejects the operation rather than
- * becoming a partial read failure.
+ * It calls `store.get` for each request with up to `maxConcurrency`
+ * concurrent operations. Each failed read becomes an Error in its request
+ * slot while other reads continue. Existing Error objects keep their
+ * identity. Non-Error rejections are wrapped with their original cause.
+ * Request order and duplicate slots are preserved. Caller cancellation still
+ * rejects the operation rather than becoming a partial read failure.
  *
  * @param store The store instance to use for retrieving entries
  * @param requests Array of requests, each containing an id and params
@@ -159,7 +327,7 @@ export async function keepMaxPerGroupCooperatively<T>(opts: {
  *  slot holds matching entries or an Error for the corresponding request, with
  *  content narrowed to the spec variants compatible with that request's id.
  */
-export async function naiveGetMany<
+async function readSingleStore<
   Spec extends CacheSpec,
   Validators extends AnyValidators,
   Params extends AnyParams,
@@ -168,32 +336,73 @@ export async function naiveGetMany<
     readonly params: Readonly<NormalizedParams<Params>>;
   }[],
 >(
-  store: Store<Spec, Validators, Params>,
+  store: SingleStoreReader<Spec, Validators, Params>,
   requests: Reqs,
   maxConcurrency = 10,
   options?: { signal?: AbortSignal },
+  observe?: (event: StoreReadObservation) => void,
 ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
   options?.signal?.throwIfAborted();
 
   const limit = pLimit(maxConcurrency);
+  const budget = new TimeSliceBudget();
 
   // Process all requests with controlled concurrency.
   const promises = requests.map(async (request) =>
     limit(async () => {
       options?.signal?.throwIfAborted();
+      const pendingYield = budget.yieldIfNeeded();
+      if (pendingYield !== undefined) await pendingYield;
+      options?.signal?.throwIfAborted();
+
+      const startedAt = performanceNow();
       try {
-        return await store.get(request.id, request.params, options);
+        const invocation = budget.measure(() => ({
+          promise: store.get(request, options),
+        }));
+        const entries = await invocation.promise;
+
+        if (!Array.isArray(entries)) {
+          throw new CacheContractError("Store.get must return an entry array");
+        }
+
+        observe?.({
+          operation: "get",
+          requestCount: 1,
+          failedRequestCount: 0,
+          entryCount: entries.length,
+          durationMs: msSince(startedAt),
+          outcome: "success",
+        });
+
+        return entries;
       } catch (error) {
+        observe?.({
+          operation: "get",
+          requestCount: 1,
+          failedRequestCount: options?.signal?.aborted ? 0 : 1,
+          entryCount: 0,
+          durationMs: msSince(startedAt),
+          outcome: options?.signal?.aborted ? "cancelled" : "failure",
+        });
+
         options?.signal?.throwIfAborted();
-        return error instanceof Error
-          ? error
-          : new Error("Store.get failed", { cause: error });
+        if (isContractError(error)) throw error;
+
+        return asError(error);
       }
     }),
   );
 
-  const res = await Promise.all(promises);
+  // Wait for every dispatched read before releasing lifecycle ownership.
+  const settled = await Promise.allSettled(promises);
   options?.signal?.throwIfAborted();
+
+  const res = settled.map((result) => {
+    // The only rejections should be contract errors (see isContractError).
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  });
   return res satisfies (
     | Entry<SpecForId<Spec, Spec["id"]>, Validators, Params>[]
     | Error

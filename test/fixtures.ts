@@ -1,5 +1,10 @@
+import MemoryStore from "../src/stores/MemoryStore/MemoryStore.js";
+import { readStoreObserved } from "../src/utils/utils.js";
 import pg from "pg";
 import { mock } from "node:test";
+import Cache from "../src/cache/Cache.js";
+import type { BatchOptions } from "@zingage/scheduling";
+import wrapProducer from "../src/wrapProducer/wrapProducer.js";
 
 import fc from "fast-check";
 import type { JSON } from "type-party";
@@ -10,6 +15,8 @@ import {
   type AnyParams,
   type AnyValidators,
   type CacheSpec,
+  type Store,
+  type StoreGetManyRequest,
   type NormalizedVary,
   type ProducerDirectives,
 } from "../src/types/index.js";
@@ -22,6 +29,11 @@ import {
 import { ConsumerDirectivesArb } from "./arbitraries/03_ConsumerRequest.js";
 import { NormalizedProducerDirectivesArb } from "./arbitraries/06_Normalization.js";
 import { PositiveNumberArb } from "./arbitraries/utils.js";
+import {
+  ACCEPT_ANY_REGISTRY,
+  freshFor100,
+  uniqueCacheName,
+} from "./v2AcceptanceHelpers.js";
 
 // If a resource's initialAge is too big, its implicit birthdate will be older
 // than the oldest date JS can represent. That's not remotely an issue in
@@ -173,7 +185,9 @@ export function postgresEnvironmentIsConfigured(): boolean {
 }
 
 /** Exposes one query mock for all connections belonging to this pool. */
-export function postgresStoreFixture() {
+export function postgresStoreFixture(
+  options: { statementTimeoutMs?: number } = {},
+) {
   try {
     const postgres = new pg.Pool({
       host: process.env["DATABASE_HOST"]!, // eslint-disable-line @typescript-eslint/no-non-null-assertion
@@ -181,6 +195,9 @@ export function postgresStoreFixture() {
       database: process.env["DATABASE_NAME"]!, // eslint-disable-line @typescript-eslint/no-non-null-assertion
       user: process.env["DATABASE_USER"]!, // eslint-disable-line @typescript-eslint/no-non-null-assertion
       password: process.env["DATABASE_PASSWORD"]!, // eslint-disable-line @typescript-eslint/no-non-null-assertion
+      ...(options.statementTimeoutMs === undefined
+        ? {}
+        : { statement_timeout: options.statementTimeoutMs }),
     });
     // Keep the receiver: pg's query method uses `this` to reach the active
     // connection. Each fixture creates its own mock, shared only by that pool's clients.
@@ -209,6 +226,8 @@ export function postgresStoreFixture() {
       postgres,
       postgresStore,
       queryMock,
+      schemaName,
+      tableName,
       async cleanup() {
         // eslint-disable-next-line no-console
         console.log("Cleaning up postgres store");
@@ -222,4 +241,172 @@ export function postgresStoreFixture() {
     console.error(error);
     throw error;
   }
+}
+
+/**
+ * A Store that implements only getMany (MemoryStore implements only get). A
+ * Cache batches reads only for Stores with getMany, so tests of readBatching,
+ * autoBatch, and the read-store `getMany` operation use this Store. Its
+ * getMany fans out to MemoryStore.get, so a slot can hold an Error.
+ */
+export function bulkMemoryStore<Spec extends CacheSpec = CacheSpec>() {
+  const memory = new MemoryStore<Spec>();
+  return {
+    async getMany<
+      const Reqs extends readonly StoreGetManyRequest<Spec, AnyParams>[],
+    >(requests: Reqs, options?: { signal?: AbortSignal }) {
+      return await readStoreObserved(memory, requests, options);
+    },
+    store: memory.store.bind(memory),
+    delete: memory.delete.bind(memory),
+    close: memory.close.bind(memory),
+  };
+}
+
+/**
+ * Reads a known set straight from a Store, through either read primitive.
+ * Tests use it to check Store behavior below the Cache. The package does not
+ * export it, because applications read through a Cache.
+ */
+export async function getMany<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  const Reqs extends readonly StoreGetManyRequest<Spec, Params>[],
+>(
+  store: Store<Spec, Validators, Params>,
+  requests: Reqs,
+  options?: { signal?: AbortSignal },
+) {
+  return await readStoreObserved(store, requests, options);
+}
+
+/** Reads one request straight from a Store. An Error slot rejects the call. */
+export async function getOne<
+  Spec extends CacheSpec,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+  Id extends Spec["id"],
+>(
+  store: Store<Spec, Validators, Params>,
+  request: StoreGetManyRequest<Spec, NoInfer<Params>> & { readonly id: Id },
+  options?: { signal?: AbortSignal },
+) {
+  const [result] = await getMany(store, [request] as const, options);
+  if (result instanceof Error) throw result;
+  return result;
+}
+
+/** A content type for tests that store string content under any id. */
+export type Spec = CacheSpec<string, string>;
+
+/** A consumer request with no directives. */
+export const lookup = (id: string, params: Record<string, string> = {}) => ({
+  id,
+  params,
+  directives: {},
+});
+
+// A read that never settles would otherwise hang the run (node:test waits for
+// a pending test forever), so each suite fails after a bound instead.
+export const suiteOptions = { timeout: 20_000 };
+
+type BulkMemoryStore = ReturnType<typeof bulkMemoryStore<Spec>>;
+
+/**
+ * A bulkMemoryStore whose getMany calls are spied on.
+ * - `beforeGetMany` runs before each read, so a test can hold a read open.
+ * - `slotErrors` replaces the result slot of each listed id with its Error.
+ */
+export function spiedStore(
+  options: {
+    beforeGetMany?: (
+      requests: Parameters<BulkMemoryStore["getMany"]>[0],
+    ) => Promise<void>;
+    slotErrors?: Readonly<Record<string, Error>>;
+  } = {},
+) {
+  const store = bulkMemoryStore<Spec>();
+  const getMany = store.getMany.bind(store);
+  const getManySpy = mock.method(
+    store,
+    "getMany",
+    async (...args: Parameters<typeof getMany>) => {
+      await options.beforeGetMany?.(args[0]);
+      const results = await getMany(...args);
+      const { slotErrors } = options;
+      if (slotErrors === undefined) return results;
+      return results.map((slot, index) => {
+        const failure = slotErrors[args[0][index]!.id];
+        return failure ?? slot;
+      }) as typeof results;
+    },
+  );
+  return {
+    store,
+    /** The number of requests in each `getMany` call, in call order. */
+    getManyRequestCounts: () =>
+      getManySpy.mock.calls.map(({ arguments: [requests] }) => requests.length),
+  };
+}
+
+/**
+ * A Cache over `store` that accepts any id, with a unique name so that
+ * captureChannels sees only this test's messages. A getMany Store gets the
+ * default read batching.
+ */
+export const cacheOver = (
+  store: BulkMemoryStore | MemoryStore<Spec> = new MemoryStore<Spec>(),
+  options: {
+    name?: string;
+    readBatching?: BatchOptions;
+  } = {},
+) =>
+  new Cache({
+    store,
+    name: uniqueCacheName(options.name ?? "cache"),
+    resourceTypes: ACCEPT_ANY_REGISTRY,
+    ...(options.readBatching && { readBatching: options.readBatching }),
+  });
+
+/**
+ * A cache and a wrapProducer client whose produceMany records the ids of each
+ * call and echoes each id as fresh content. Both close after the test, also
+ * when an assertion fails.
+ */
+export async function recordingClient(
+  t: { after: (fn: () => Promise<void>) => void },
+  options: {
+    name?: string;
+    store?: BulkMemoryStore | MemoryStore<Spec>;
+    readBatching?: { maxBatchSize: number };
+    producerBatching?: BatchOptions;
+    seed?: Parameters<ReturnType<typeof cacheOver>["store"]>[0];
+    content?: (id: string) => string;
+    onProduce?: (ids: readonly string[]) => Promise<void>;
+  } = {},
+) {
+  const cache = cacheOver(options.store, options);
+  if (options.seed) await cache.store(options.seed);
+  const calls: string[][] = [];
+  const client = wrapProducer({
+    cache,
+    ...(options.producerBatching && {
+      producerBatching: options.producerBatching,
+    }),
+    produceMany: async (requests) => {
+      const ids = requests.map(({ id }) => id);
+      calls.push(ids);
+      await options.onProduce?.(ids);
+      return ids.map((id) => ({
+        content: options.content?.(id) ?? id,
+        directives: freshFor100,
+      }));
+    },
+  });
+  t.after(async () => {
+    await client.close();
+    await cache.close();
+  });
+  return { cache, client, calls };
 }

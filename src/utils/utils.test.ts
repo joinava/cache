@@ -1,12 +1,31 @@
-import Cache, { singleTypeCacheOptions } from "../Cache.js";
+import {
+  bulkMemoryStore,
+  getMany,
+  getOne,
+  lookup,
+} from "../../test/fixtures.js";
+import Cache from "../cache/Cache.js";
+import { singleTypeCacheOptions } from "../cache/singleTypeCacheOptions.js";
 import MemoryStore from "../stores/MemoryStore/MemoryStore.js";
 import type { CacheSpec } from "../types/00_CacheSpec.js";
 import { normalizeParams } from "./normalization.js";
+import { SchedulingContractError } from "@zingage/scheduling";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { setTimeout as delay } from "timers/promises";
-import { naiveGetMany, raceWithSignal } from "./utils.js";
+import {
+  CacheContractError,
+  throwIfAnyError,
+  raceWithSignal,
+} from "./utils.js";
+
+// Normalized empty params, for raw Store requests.
+const emptyParams = normalizeParams(
+  (name) => name,
+  (_name, value) => value,
+  {},
+);
 
 describe("raceWithSignal", () => {
   it("should return the promise result when signal is undefined", async () => {
@@ -29,7 +48,9 @@ describe("raceWithSignal", () => {
 
     await assert.rejects(
       async () => raceWithSignal(Promise.resolve("ok"), controller.signal),
-      { message: "already" },
+      {
+        message: "already",
+      },
     );
   });
 
@@ -63,7 +84,9 @@ describe("raceWithSignal", () => {
 
     await assert.rejects(
       async () => raceWithSignal(failingPromise, controller.signal),
-      { message: "boom" },
+      {
+        message: "boom",
+      },
     );
   });
 
@@ -89,7 +112,9 @@ describe("raceWithSignal", () => {
 
     await assert.rejects(
       async () => raceWithSignal(alreadyRejected, controller.signal),
-      { message: "signal-reason" },
+      {
+        message: "signal-reason",
+      },
     );
 
     // The key concern: the already-rejected promise should not cause an
@@ -99,109 +124,154 @@ describe("raceWithSignal", () => {
   });
 });
 
-describe("naiveGetMany partial reads", () => {
-  function arrange() {
-    const store = new MemoryStore<CacheSpec<string, string>>();
-    const cache = new Cache(
-      singleTypeCacheOptions<string>()({ name: "naive-partial", store }),
-    );
-    const params = normalizeParams(
-      cache.normalizeParamName,
-      cache.normalizeParamValue,
-      {},
-    );
-    return { store, cache, request: (id: string) => ({ id, params }) };
-  }
-
-  it("keeps hits, misses, duplicate slots, and synchronous errors in request order", async (t) => {
-    const { store, cache, request } = arrange();
-    t.after(async () => await cache.close());
-    await cache.store([
-      { id: "hit", content: "value", directives: { freshUntilAge: 60 } },
-    ]);
-    const get = store.get.bind(store);
-    const failure = new Error("read failed");
-    t.mock.method(store, "get", (...args: Parameters<typeof get>) => {
-      const [id] = args;
-      if (id === "failed") throw failure;
-      return get(...args);
-    });
-    const result = await naiveGetMany(
-      store,
-      [request("hit"), request("failed"), request("missing"), request("hit")],
-      2,
-    );
-    const [hit, failed, missing, duplicate] = result;
-    assert.ok(Array.isArray(hit));
-    assert.equal(hit[0]?.content, "value");
-    assert.equal(failed, failure);
-    assert.deepEqual(missing, []);
-    assert.ok(Array.isArray(duplicate));
-    assert.equal(duplicate[0]?.content, "value");
-  });
-
-  it("wraps non-Error rejections and continues queued reads at the concurrency limit", async (t) => {
-    const { store, cache, request } = arrange();
-    t.after(async () => await cache.close());
-    const gate = Promise.withResolvers<void>();
-    const started: string[] = [];
-    const failure = { reason: "not an Error" };
-    const get = store.get.bind(store);
-    t.mock.method(store, "get", async (...args: Parameters<typeof get>) => {
-      const [id] = args;
-      started.push(id);
-      if (id === "first") {
-        await gate.promise;
-        throw failure;
-      }
-      return await get(...args);
-    });
-    const call = naiveGetMany(
-      store,
-      [request("first"), request("second"), request("third")],
-      1,
-    );
-    await nextTurn();
-    assert.deepEqual(started, ["first"]);
-    gate.resolve();
-    const result = await call;
-    assert.ok(result[0] instanceof Error);
-    assert.equal(result[0].cause, failure);
-    assert.deepEqual(result.slice(1), [[], []]);
-    assert.deepEqual(started, ["first", "second", "third"]);
-  });
-
-  it("rejects before reading when the caller is already cancelled", async (t) => {
-    const { store, cache, request } = arrange();
-    t.after(async () => await cache.close());
-    const get = t.mock.method(store, "get");
-    const controller = new AbortController();
-    const failure = new Error("cancelled");
-    controller.abort(failure);
-    await assert.rejects(
-      naiveGetMany(store, [request("a")], 1, { signal: controller.signal }),
-      (error) => error === failure,
-    );
-    assert.equal(get.mock.callCount(), 0);
-  });
-
-  it("keeps cancellation out of partial-error slots and does not start queued reads", async (t) => {
-    const { store, cache, request } = arrange();
-    t.after(async () => await cache.close());
-    const controller = new AbortController();
-    const failure = new Error("cancelled during read");
-    const started: string[] = [];
-    t.mock.method(store, "get", async (id: string) => {
-      started.push(id);
-      controller.abort(failure);
+describe("raw Store adapters", () => {
+  it("preserves one operational Error across all bulk slots and scalar rejection", async (t) => {
+    const store = bulkMemoryStore();
+    t.after(async () => await store.close());
+    const failure = new TypeError("custom Store failure");
+    t.mock.method(store, "getMany", async () => {
       throw failure;
     });
+    const request = { id: "a", params: emptyParams };
+    const result = await getMany(store, [request, request]);
+    assert.equal(result[0], failure);
+    assert.equal(result[1], failure);
+    await assert.rejects(getOne(store, request), (error) => error === failure);
+  });
+
+  it("wraps a whole-operation non-Error failure once", async (t) => {
+    const store = bulkMemoryStore();
+    t.after(async () => await store.close());
+    const cause = { failed: true };
+    t.mock.method(store, "getMany", async () => {
+      throw cause;
+    });
+    const results = await getMany(store, [
+      { id: "a", params: emptyParams },
+      { id: "b", params: emptyParams },
+    ]);
+    assert.ok(results[0] instanceof Error);
+    assert.equal(results[0], results[1]);
+    assert.equal(results[0].cause, cause);
+  });
+
+  it("rejects malformed positional output instead of converting it to slots", async (t) => {
+    const store = bulkMemoryStore();
+    t.after(async () => await store.close());
+    t.mock.method(store, "getMany", async () => []);
     await assert.rejects(
-      naiveGetMany(store, [request("a"), request("b")], 1, {
-        signal: controller.signal,
-      }),
-      (error) => error === failure,
+      getMany(store, [{ id: "a", params: emptyParams }]),
+      CacheContractError,
     );
-    assert.deepEqual(started, ["a"]);
+  });
+
+  it("rejects a bulk read that throws a SchedulingContractError instead of converting it to slots", async (t) => {
+    const store = bulkMemoryStore();
+    t.after(async () => await store.close());
+    const contractError = new SchedulingContractError("broken batch");
+    t.mock.method(store, "getMany", async () => {
+      throw contractError;
+    });
+    await assert.rejects(
+      getMany(store, [{ id: "a", params: emptyParams }]),
+      (error) => error === contractError,
+    );
+  });
+
+  it("rejects a single read that throws a SchedulingContractError instead of converting it to a slot", async () => {
+    const memory = new MemoryStore<CacheSpec<string, string>>();
+    const contractError = new SchedulingContractError("broken single read");
+    const store = {
+      get: async () => {
+        throw contractError;
+      },
+      store: memory.store.bind(memory),
+      delete: memory.delete.bind(memory),
+      close: memory.close.bind(memory),
+    };
+    await assert.rejects(
+      getMany(store, [{ id: "a", params: emptyParams }]),
+      (error) => error === contractError,
+    );
+    await memory.close();
+  });
+
+  it("does not dispatch an empty known set", async (t) => {
+    const store = bulkMemoryStore();
+    t.after(async () => await store.close());
+    const read = t.mock.method(store, "getMany");
+    assert.deepEqual(await getMany(store, []), []);
+    assert.equal(read.mock.callCount(), 0);
+  });
+});
+
+describe("throwIfAnyError", () => {
+  it("reports the first request-order error", () => {
+    const first = new Error("first");
+    const second = new Error("second");
+    assert.throws(
+      () => throwIfAnyError([1, first, second]),
+      (error) => error === first,
+    );
+    const values = [1, "two"] as const;
+    assert.equal(throwIfAnyError(values), values);
+  });
+});
+
+describe("adapter lifecycle and positional contracts", () => {
+  it("rejects missing bulk slots instead of treating them as misses", async () => {
+    const store = bulkMemoryStore();
+    Object.defineProperty(store, "getMany", {
+      // oxlint-disable-next-line unicorn/no-new-array -- The Store deliberately returns a sparse positional array.
+      value: async (requests: readonly unknown[]) => new Array(requests.length),
+    });
+    const cache = new Cache(
+      singleTypeCacheOptions<unknown>()({ name: "sparse-bulk", store }),
+    );
+    await assert.rejects(
+      getMany(store, [{ id: "a", params: emptyParams }]),
+      CacheContractError,
+    );
+    await assert.rejects(cache.get(lookup("a")), CacheContractError);
+    await cache.close();
+  });
+
+  it("keeps accepted single reads owned until they settle after a contract failure", async () => {
+    const memory = new MemoryStore<CacheSpec<string, string>>();
+    const held = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    let active = false;
+    let closedWhileActive = false;
+    const store = {
+      get: async ({ id }: { id: string }) => {
+        if (id === "invalid") {
+          throw new CacheContractError("invalid single result");
+        }
+        active = true;
+        started.resolve();
+        await held.promise;
+        active = false;
+        return [];
+      },
+      store: memory.store.bind(memory),
+      delete: memory.delete.bind(memory),
+      close: async () => {
+        closedWhileActive = active;
+        await memory.close();
+      },
+    };
+    const cache = new Cache(
+      singleTypeCacheOptions<string>()({ name: "single-drain", store }),
+    );
+    const read = cache.getUnbatched([lookup("invalid"), lookup("held")]);
+    const rejected = assert.rejects(read, CacheContractError);
+    await started.promise;
+    const close = cache.close();
+    await nextTurn();
+    assert.equal(closedWhileActive, false);
+    held.resolve();
+    await rejected;
+    await close;
+    assert.equal(closedWhileActive, false);
   });
 });

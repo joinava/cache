@@ -10,6 +10,20 @@ When authoring a new store, there are a few concepts you'll need to know; a stan
 
 - an "entry" is the representation of a variant received from the producer at some point. These entries are fundamentally what the cache is storing. In the example above, the entry would actually contain the content of the cookies recipe in one language.
 
+## Read capability
+
+Implement exactly one primitive: `get(request, options?)` or `getMany(requests, options?)`.
+A request contains `{ id, params }`, with normalized parameters. Options may contain an AbortSignal.
+MemoryStore uses a single primitive. PostgresStore and SqliteStore use a bulk primitive.
+The exported `getOne` and `getMany` adapters support either capability without automatic accumulation.
+
+Bulk output must contain exactly one entry array or Error per input position. Keep duplicate requests and empty arrays for misses.
+Do not return sparse arrays. If any required variant fails decoding or matching, fail the entire affected request slot.
+Preserve completed slots after an ordinary SQL chunk failure and continue subsequent chunks without retries.
+Cancellation stops subsequent chunk dispatch and rejects. Package-detected contract violations also reject.
+The Cache converts whole operational read failures into positional Error slots with one shared Error instance.
+Each Store invocation returns one complete array; callers cannot observe successful chunks before it settles.
+
 ## Common assumptions/Access Patterns
 
 When making performance/implementation tradeoffs, consider that the following assumptions _generally_ hold true:
@@ -24,10 +38,13 @@ When making performance/implementation tradeoffs, consider that the following as
     - Moreover, for resources that do have multiple variants, those variants will probably all vary on the same set of parameters names. E.g., a `cookies-recipe` resource might vary on the request's `language` and `imageResolution` parameters — but it'd be very weird if _some_ results from the producer depended on the those request parameters while others didn't. Therefore, every call to `myStore.get()` will usually match entries for only one variant! E.g., if the call is
 
       ```ts
-      store.get("cookies-recipe", {
-        language: "something",
-        imageResolution: "max",
-        /* ... 10 other parameters here ... */
+      store.get({
+        id: "cookies-recipe",
+        params: {
+          language: "something",
+          imageResolution: "max",
+          /* ... 10 other normalized parameters here ... */
+        },
       });
       ```
 
@@ -38,11 +55,13 @@ When making performance/implementation tradeoffs, consider that the following as
 
     - The number of variants for a resource can be unboundedly-large. This happens especially for resources that have one variant _per user_ (i.e., vary on a param like `user-id` or, in the HTTP context, `Authorization` or `Cookie`). Therefore, assuming the entries are stored in some backing database, it's generally not safe to simply load all the entries for a given resource into JS memory and filter them there. (However, a Store could do this if it put some limit on how many entries it would load per resource in a `get()` call -- at the expense of artificially lowering the hit rate in these sorts of cases by not returning all matching entries.)
 
-3.  `getMany()` should read all of its requests in one round trip to the backing database -- for example, one `where id in (...)` query -- and not call `get()` once per request. `Cache.getMany()` and the `batchReads` cache option both exist to turn many lookups into one `getMany()` call, so a `getMany()` that loops over `get()` silently removes the benefit of both. The exported `naiveGetMany` helper is that loop: it is a correct starting point, not a finished implementation.
+3.  Declare `getMany` when bulk work can reduce physical I/O. Cache uses this capability to select automatic accumulation.
+    Declare only `get` when each request needs independent work. The raw adapter supplies bounded-concurrency bulk reads with cooperative fairness.
+    Do not add a redundant `getMany` implementation that loops over `get`.
 
-    A SQL store can join a `VALUES` table of `(request_index, resource_id, params)` against its entries and filter vary requirements in the database. PostgresStore shares its matching predicate between single and bulk reads, including null-as-absence, and buckets results by request index. An empty stored `vary` always matches; PostgresStore checks `vary = '{}'::jsonb` before its general predicate to avoid scanning fields for that common case. This shortcut is distinct from empty request params, which must also match null-only vary objects. This keeps nonmatching payloads out of Node. Bound parameters must be budgeted per request, with chunking for large calls. Duplicate requests can duplicate matching payloads. SqliteStore instead fetches candidate variants and filters them in its worker; the variant-count caveat above still applies to that approach. SQL text bindings may replace lone UTF-16 surrogates with U+FFFD. Never normalize request IDs to reproduce that conversion: distinct IDs must not become hits for each other. Compare returned SQL IDs and persisted entry IDs exactly against the original request ID. Unsupported strings may produce misses or errors; false hits are never acceptable.
+    A SQL store can join a `VALUES` table of `(request_index, resource_id, params)` against its entries and filter vary requirements in the database. PostgresStore supports null-as-absence and groups results by request index. An empty stored `vary` always matches; PostgresStore checks `vary = '{}'::jsonb` before its general predicate to avoid scanning fields for that common case. This shortcut is distinct from empty request params, which must also match null-only vary objects. This keeps nonmatching payloads out of Node. Bound parameters must be budgeted per request, with chunking for large calls. Duplicate requests can duplicate matching payloads. SqliteStore instead fetches candidate variants and filters them in its worker; the variant-count caveat above still applies to that approach. SQL text bindings may replace lone UTF-16 surrogates with U+FFFD. Never normalize request IDs to reproduce that conversion: distinct IDs must not become hits for each other. Compare returned SQL IDs and persisted entry IDs exactly against the original request ID. Unsupported strings may produce misses or errors; false hits are never acceptable.
 
-    Whatever the implementation, `getMany()` must return, for each request, the same entries that `get()` would return for it, in one result array per request and in input order, keeping duplicate requests and misses. The store-conformance suite checks this with a property test.
+    The declared primitive must return every matching entry for each successful request. The store-conformance suite checks equivalent scalar and bulk adapter results.
 
 ## Gotchas for stores that serialize entries as JSON
 
@@ -61,14 +80,11 @@ To handle this, call the exported `restoreInfinityInDirectives` helper on the pa
 
 ## Store shutdown
 
-Shutdown behavior depends on the store:
+Implement `close(): Promise<void>` without a timeout. Release owned resources to completion. `Cache.close()` calls it after the Cache drains its own work. The Store type does not require `Symbol.asyncDispose`.
+MemoryStore stops its cleanup timer. PostgresStore leaves the supplied pool open because the caller owns it.
+SQLite drains accepted worker tasks, checkpoints its writer, and terminates idle workers without a forced deadline.
 
-| Store | Shutdown behavior | Pending operations |
-| --- | --- | --- |
-| MemoryStore | `close()` stops the expiration-cleanup timer. It does not clear entries or reject new operations. | Pending reads and writes continue. Close does not wait for them, so their promises can settle after close resolves. Reads still check entry expiration. |
-| PostgresStore | There is no `close()` method. `Symbol.asyncDispose()` does nothing because the caller owns the supplied connection pool. | Operations continue. Finish operations before shutting down the supplied pool, including writes still preparing or executing transaction batches. |
-| SqliteStore | `close()` rejects new operations, drains accepted reader tasks, enqueues a writer checkpoint/close task behind accepted writes, and closes the workers. | Accepted tasks normally finish. An explicit close timeout destroys both worker pools and rejects close. Outstanding tasks can reject. A rejected write promise alone does not establish whether its transaction committed before termination. |
-
-SqliteStore's installed Piscina pools also have a 30-second graceful-close timeout. This limit applies even without an explicit store close timeout. SQLite shutdown drains worker tasks; it does not explicitly collect every public operation promise or its remaining result conversion. Await operation promises when their completion or errors matter.
-
-`Cache.close()` marks the cache closed and flushes accepted queued reads before invoking the store's shutdown method. It does not wait for all cache operations or producer calls to settle. Store shutdown behavior does not imply an ordering guarantee for overlapping mutations.
+Applications close producer clients before their Cache. Cache close drains accepted reads, writes, and deletes before Store cleanup.
+Callers that bypass Cache must await their own operations before closing their Store or its external dependencies.
+Operational failures stay attached to operation results and diagnostics. Close rejects only for lifecycle or cleanup failures and attempts all required cleanup.
+A process deadline does not establish graceful completion. Shutdown does not add ordering guarantees to overlapping mutations.
