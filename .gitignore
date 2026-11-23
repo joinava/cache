@@ -55,6 +55,8 @@ pids/
 
 # Output of 'npm pack'
 *.tgz
+# TEMPORARY: the unpublished @zingage/scheduling prototype. Remove with vendor/.
+!vendor/*.tgz
 
 # Temporary files
 tmp/
