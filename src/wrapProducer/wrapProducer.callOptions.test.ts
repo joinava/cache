@@ -342,12 +342,10 @@ describe("get", suiteOptions, () => {
       { autoBatch: { store: false } },
     );
 
-    // The read finished although the accumulation schedule never ran its
-    // callback: the test never calls `scheduled`. The read still armed the
-    // schedule, because it is submitted first and expedited after that.
+    // The read never accumulates, so it does not arm the schedule.
     assert.equal(entry.content, "stored");
     assert.deepEqual(getManyRequestCounts(), [1]);
-    assert.equal(scheduled.length, 1);
+    assert.equal(scheduled.length, 0);
   });
 
   it("publishes one fetch message, reports the write, and rejects with the producer's error", async (t) => {

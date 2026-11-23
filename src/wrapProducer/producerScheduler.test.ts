@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import type { BatchOptions } from "@zingage/scheduling";
 
@@ -356,8 +356,9 @@ describe("a call limit", options, () => {
 
     const running = request(scheduler, "a");
     await runBatches();
-    const direct = ["b", "c", "d"].map((work) => request(scheduler, work));
-    direct.forEach(({ item }) => item!.expedite());
+    const direct = ["b", "c", "d"].map((work) =>
+      request(scheduler, work, { call: { expedite: true } }),
+    );
     await nextTurn();
     assert.equal(calls.length, 1);
     // The expedited work waits for a slot, so another request can join it.
@@ -412,8 +413,10 @@ describe("a producer that takes one request per call", options, () => {
     const { invoke, calls } = echoInvoke();
     const scheduler = oneByOneScheduler(invoke, { maxConcurrentCalls: 1 });
 
-    const outcomes = ["a", "b"].map((work) => request(scheduler, work));
-    outcomes[1]!.item!.expedite();
+    const outcomes = [
+      request(scheduler, "a"),
+      request(scheduler, "b", { call: { expedite: true } }),
+    ];
     await Promise.all(outcomes.map(({ result }) => result));
 
     assert.deepEqual(calls, [
@@ -631,16 +634,15 @@ describe("a producer that takes batches", options, () => {
 
   it("sends expedited work in calls of at most maxBatchSize, without the schedule", async () => {
     const { invoke, calls } = echoInvoke();
+    const schedule = mock.fn();
     const scheduler = createProducerScheduler<string, string>({
       ...defaults,
-      // A schedule that never fires: only expedited work can start.
-      batching: { maxBatchSize: 2, batchScheduleFn: () => {} },
+      batching: { maxBatchSize: 2, batchScheduleFn: schedule },
       invoke,
     });
     const outcomes = ["a", "b", "c", "d", "e"].map((work) =>
-      request(scheduler, work),
+      request(scheduler, work, { call: { expedite: true } }),
     );
-    outcomes.forEach(({ item }) => item!.expedite());
     assert.deepEqual(await Promise.all(outcomes.map(({ result }) => result)), [
       "a",
       "b",
@@ -655,6 +657,8 @@ describe("a producer that takes batches", options, () => {
       { values: ["c", "d"], autoBatched: false },
       { values: ["e"], autoBatched: false },
     ]);
+    // The work never accumulates, so it does not arm the schedule.
+    assert.equal(schedule.mock.callCount(), 0);
     await scheduler.close();
   });
 
@@ -668,14 +672,14 @@ describe("a producer that takes batches", options, () => {
     });
 
     const accumulated = request(scheduler, "a");
-    const expedited = request(scheduler, "b");
-    expedited.item!.expedite();
+    const expedited = request(scheduler, "b", { call: { expedite: true } });
     assert.equal(await expedited.result, "b");
     // The accumulation's schedule makes "a" ready in the turn in which "c"
     // is expedited, so one call takes both, in the order in which they
     // became ready.
-    const alsoExpedited = request(scheduler, "c");
-    alsoExpedited.item!.expedite();
+    const alsoExpedited = request(scheduler, "c", {
+      call: { expedite: true },
+    });
     scheduled.splice(0).forEach((run) => run());
     await Promise.all([accumulated.result, alsoExpedited.result]);
 
@@ -686,7 +690,7 @@ describe("a producer that takes batches", options, () => {
     await scheduler.close();
   });
 
-  it("lets a request expedite waiting work that it joined", async () => {
+  it("expedites waiting work that an expediting request joins", async () => {
     const { invoke, calls } = echoInvoke();
     const scheduler = createProducerScheduler<string, string>({
       ...defaults,
@@ -696,9 +700,8 @@ describe("a producer that takes batches", options, () => {
     });
 
     const waiting = request(scheduler, "a");
-    const joiner = request(scheduler, "a");
+    const joiner = request(scheduler, "a", { call: { expedite: true } });
     assert.equal(joiner.item, waiting.item);
-    joiner.item!.expedite();
 
     assert.equal(await waiting.result, "a");
     assert.deepEqual(calls, [{ values: ["a"], autoBatched: false }]);

@@ -521,8 +521,11 @@ type SlotRecord<E> = {
 type CallContext = {
   readonly signal: AbortSignal | undefined;
   readonly joinInFlight: false | undefined;
-  /** True for a call with `autoBatch.producer: false`. */
-  readonly expediteProducer: boolean;
+  /**
+   * True for a call with `autoBatch.producer: false`: its producer work
+   * skips the accumulation wait.
+   */
+  readonly expedite: boolean;
 };
 
 /** The context that the slots of one public call share. */
@@ -530,7 +533,7 @@ function callContext(callOptions: ClientReadOptions): CallContext {
   return {
     signal: callOptions.signal,
     joinInFlight: callOptions.joinInFlight,
-    expediteProducer: callOptions.autoBatch?.producer === false,
+    expedite: callOptions.autoBatch?.producer === false,
   };
 }
 
@@ -1078,8 +1081,9 @@ export function createProducerClient<
    * caller has already been given a (stale) result. So the refresh never
    * cancels work that it starts or joins.
    *
-   * A call with `autoBatch.producer: false` expedites the work, also work
-   * that it joined while that work still accumulated.
+   * For a call with `autoBatch.producer: false`, the scheduler expedites the
+   * work, also work that the request joined while that work still
+   * accumulated.
    */
   const requestProducer = (
     item: Item,
@@ -1087,7 +1091,7 @@ export function createProducerClient<
     call: CallContext,
   ): SharedOutcome<ProducerRequest<Work>, Produced> => {
     const background = decision.action === "serve-and-refresh";
-    const outcome = scheduler.request(
+    return scheduler.request(
       {
         work: {
           request: item.request,
@@ -1102,8 +1106,6 @@ export function createProducerClient<
       },
       background ? undefined : call.signal,
     );
-    if (call.expediteProducer) outcome.item?.expedite();
-    return outcome;
   };
 
   const serve = (

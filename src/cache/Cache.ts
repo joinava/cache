@@ -1,4 +1,4 @@
-import { noop, sumBy } from "es-toolkit";
+import { sumBy } from "es-toolkit";
 import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
 import type { ReadonlyDeep } from "type-fest";
 import type { PickEach } from "type-party";
@@ -69,7 +69,6 @@ import {
   raceWithSignal,
   asError,
   assertUnreachable,
-  cancelWaitingOnAbort,
   isContractError,
   queueWaitMs,
   defaultLoggersByComponent,
@@ -495,18 +494,15 @@ export default class Cache<
     //
     // Submitted synchronously, so a close() that starts later waits for the
     // read: the dispatcher tracks it.
+    //
+    // The dispatcher takes a read that still waits out of its queue when the
+    // signal aborts. A read whose Store call has started keeps running, and
+    // `raceWithSignal` rejects this caller at once.
     const signal = options?.signal;
-    const read = this.#readDispatcher.submit({
-      request: storeRequest,
-      signal,
-      budget: undefined,
-    });
-    if (options?.autoBatch === false) read.expedite();
-    // An abort takes a read that still waits out of the queue. A read whose
-    // Store call has started keeps running, and `raceWithSignal` rejects
-    // this caller at once.
-    const stopCancelling =
-      signal === undefined ? noop : cancelWaitingOnAbort([read], signal);
+    const read = this.#readDispatcher.submit(
+      { request: storeRequest, signal, budget: undefined },
+      { signal, expedite: options?.autoBatch === false },
+    );
 
     let cacheEntries: Entry<SpecOf<RT>, Validators, Params>[];
     try {
@@ -525,8 +521,6 @@ export default class Cache<
       }
 
       throw error;
-    } finally {
-      stopCancelling();
     }
 
     this.#logger("trace", "received entries from the store", {
@@ -741,38 +735,29 @@ export default class Cache<
       (request): StoreRead<RT, Params> => ({ request, signal, budget }),
     );
 
-    const { results, stopCancelling } = (() => {
-      if (this.#capsEachKnownSet) {
-        // These reads never wait in the dispatcher, so they need no
-        // cancellation there. A read that the limit still holds when the
-        // signal aborts fails before it reaches the Store: each read is its
-        // own Store call, which gets the signal (see `#readStore`).
-        const limit = pLimit(SINGLE_STORE_READS_PER_SET);
-        return {
-          results: inputs.map(async (input) =>
+    const results = this.#capsEachKnownSet
+      ? (() => {
+          // These reads never wait in the dispatcher, so they need no
+          // cancellation there. A read that the limit still holds when the
+          // signal aborts fails before it reaches the Store: each read is
+          // its own Store call, which gets the signal (see `#readStore`).
+          const limit = pLimit(SINGLE_STORE_READS_PER_SET);
+          return inputs.map(async (input) =>
             limit(async () => this.#readDispatcher.submit(input).result),
-          ),
-          stopCancelling: noop,
-        };
-      }
-
-      const reads = this.#readDispatcher.submitMany(inputs);
-      if (options?.autoBatch === false) {
-        reads.forEach((read) => {
-          read.expedite();
-        });
-      }
-      return {
-        results: reads.map(({ result }) => result),
-        // An abort takes the reads that still wait out of the queue.
-        stopCancelling: cancelWaitingOnAbort(reads, signal),
-      };
-    })();
+          );
+        })()
+      : this.#readDispatcher
+          // With the signal, the dispatcher takes the reads that still wait
+          // out of its queue when the signal aborts.
+          .submitMany(inputs, {
+            signal,
+            expedite: options?.autoBatch === false,
+          })
+          .map(({ result }) => result);
 
     // allSettled waits for every read, so a failure in one Store call does
-    // not hide the results of the others. It never rejects.
+    // not hide the results of the others.
     const settled = await Promise.allSettled(results);
-    stopCancelling();
     signal?.throwIfAborted();
 
     return settled.map((read) => {
@@ -1023,11 +1008,12 @@ export default class Cache<
    * with `getMany` accumulates reads, so no call to a Store without it is
    * automatic.
    *
-   * The Store gets a signal only for a call that is not automatic and whose
-   * reads all carry the same signal. Then only callers that cancelled can
-   * lose the call. An automatic call, or one whose reads carry different
-   * signals, gets no signal: it always completes, and each caller races its
-   * own signal.
+   * The Store gets a signal exactly when every read of the call carries that
+   * same signal. Then only callers that cancelled can lose the call. A call
+   * whose reads carry different signals, or that mixes reads with a signal
+   * and reads without one, gets no signal: it always completes, and each
+   * caller races its own signal. Whether the call is automatic does not
+   * matter.
    */
   async #readStore(
     reads: readonly Item<
@@ -1039,10 +1025,9 @@ export default class Cache<
       this.#dataStore.getMany !== undefined &&
       reads.some((read) => !read.expedited);
     const first = reads[0]?.input;
-    const signal =
-      autoBatched || reads.some(({ input }) => input.signal !== first?.signal)
-        ? undefined
-        : first?.signal;
+    const signal = reads.every(({ input }) => input.signal === first?.signal)
+      ? first?.signal
+      : undefined;
 
     return readStoreObserved(
       this.#dataStore,
@@ -1119,7 +1104,12 @@ export default class Cache<
 /** One Store read, as the read dispatcher holds it. */
 type StoreRead<RT extends ResourceTypes, Params extends AnyParams> = {
   readonly request: StoreGetManyRequest<SpecOf<RT>, Params>;
-  /** The signal of the call that made the read. See `Cache.#readStore`. */
+  /**
+   * The signal of the call that made the read. The dispatcher gets the same
+   * signal when the read is submitted, to cancel the read while it waits.
+   * It is repeated here because `Cache.#readStore` decides from the reads of
+   * one Store call whether the Store gets a signal.
+   */
   readonly signal: AbortSignal | undefined;
   /**
    * The time-slice budget of the known-set read that made this read, for a

@@ -277,12 +277,12 @@ describe("Cache read batching", suiteOptions, () => {
     await Promise.all([a, b]);
     assert.deepEqual(observed, ["reader-a", "reader-a"]);
 
-    // A close that makes waiting reads ready does not use that callback, so
-    // their Store call runs in the closer's context.
+    // A close that makes waiting reads ready also runs their Store call in
+    // the context of the read that opened the accumulation, not the closer's.
     const c = context.run("reader-c", () => cache.get(lookup("c")));
     await context.run("closer", () => cache.close());
     await c;
-    assert.deepEqual(observed, ["reader-a", "reader-a", "closer"]);
+    assert.deepEqual(observed, ["reader-a", "reader-a", "reader-c"]);
     // The scheduled callbacks still exist after a forced flush; neither a
     // second close nor invoking those callbacks may execute a batch twice.
     await cache.close();
@@ -593,7 +593,7 @@ describe(
       assert.equal(schedule.mock.callCount(), 0);
     });
 
-    it("does not cancel a dispatched shared operation when every caller aborts", async (t) => {
+    it("close() waits for a Store call that its only caller aborted", async (t) => {
       const started = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
       const { store, getManyRequestCounts } = spiedStore({

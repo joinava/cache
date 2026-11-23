@@ -547,8 +547,8 @@ export type CacheReadStoreMessage = {
   /**
    * `failure` when any slot holds an Error or the whole call failed.
    * `cancelled` when a Store call that got its caller's signal rejects after
-   * that caller cancels. A Store call gets a signal only when it is not
-   * `autoBatched` and all of its requests carry the same signal. Any other
+   * that caller cancels. A Store call gets a signal exactly when all of its
+   * requests carry that same signal, automatic or not. Any other
    * Store call keeps the Store's eventual outcome after a cancellation.
    */
   outcome: "success" | "failure" | "cancelled";

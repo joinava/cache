@@ -231,54 +231,122 @@ describe("read-store channel", suiteOptions, () => {
     });
   }
 
-  for (const settlement of ["queued", "success", "failure"] as const) {
-    it(`preserves automatic Store accounting after ${settlement} cancellation`, async (t) => {
-      const scheduled = Promise.withResolvers<() => void>();
-      const started = Promise.withResolvers<void>();
-      const gate = Promise.withResolvers<void>();
-      const { store } = spiedStore({
-        beforeGetMany: async () => {
-          started.resolve();
-          await gate.promise;
-          if (settlement === "failure") {
-            throw new Error("Store failed after caller cancellation");
-          }
-        },
-      });
-      const cache = cacheOver(store, {
-        name: `automatic-cancel-${settlement}`,
-        readBatching: { batchScheduleFn: scheduled.resolve },
-      });
-      const capture = captureChannels(cache.name);
-      t.after(async () => {
-        capture.stop();
-        await cache.close();
-      });
+  /**
+   * A cache whose automatic reads wait for the returned `dispatch`, over a
+   * Store whose call stays open until `gate` resolves, and then fails if
+   * `fails` is set.
+   */
+  const gatedAutomaticReads = (
+    t: { after: (fn: () => Promise<void>) => void },
+    name: string,
+    fails: boolean,
+  ) => {
+    const scheduled = Promise.withResolvers<() => void>();
+    const started = Promise.withResolvers<void>();
+    const gate = Promise.withResolvers<void>();
+    const { store } = spiedStore({
+      beforeGetMany: async () => {
+        started.resolve();
+        await gate.promise;
+        if (fails) throw new Error("Store failed after caller cancellation");
+      },
+    });
+    const cache = cacheOver(store, {
+      name,
+      readBatching: { batchScheduleFn: scheduled.resolve },
+    });
+    const capture = captureChannels(cache.name);
+    t.after(async () => {
+      capture.stop();
+      await cache.close();
+    });
+    return { cache, capture, scheduled: scheduled.promise, started, gate };
+  };
+
+  it("emits nothing for an automatic read that is cancelled while it waits", async (t) => {
+    const { cache, capture, scheduled, gate } = gatedAutomaticReads(
+      t,
+      "automatic-cancel-queued",
+      false,
+    );
+    const controller = new AbortController();
+    const rejected = assert.rejects(
+      cache.get(lookup("a"), { signal: controller.signal }),
+    );
+    const dispatch = await scheduled;
+    controller.abort();
+    await rejected;
+    dispatch();
+    gate.resolve();
+    await cache.close();
+    assert.equal(capture.readStore.length, 0);
+  });
+
+  for (const fails of [false, true]) {
+    const settlement = fails ? "failure" : "success";
+
+    it(`cancels an automatic Store call whose reads all carry the aborted signal (Store ${settlement})`, async (t) => {
+      const { cache, capture, scheduled, started, gate } = gatedAutomaticReads(
+        t,
+        `automatic-cancel-own-${settlement}`,
+        fails,
+      );
       const controller = new AbortController();
-      const read = cache.get(lookup("a"), { signal: controller.signal });
-      const rejected = assert.rejects(read);
-      const dispatch = await scheduled.promise;
-      if (settlement !== "queued") {
-        dispatch();
-        await started.promise;
-      }
+      // Two reads of one caller: every read of the Store call carries the
+      // same signal, so the Store call gets it.
+      const rejected = Promise.all(
+        ["a", "b"].map(async (id) =>
+          assert.rejects(cache.get(lookup(id), { signal: controller.signal })),
+        ),
+      );
+      (await scheduled)();
+      await started.promise;
       controller.abort();
       await rejected;
       assert.equal(capture.readStore.length, 0);
-      dispatch();
       gate.resolve();
       await cache.close();
-      if (settlement === "queued") assert.equal(capture.readStore.length, 0);
-      else {
-        assert.equal(capture.readStore.length, 1);
-        const [message] = capture.readStore;
-        assert.equal(message?.operation, "getMany");
-        assert.equal(message?.outcome, settlement);
-        assert.equal(
-          message?.failedRequestCount,
-          settlement === "failure" ? 1 : 0,
-        );
-      }
+
+      assert.equal(capture.readStore.length, 1);
+      const [message] = capture.readStore;
+      assert.equal(message?.operation, "getMany");
+      assert.equal(message?.autoBatched, true);
+      assert.equal(message?.requestCount, 2);
+      // The Store call saw the abort, whatever the Store did after it.
+      assert.equal(message?.outcome, "cancelled");
+      assert.equal(message?.failedRequestCount, 0);
+    });
+
+    it(`preserves automatic Store accounting after ${settlement} cancellation when another caller shares the Store call`, async (t) => {
+      const { cache, capture, scheduled, started, gate } = gatedAutomaticReads(
+        t,
+        `automatic-cancel-shared-${settlement}`,
+        fails,
+      );
+      const controller = new AbortController();
+      const rejected = assert.rejects(
+        cache.get(lookup("a"), { signal: controller.signal }),
+      );
+      // This read has no signal, so the Store call gets none: the other
+      // caller must not lose the call.
+      const kept = cache.get(lookup("b")).then(
+        () => "fulfilled",
+        () => "rejected",
+      );
+      (await scheduled)();
+      await started.promise;
+      controller.abort();
+      await rejected;
+      assert.equal(capture.readStore.length, 0);
+      gate.resolve();
+      assert.equal(await kept, fails ? "rejected" : "fulfilled");
+      await cache.close();
+
+      assert.equal(capture.readStore.length, 1);
+      const [message] = capture.readStore;
+      assert.equal(message?.operation, "getMany");
+      assert.equal(message?.outcome, settlement);
+      assert.equal(message?.failedRequestCount, fails ? 2 : 0);
     });
   }
 

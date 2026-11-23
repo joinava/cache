@@ -73,12 +73,17 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
   becomes ready, not synchronously inside the schedule callback or `close()`.
   With `preserveAsyncContext`, every Store or producer call of one
   accumulation runs in the async context of the request that opened the
-  accumulation, and a call that `close()` starts runs in the closer's
-  context. Queue waits in diagnostics are measured times, so a call that
-  nothing held back reports a wait close to zero, not exactly zero. Work
-  with `autoBatch: false` still calls `batchScheduleFn`, whose callback then
-  finds nothing to do, because the work is submitted before it is expedited.
-  Work that is submitted after `close()` no longer logs a warning.
+  accumulation, also when `close()` starts the call. Queue waits in
+  diagnostics are measured times, so a call that nothing held back reports
+  a wait close to zero, not exactly zero. Work that is submitted after
+  `close()` no longer logs a warning.
+- A Store read call receives a caller's `AbortSignal` exactly when every
+  read in the call carries that same signal, also for an automatic batch.
+  Aborting it can then cancel the Store call, which only affects the callers
+  that cancelled, and the `read-store` message reports `cancelled`. A Store
+  call whose reads carry different signals, or that mixes reads with and
+  without a signal, gets no signal and always completes. Before, only a
+  read with `autoBatch: false` passed its signal to the Store.
 - A package contract violation in one producer result slot, or in one
   `bulkProducerByIdType` slice, rejects only the callers of the affected
   requests. Automatic batching merges unrelated callers into one invocation,

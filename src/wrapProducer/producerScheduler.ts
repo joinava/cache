@@ -38,6 +38,12 @@ export type ProducerRequest<Work> = {
      * or for a slot, because that producer call starts after the request.
      */
     readonly joinInFlight?: false | undefined;
+    /**
+     * True makes the call's producer work skip the wait that accumulates a
+     * batch: work that a request starts is ready at once, and waiting work
+     * that a request joins is expedited.
+     */
+    readonly expedite?: boolean | undefined;
   };
 };
 
@@ -105,8 +111,7 @@ export type ProducerScheduler<Work, Produced> = {
    * so the work that it joins or starts can never be cancelled either.
    *
    * New work waits for its producer call as the scheduler's batching and
-   * call limit say. The returned `item.expedite()` skips the accumulation
-   * wait.
+   * call limit say. `request.call.expedite` skips the accumulation wait.
    */
   request(
     request: ProducerRequest<Work>,
@@ -180,11 +185,23 @@ export function createProducerScheduler<Work, Produced>({
         ? true
         : "outsideWindow";
     },
-    start: (requests) => dispatcher.submitMany(requests),
+    // No signal here: `Sharing` owns the cancellation of shared work. Each
+    // `request` below asks for one unit of work, so one `start` call never
+    // mixes requests that expedite with requests that do not.
+    start: (requests) =>
+      requests.map((request) =>
+        dispatcher.submit(request, { expedite: request.call.expedite }),
+      ),
   });
 
   return {
-    request: (request, signal) => sharing.request(request, signal),
+    request: (request, signal) => {
+      const outcome = sharing.request(request, signal);
+      // Work that the request started is expedited from the start. Work that
+      // it joined can still accumulate for the request that started it.
+      if (outcome.joined && request.call.expedite) outcome.item?.expedite();
+      return outcome;
+    },
     joinedCount: (item) => sharing.joinedCount(item),
     flush: () => {
       dispatcher.flush();

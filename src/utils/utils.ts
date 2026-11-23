@@ -5,7 +5,7 @@ import {
   timeSlicedMap,
 } from "@zingage/scheduling";
 import { default as debug } from "debug";
-import { maxBy, noop, partition, sumBy } from "es-toolkit";
+import { maxBy, partition, sumBy } from "es-toolkit";
 
 import pLimit from "p-limit";
 import type { NonEmptyArray } from "type-party";
@@ -200,31 +200,6 @@ export function queueWaitMs(item: {
   readonly startedAt: number | undefined;
 }): number {
   return (item.startedAt ?? item.submittedAt) - item.submittedAt;
-}
-
-/**
- * Cancels each of `items` that still waits when `signal` aborts, so that it
- * leaves its dispatcher's queue. A dispatcher takes no signal itself: only a
- * `Sharing` connects signals to items, and Store reads do not use one.
- *
- * @returns The function that stops listening. Call it once the items have
- *   settled.
- */
-export function cancelWaitingOnAbort(
-  items: readonly { cancel(reason: unknown): void }[],
-  signal: AbortSignal | undefined,
-): () => void {
-  if (signal === undefined) return noop;
-
-  const cancel = () => {
-    items.forEach((item) => {
-      item.cancel(signal.reason);
-    });
-  };
-  signal.addEventListener("abort", cancel, { once: true });
-  return () => {
-    signal.removeEventListener("abort", cancel);
-  };
 }
 
 /**
