@@ -6,7 +6,7 @@
  *   shares a call: `fifoBatches` accumulates work for a producer that takes
  *   batches (`produceMany`). Without a waiting set, each unit is its own
  *   call, ready at once, for a producer that takes one request (`produce`).
- * - An optional `concurrencyLimit` admission limits the producer calls that
+ * - An optional `ConcurrencyLimit` admission limits the producer calls that
  *   run at one time.
  * - A `Sharing` in front of the dispatcher lets requests with the same key
  *   share one unit of work. {@link createProducerScheduler} holds the one
@@ -15,7 +15,7 @@
  * @module
  */
 import {
-  concurrencyLimit,
+  ConcurrencyLimit,
   createDispatcher,
   fifoBatches,
   Sharing,
@@ -153,7 +153,7 @@ export function createProducerScheduler<Work, Produced>({
     admission:
       maxConcurrentCalls === undefined || maxConcurrentCalls === Infinity
         ? undefined
-        : concurrencyLimit(maxConcurrentCalls),
+        : new ConcurrencyLimit(maxConcurrentCalls),
     invoke: (items: readonly Item<Request, Produced>[]) =>
       invoke(items, {
         autoBatched: accumulates && items.some((item) => !item.expedited),

@@ -390,7 +390,7 @@ packages:
     resolution: {integrity: sha512-RmhMd/wD+CF8Dfo+cVIy3RR5cl8CyfXQ0tGgW6XBL8L4LM/UTEbNXYRbLwU6w+CgrKBNbrQWt4FUtTfaU5jSYQ==}
 
   '@zingage/scheduling@file:vendor/zingage-scheduling-1.3.0-prototype.0.tgz':
-    resolution: {integrity: sha512-B/cYPLSDGnVHyuJ/pCyLToEPv/lDCNX8gtM6uxIMQVoZiYAlN63iR8CjeVMxL2udb9wsD16P9Um5IQ27j7QQjQ==, tarball: file:vendor/zingage-scheduling-1.3.0-prototype.0.tgz}
+    resolution: {integrity: sha512-q2SmXrdIE8Ep/X8RgY891W7wfpQG+9FQi8tEJsJvr4KnZUKYPau2DFTCnl39c5moJtziOkk6LMwz5goqiL/tFQ==, tarball: file:vendor/zingage-scheduling-1.3.0-prototype.0.tgz}
     version: 1.3.0-prototype.0
 
   assertion-error@2.0.1:

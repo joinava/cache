@@ -68,7 +68,7 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
   request's producer work as soon as that request's cache read settles. It
   does not wait for the whole set.
 - Batching, sharing and call limits are built on the dispatcher of
-  `@zingage/scheduling` (`createDispatcher`, `Sharing`, `concurrencyLimit`).
+  `@zingage/scheduling` (`createDispatcher`, `Sharing`, `ConcurrencyLimit`).
   A batched Store or producer call now starts in a microtask after its work
   becomes ready, not synchronously inside the schedule callback or `close()`.
   With `preserveAsyncContext`, every Store or producer call of one

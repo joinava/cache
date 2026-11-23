@@ -258,9 +258,7 @@ describe("a call limit", options, () => {
     const outcomes = ["a", "b", "c", "d"].map((work) =>
       request(scheduler, work),
     );
-    // With a limit, the calls start in a microtask after the requests.
-    assert.equal(calls.length, 0);
-    await nextTurn();
+    // While a slot is free, each call starts inside `request`.
     assert.deepEqual(
       calls.map(({ values }) => values),
       [["a"], ["b"]],

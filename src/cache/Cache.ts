@@ -56,7 +56,7 @@ import type { CacheOptions } from "./CacheOptions.js";
 import { PendingResources } from "./pendingResources.js";
 import pLimit from "p-limit";
 import {
-  concurrencyLimit,
+  ConcurrencyLimit,
   createDispatcher,
   fifoBatches,
   PendingPromisesTracker,
@@ -283,7 +283,7 @@ export default class Cache<
       options.maxConcurrentStoreReads === undefined ||
       options.maxConcurrentStoreReads === Infinity
         ? undefined
-        : concurrencyLimit(options.maxConcurrentStoreReads);
+        : new ConcurrencyLimit(options.maxConcurrentStoreReads);
     const hasGetMany = this.#dataStore.getMany !== undefined;
     this.#readDispatcher = createDispatcher({
       waiting: hasGetMany
