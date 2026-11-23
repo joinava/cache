@@ -146,9 +146,9 @@ Without batching, each `cache.get()` makes its own Store call. For `PostgresStor
 A Store declares exactly one read primitive. MemoryStore implements `get(request)`. PostgresStore and SqliteStore implement `getMany(requests)`.
 Read through a Cache. The Cache adapts to either primitive, and it publishes diagnostics for each Store read.
 
-`cache.get()` reads one request, and `cache.getMany()` reads a known set. With a bulk-capable Store, both join the automatic accumulation by default: each request of a `getMany()` call queues as if it were its own `get()` call. Pass `{ autoBatch: false }` to either method to send the call's requests as one Store call of their own, sent promptly. Both accept `{ signal }`. Single-only stores dispatch every read promptly.
-Configure the accumulation scheduler with `readBatching`. Its maximum batch size, 100 by default, limits only accumulated reads. Each accumulated batch is its own concurrent Store call. Dispatch runs after Promise continuations.
-`maxConcurrentStoreReads` limits the Store read calls that run at one time. Reads that wait for a slot stay queued and can still be cancelled. A waiting batch keeps taking reads until it is full, so a busy Store gets fuller batches, not more calls. Direct reads wait for a slot too.
+`cache.get()` reads one request, and `cache.getMany()` reads a known set. With a bulk-capable Store, both join the automatic accumulation by default: each request of a `getMany()` call queues as if it were its own `get()` call. Pass `{ autoBatch: false }` to either method to skip the accumulation wait: the call's reads are then ready for a Store call at once. Both accept `{ signal }`. Single-only stores dispatch every read promptly.
+Configure the accumulation scheduler with `readBatching`. Its maximum batch size, 100 by default, limits every Store call, also for reads with `autoBatch: false`. Each batch is its own concurrent Store call. Dispatch runs after Promise continuations.
+`maxConcurrentStoreReads` limits the Store read calls that run at one time. Reads that wait for a slot stay queued and can still be cancelled. The call that gets a slot takes the reads that are ready then, up to the batch limit, so a busy Store gets fuller batches, not more calls. Reads with `autoBatch: false` wait for a slot too.
 
 ```ts
 const cache = new Cache({
@@ -162,16 +162,16 @@ const lookups = await Promise.all(
 );
 const partial = await cache.getMany(requests);
 const complete = throwIfAnyError(partial);
-const oneStoreCall = await cache.getMany(requests, { autoBatch: false });
+const withoutTheWait = await cache.getMany(requests, { autoBatch: false });
 ```
 
 - **Requests share one Store call, never one result.** Each `get()` still classifies its own id, evaluates freshness at its own `now`, selects its own entry, and publishes its own `read` message. So a batched `get()` that succeeds returns what an unbatched one returns. Accumulation never caches or shares results, even for identical requests.
 - **Scheduling is configurable.** `batchScheduleFn` receives a dispatch callback and must invoke it in the immediate future; for example, pass `setImmediate` to gather reads until the next check phase.
-- **The Store call runs in the first caller's async context.** The batch binds the async context (for example, `AsyncLocalStorage` stores and the active tracing span) of the `get()` that opened it, with the default or a custom scheduler. So the query's span appears in that caller's trace only.
+- **The Store call runs in one caller's async context.** With the default scheduler, the Store calls of one accumulation run in the async context (for example, `AsyncLocalStorage` stores and the active tracing span) of the `get()` that opened the accumulation. So the query's span appears in that caller's trace only. `preserveAsyncContext` does the same for a custom scheduler that runs its callback from an unrelated context. Reads that `close()` or `autoBatch: false` make ready go to the Store in the async context of the caller that made them ready, or of the first such caller when several do so in one turn.
 - **One request's input can fail other requests.** For example, Postgres rejects a statement that binds an id with U+0000. When the whole Store call fails, every slot in it receives that Error, including other callers' requests.
 
-`getMany(requests, { autoBatch: false })` sends the supplied known set promptly as one call to the Store's bulk primitive. The batch limit does not split it. It does not force individual reads. `get(request, { autoBatch: false })` does the same for one request.
-Constructor settings control scheduling only. The `autoBatch` option of each call decides whether its reads accumulate.
+`getMany(requests, { autoBatch: false })` makes the supplied known set ready for the Store's bulk primitive at once. It changes only the wait: the batch limit still splits a large set into several Store calls, and a Store call can also carry other callers' reads that are ready at the same time. It does not force individual reads. `get(request, { autoBatch: false })` does the same for one request.
+Constructor settings control scheduling only. The `autoBatch` option of each call decides whether its reads wait for accumulation.
 
 Bulk reads return positional lookup results or Error slots. Empty entry arrays represent successful misses.
 An operational failure of an entire Store call fills every affected slot with the same Error. Cancellation and package contract violations reject the call.
@@ -222,12 +222,12 @@ const results = await stories.getMany(requests, {
 ```
 
 Declare exactly one top-level capability: `produce` or `produceMany`. Single producers dispatch promptly.
-Bulk producers accumulate ready requests by default. `producerBatching` controls this separate scheduler, with the same default limit, which applies only to accumulated work, and scheduling convention as Store reads.
-Per-call `{ autoBatch: { store: false, producer: false } }` disables accumulation independently at each stage, on `get` and on `getMany`. A single producer never accumulates, so `producer: false` changes nothing there.
+Bulk producers accumulate ready requests by default. `producerBatching` controls this separate scheduler, with the same scheduling convention as Store reads. Its batch limit, 20 by default, applies to every `produceMany` call.
+Per-call `{ autoBatch: { store: false, producer: false } }` skips the accumulation wait independently at each stage, on `get` and on `getMany`. The batch limit of the stage still applies. A single producer never accumulates, so `producer: false` changes nothing there.
 
-`maxConcurrentProducerCalls` limits the `produce` or `produceMany` calls that run at one time. By default there is no limit: a `getMany` of 1,000 misses makes 1,000 concurrent `produce` calls, or 50 concurrent `produceMany` calls at the default batch limit. Work that waits for a slot stays queued, in arrival order. Other requests can still join it, and it leaves the queue when every request on it is cancelled. A waiting batch keeps taking work until it is full. Direct calls and background refreshes wait for a slot too. Prefer this option to a limit inside the producer function, such as `pLimit`: the client counts work that waits there as running, so it stops other requests from joining it after the sharing window, cannot cancel it, and reports the wait as producer time.
+`maxConcurrentProducerCalls` limits the `produce` or `produceMany` calls that run at one time. By default there is no limit: a `getMany` of 1,000 misses makes 1,000 concurrent `produce` calls, or 50 concurrent `produceMany` calls at the default batch limit. Work that waits for a slot stays queued, in arrival order. Other requests can still join it, and it leaves the queue when every request on it is cancelled. The call that gets a slot takes the work that is ready then, up to the batch limit. Work with `autoBatch.producer: false` and background refreshes wait for a slot too. Prefer this option to a limit inside the producer function, such as `pLimit`: the client counts work that waits there as running, so it stops other requests from joining it after the sharing window, cannot cancel it, and reports the wait as producer time.
 
-Automatic production starts as each independent Store invocation settles. Direct bulk production first classifies the known set. It then sends the call's misses, bypass requests, and stale-while-revalidate refreshes to the producer as one invocation. The batch limit does not split it.
+Production starts as each independent Store invocation settles, also for a `getMany` call with `autoBatch.producer: false`: each request's producer work is ready as soon as its own cache read settles, and the call does not wait for its other reads. Requests whose reads settle together reach the producer together, in `produceMany` calls of at most the batch limit.
 Every producer request must remain valid when requests are added, removed, reordered, split, or deduplicated. Producers must perform side-effect-free reads.
 A bulk producer returns one primary result or Error per request. Supplemental resources are stored without adding result slots.
 
@@ -275,10 +275,10 @@ A type with no producer in any client is legal and normal: its entries are writt
 Both per-resource-type helpers live in [`producerByIdType.ts`](./src/producer-builders/producerByIdType.ts) and [`bulkProducerByIdType.ts`](./src/producer-builders/bulkProducerByIdType.ts) — they need no client at runtime, and no `Cache`. `UnroutableIdError` is defined in `producerByIdType.ts`; the client's cache-named `NoProducerForResourceTypeError` is in [`producerClient.ts`](./src/wrapProducer/producerClient.ts).
 
 Compatible requests share pending production. A request always joins work that still waits, in a batch or for a slot. It joins work whose producer call has started for up to three seconds after that start by default. `collapseOverlappingRequestsTime` changes that joining age.
-Completed production has no additional sharing window. Per-call `{ joinInFlight: false }` keeps a call from joining a producer call that has already started. Use it with `maxAge: 0` for a read that must see a change the caller just made: without it, the read can join a producer call that started before the change. The call still joins waiting work, and later callers can join the work it starts. Compatibility uses the ID, normalized parameters, and directives.
+Completed production has no additional sharing window. Per-call `{ joinInFlight: false }` keeps a call from joining a producer call that has already started. Use it with `maxAge: 0` for a read that must see a change the caller just made: without it, the read can join a producer call that started before the change. The call still joins waiting work, and later callers can join the work it starts. The call's own requests with the same key join the work that the call started. Compatibility uses the ID, normalized parameters, and directives.
 Producers receive original parameters. A normalizer promises that normalized and original parameters have equivalent producer behavior.
 If normalization fails during a permitted read-failure fallback, production receives original parameters and does not share work.
-Direct callers still join compatible pending work. They dispatch compatible queued work immediately, while unrelated queued requests keep their schedule.
+Callers with `autoBatch.producer: false` still join compatible pending work. They make compatible queued work ready immediately, while unrelated queued requests keep their schedule.
 
 Producers must be **side-effect-free reads of their resource type's origin**: invocations may be shared with concurrent logical callers and their results stored, so producer calls are never 1:1 with callers. Consumers that must reach the origin send bypass directives.
 `maxAge: 0` skips Store and pending-entry lookup and requires production. The result is still stored, and identical bypass requests still share production. A producer can return `storeFor: 0` to prevent retention.
@@ -412,7 +412,7 @@ A cache's unit of storage is the `(id, vary)` **pair**, where `vary` is the norm
 
 `fetch` and `produce` are the two spans of one story with different subjects and cardinalities: a `fetch` is the consumer-side span (one per logical request); a `produce` is the origin-side span (one per invocation). N collapsed requests ride one invocation, one bulk invocation covers many requests, a stale-while-revalidate refresh settles _after_ its triggering fetch already shipped, and an `aborted` fetch settles _before_ its invocation does (the shared producer call keeps running and stores in the background).
 
-`read-store` covers every actual Store read: automatic batches and direct reads (`autoBatch: false`). `operation` identifies the Store method. Empty direct calls and entirely cancelled queued batches emit nothing. `requestCount` counts dispatched slots, including duplicates. `failedRequestCount` counts Error slots, or every request on whole-operation failure. `entryCount` counts entries in successful slots, even when another slot fails; whole-operation failures report zero entries. `queueWaitTotalMs / requestCount` gives mean dispatched caller queue wait, including the wait for a slot under `maxConcurrentStoreReads`; a direct call that got a slot at once reports zero. `durationMs` covers the Store call, not database execution time or a physical query count: a Store may issue multiple queries or use no database.
+`read-store` covers every actual Store read. `autoBatched` is false only when every read of the Store call had `autoBatch: false`, and for every call to a Store without `getMany`. `operation` identifies the Store method. Empty calls and entirely cancelled queued batches emit nothing. `requestCount` counts dispatched slots, including duplicates. `failedRequestCount` counts Error slots, or every request on whole-operation failure. `entryCount` counts entries in successful slots, even when another slot fails; whole-operation failures report zero entries. `queueWaitTotalMs / requestCount` gives mean dispatched caller queue wait, including the wait for a slot under `maxConcurrentStoreReads`; a read with `autoBatch: false` that got a slot at once reports a wait close to zero. `durationMs` covers the Store call, not database execution time or a physical query count: a Store may issue multiple queries or use no database.
 
 The package does not calculate returned payload bytes, serialize values for telemetry, choose metric tags, or create monitors. Subscribers own aggregation and telemetry costs.
 
@@ -428,7 +428,7 @@ Upgrading from 1.6.0, whose single channel reported a `status` string: `hit` →
 - Replace `wrapBulkHashedInputProducer` with `wrapHashedInputProducer` and move its capability into `produceMany`.
 - Move typed `hashedInputProducer` descriptors into the matching capability field.
 - Handle bulk Error slots or explicitly call `throwIfAnyError`.
-- `Cache.getMany(requests)` now joins automatic accumulation, so its reads share Store calls with other callers, and the batch limit can split it. Pass `{ autoBatch: false }` to send the set as one Store call, as before.
+- `Cache.getMany(requests)` now joins automatic accumulation, so its reads share Store calls with other callers, and the batch limit can split it. Pass `{ autoBatch: false }` to skip the accumulation wait. The batch limit still splits the set: raise `readBatching.maxBatchSize` if the set must stay one Store call.
 - Replace `CacheReadFound` with `CacheReadMessage["found"]`. Narrow on `found` instead of using `CacheReadFoundWithEntry`.
 - Read through a Cache instead of reading a Store directly. The package no longer exports `getOne`, `getMany`, or `naiveGetMany`.
 - Close all clients before their shared Cache, then close externally owned producer dependencies and database pools.

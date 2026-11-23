@@ -83,6 +83,37 @@ describe("joinInFlight: false", suiteOptions, () => {
     assert.notEqual(results[0].content, results[2].content);
   });
 
+  it("lets the call's own duplicate requests share one producer call", async (t) => {
+    const producer = gatedProducer();
+    const cache = cacheOver();
+    const client = wrapProducer({ cache, produce: producer.single });
+    t.after(async () => {
+      await client.close();
+      await cache.close();
+    });
+
+    // A single producer's call starts at once, so the second copy finds work
+    // whose producer call has started. It still joins it, because its own
+    // call started that work.
+    const duplicates = client.getMany(
+      [
+        { id: "a", ...bypass },
+        { id: "a", ...bypass },
+      ],
+      { joinInFlight: false },
+    );
+    // Another call with `joinInFlight: false` does not join it.
+    const other = client.get({ id: "a", ...bypass }, { joinInFlight: false });
+    await producer.release(0);
+    await producer.release(1);
+    const [first, second] = await duplicates;
+    await other;
+
+    assert.equal(producer.calls.length, 2);
+    assert.ok(!(first instanceof Error) && !(second instanceof Error));
+    assert.equal(first.content, second.content);
+  });
+
   it("still joins bulk work that waits in a batch", async (t) => {
     const producer = gatedProducer();
     const scheduled: (() => void)[] = [];
@@ -134,8 +165,10 @@ describe("maxConcurrentProducerCalls", suiteOptions, () => {
     );
     await nextTurn();
     assert.equal(producer.calls.length, 2);
-    // "d" still waits for a slot, so this request joins it.
+    // "d" still waits for a slot, so this request joins it. It joins after
+    // its own cache read, so give that read a turn before a slot frees.
     const rider = client.get({ id: "d" });
+    await nextTurn();
 
     await producer.release(0);
     await producer.release(1);
@@ -251,7 +284,7 @@ describe("maxConcurrentProducerCalls", suiteOptions, () => {
 });
 
 describe("get", suiteOptions, () => {
-  it("with autoBatch.producer: false is one unbatched produceMany call", async (t) => {
+  it("with autoBatch.producer: false skips the producer's accumulation wait", async (t) => {
     const producer = gatedProducer();
     const scheduled: (() => void)[] = [];
     const cache = cacheOver();
@@ -286,7 +319,7 @@ describe("get", suiteOptions, () => {
     }
   });
 
-  it("with autoBatch.store: false reads the Store with a call of its own", async (t) => {
+  it("with autoBatch.store: false reads the Store without the accumulation wait", async (t) => {
     const { store, getManyRequestCounts } = spiedStore();
     const scheduled: (() => void)[] = [];
     const cache = cacheOver(store, {
@@ -309,9 +342,12 @@ describe("get", suiteOptions, () => {
       { autoBatch: { store: false } },
     );
 
+    // The read finished although the accumulation schedule never ran its
+    // callback: the test never calls `scheduled`. The read still armed the
+    // schedule, because it is submitted first and expedited after that.
     assert.equal(entry.content, "stored");
     assert.deepEqual(getManyRequestCounts(), [1]);
-    assert.equal(scheduled.length, 0);
+    assert.equal(scheduled.length, 1);
   });
 
   it("publishes one fetch message, reports the write, and rejects with the producer's error", async (t) => {

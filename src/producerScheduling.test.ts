@@ -43,6 +43,8 @@ describe("automatic and direct producer dispatch", suiteOptions, () => {
     await nextTurn();
     assert.deepEqual(calls, [["b"]]);
     dispatch();
+    // The schedule makes "a" ready. Its producer call starts in a microtask.
+    await nextTurn();
     assert.deepEqual(calls, [["b"], ["a"]]);
     produced.resolve();
     assert.deepEqual(contents(await automatic), ["a", "b"]);
@@ -70,7 +72,7 @@ describe("automatic and direct producer dispatch", suiteOptions, () => {
     assert.deepEqual(calls[0], ["b"]);
   });
 
-  it("waits for the direct known set but feeds automatic misses from independent Store invocations", async (t) => {
+  it("feeds misses from independent Store invocations, also for a known set with autoBatch.producer: false", async (t) => {
     for (const autoBatch of [true, false]) {
       const slowRead = Promise.withResolvers<void>();
       const started = Promise.withResolvers<void>();
@@ -93,19 +95,22 @@ describe("automatic and direct producer dispatch", suiteOptions, () => {
       );
       await started.promise;
       await nextTurn();
-      assert.equal(calls.length, autoBatch ? 1 : 0);
-      if (autoBatch) assert.deepEqual(calls[0], ["ready"]);
+      // Neither mode waits for the whole set: "ready" reaches the producer
+      // while the read of "slow" is still open.
+      assert.deepEqual(calls, [["ready"]]);
       slowRead.resolve();
       await read;
-      if (!autoBatch) assert.deepEqual(calls[0], ["ready", "slow"]);
+      assert.deepEqual(calls, [["ready"], ["slow"]]);
     }
   });
 });
 
 describe("pending production sharing", suiteOptions, () => {
   it("shares only pending work within the joining age and removes completed production immediately", async (t) => {
+    // The joining age is measured on the dispatcher's clock, which is
+    // `performance.now()`.
     const clock = { now: 10000 };
-    t.mock.method(Date, "now", () => clock.now);
+    t.mock.method(performance, "now", () => clock.now);
     const cache = cacheOver(new MemoryStore<Spec>(), {
       name: "producer-sharing-age",
     });
@@ -196,11 +201,11 @@ describe("pending production sharing", suiteOptions, () => {
   }
 });
 
-// A producer can depend on seeing exactly one caller's misses in one
-// invocation. One example is a vendor read that must run per tenant. Another
-// is a closure that carries per-call context. `autoBatch: { producer: false }`
-// promises that: the call's production reaches the producer as one
-// invocation, whatever the producerBatching limit.
+// `autoBatch: { producer: false }` skips only the accumulation wait. It does
+// not give a caller producer calls of its own: the call's production is
+// split at the producerBatching limit, and one producer call can carry the
+// work of several callers that is ready in the same turn. So a producer must
+// not depend on seeing exactly one caller's misses in one invocation.
 describe("autoBatch: { producer: false }", suiteOptions, () => {
   const callerIds = (caller: string) =>
     Array.from({ length: 24 }, (_, index) => `${caller}:${String(index)}`);
@@ -234,12 +239,19 @@ describe("autoBatch: { producer: false }", suiteOptions, () => {
     return calls;
   };
 
-  it("gives each direct caller one producer call with only its own misses, above the batch limit", async (t) => {
+  it("splits concurrent callers' misses at the batch limit, and lets a producer call mix callers", async (t) => {
     const calls = await runTwoConcurrentCallers(t, true);
-    const sorted = [...calls].sort((x, y) => x[0]!.localeCompare(y[0]!));
-    assert.deepEqual(sorted, [
-      callerIds("a").filter((id) => id !== "a:0" && id !== "a:7"),
-      callerIds("b").filter((id) => id !== "b:3"),
+    // One Store call reads both callers' requests, so all 45 misses are ready
+    // in one turn, in request order. The default batch limit of 20 splits
+    // them, wherever a caller's requests end.
+    const misses = [
+      ...callerIds("a").filter((id) => id !== "a:0" && id !== "a:7"),
+      ...callerIds("b").filter((id) => id !== "b:3"),
+    ];
+    assert.deepEqual(calls, [
+      misses.slice(0, 20),
+      misses.slice(20, 40),
+      misses.slice(40),
     ]);
   });
 
@@ -254,7 +266,7 @@ describe("autoBatch: { producer: false }", suiteOptions, () => {
     );
   });
 
-  it("applies producerBatching.maxBatchSize only to automatic accumulation", async (t) => {
+  it("applies producerBatching.maxBatchSize to every producer call", async (t) => {
     const { client, calls } = await recordingClient(t, {
       name: "producer-direct-limit",
       producerBatching: { maxBatchSize: 2 },
@@ -264,26 +276,28 @@ describe("autoBatch: { producer: false }", suiteOptions, () => {
     await client.getMany(ids("direct-"), { autoBatch: { producer: false } });
     await client.getMany(ids("automatic-"));
     assert.deepEqual(calls, [
-      ["direct-1", "direct-2", "direct-3", "direct-4", "direct-5"],
+      ["direct-1", "direct-2"],
+      ["direct-3", "direct-4"],
+      ["direct-5"],
       ["automatic-1", "automatic-2"],
       ["automatic-3", "automatic-4"],
       ["automatic-5"],
     ]);
   });
 
-  it("sends a direct call's misses and stale refreshes in one producer call", async (t) => {
+  it("sends a call's misses and stale refreshes together, in calls of at most the batch limit", async (t) => {
     const refreshed = Promise.withResolvers<void>();
     const { client, calls } = await recordingClient(t, {
       name: "producer-direct-revalidation",
-      // A limit of 1 proves the direct cohort is not split.
-      producerBatching: { maxBatchSize: 1 },
+      // A schedule that never fires proves that the work skips the wait.
+      producerBatching: { maxBatchSize: 3, batchScheduleFn: () => {} },
       seed: ["stale-1", "stale-2"].map((id) => ({
         id,
         ...staleWhileRevalidating(`old ${id}`),
       })),
       content: (id) => `new ${id}`,
-      onProduce: async () => {
-        refreshed.resolve();
+      onProduce: async (ids) => {
+        if (ids.includes("stale-2")) refreshed.resolve();
       },
     });
     const results = await client.getMany(
@@ -297,7 +311,7 @@ describe("autoBatch: { producer: false }", suiteOptions, () => {
       "old stale-2",
       "new miss-2",
     ]);
-    assert.deepEqual(calls, [["stale-1", "miss-1", "stale-2", "miss-2"]]);
+    assert.deepEqual(calls, [["stale-1", "miss-1", "stale-2"], ["miss-2"]]);
   });
 
   it("still refreshes a direct call's stale entries when the caller cancels", async (t) => {

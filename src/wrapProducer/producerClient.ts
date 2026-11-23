@@ -4,7 +4,8 @@
  * pending writes, shares and sends producer work through a
  * {@link ProducerScheduler} (producerScheduler.ts), stores produced
  * resources, and publishes diagnostics. A wrapper supplies only what
- * differs: how to call its producer, and the scheduler that sends the work.
+ * differs: how to call its producer, and whether its work accumulates into
+ * batches.
  *
  * The client's option and result types and the runtime helpers that it needs
  * live here too, so that imports run one way: `wrapProducer` imports the
@@ -31,6 +32,7 @@ import {
   type CacheProduceMessage,
 } from "../diagnostics.js";
 import type Cache from "../cache/Cache.js";
+import type { ReadOptions } from "../cache/Cache.js";
 import type {
   IdOfResourceType,
   ResourceTypeName,
@@ -49,15 +51,13 @@ import type {
 } from "../types/index.js";
 import type { CacheLookupResult } from "../utils/cacheHelpers.js";
 import {
-  ConcurrencyLimiter,
   PendingPromisesTracker,
+  type BatchOptions,
+  type SharedOutcome,
 } from "@zingage/scheduling";
-import type {
-  DispatchedRequest,
-  ProducerScheduler,
-  ProducerSchedulerOptions,
-  SchedulerRequest,
-  TaskOutcome,
+import {
+  createProducerScheduler,
+  type ProducerRequest,
 } from "./producerScheduler.js";
 import {
   completeRequest,
@@ -71,6 +71,7 @@ import {
   CacheContractError,
   defaultLoggersByComponent,
   isContractError,
+  queueWaitMs,
   raceWithSignal,
 } from "../utils/utils.js";
 import type { SpecForId } from "../types/00_CacheSpec.js";
@@ -211,11 +212,12 @@ export type ProducerClientOptions<
    *
    * Work that waits for a slot stays queued, in arrival order. Other
    * requests can still join it, and it leaves the queue when every request
-   * on it is cancelled. For `produceMany`, an automatic batch keeps taking
-   * work until it is full, so a busy producer gets fuller batches, not more
-   * calls. A call with `autoBatch.producer: false` also waits for a slot,
-   * and so does a background refresh. The wait counts as queue time in the
-   * `produce` message, not as producer time.
+   * on it is cancelled. For `produceMany`, a call takes the work that is
+   * ready when its slot frees, up to the batch limit, so a busy producer
+   * gets fuller batches, not more calls. A call with
+   * `autoBatch.producer: false` also waits for a slot, and so does a
+   * background refresh. The wait counts as queue time in the `produce`
+   * message, not as producer time.
    *
    * A limit inside the producer function, for example `pLimit`, cannot do
    * this: the wrapper then counts waiting work as running.
@@ -230,17 +232,23 @@ export type ProducerClientOptions<
 export type WrappedReadOptions = {
   signal?: AbortSignal;
   /**
-   * Turns off automatic accumulation for this call, at either stage. `true`
-   * is not accepted, because accumulation is already the default where the
-   * stage supports it.
+   * Skips the wait that accumulates an automatic batch, at either stage,
+   * for this call's work. `true` is not accepted, because accumulation is
+   * already the default where the stage supports it.
    *
-   * - `store: false` reads the call's requests as one Store call of their
-   *   own (see `ReadOptions.autoBatch` on `Cache`).
-   * - `producer: false` sends the call's producer work as one `produceMany`
-   *   call of its own, whatever the `producerBatching` limit. A `getMany`
-   *   call first waits until all of its requests are read from the cache. A
+   * - `store: false` sends the call's Store reads without the wait (see
+   *   `ReadOptions.autoBatch` on `Cache`).
+   * - `producer: false` sends the call's producer work without the wait.
+   *   Each request's producer work starts as soon as its own cache read
+   *   settles: a `getMany` call does not wait for all of its reads first. A
    *   `produce` producer never accumulates, so the option changes nothing
    *   there.
+   *
+   * The option changes only the wait. The work is still sent in calls of at
+   * most the stage's batch limit (`readBatching.maxBatchSize`,
+   * `producerBatching.maxBatchSize`), so a large call can be several Store
+   * or `produceMany` calls, and one of them can also carry other callers'
+   * work that is ready at the same time.
    */
   autoBatch?: { store?: false; producer?: false };
   /**
@@ -251,8 +259,8 @@ export type WrappedReadOptions = {
    *
    * The call still joins work that waits, in a batch or for a slot, because
    * that producer call starts after this call. Later callers can join the
-   * work that this call starts. Requests of one call with the same key
-   * always share one task.
+   * work that this call starts. This call's own requests with the same key
+   * always join the work that the call started.
    */
   joinInFlight?: false;
   onStore?: OnStore;
@@ -410,19 +418,19 @@ export type ProducerBinding<
   call: (
     requests: readonly ReachesProducerAsIs<LooseRequestFor<RT, Params>>[],
   ) => Promise<readonly (LooseResultFor<RT, Validators, Params> | Error)[]>;
-  /** Builds the scheduler that shares and sends this producer's work. */
-  makeScheduler: <Work, Produced>(
-    options: ProducerSchedulerOptions<Work, Produced>,
-  ) => ProducerScheduler<Work, Produced>;
+  /**
+   * The accumulation settings of a producer that takes batches. Undefined
+   * for a producer that takes one request per call.
+   */
+  batching: BatchOptions | undefined;
 };
 
-/** A producer invocation's trigger, as one task reports it. */
+/** A producer call's trigger, as one unit of work reports it. */
 type ProducerTrigger = Exclude<CacheProduceMessage["trigger"], "mixed">;
 
 /**
  * What one request's slot does with its cache lookup. {@link decideSlot}
- * computes it without side effects, so the direct producer cohort and the
- * per-slot executor apply one rule.
+ * computes it without side effects.
  *
  * - `fail`: the cache read failed and `onCacheReadFailure` is `"throw"`.
  * - `serve`: a usable entry; no producer work.
@@ -437,7 +445,7 @@ export type SlotDecision<E> =
   | { readonly action: "serve-and-refresh"; readonly entry: E }
   | { readonly action: "produce"; readonly ifError: E | undefined };
 
-/** A decision that needs producer work: a refresh, or a foreground task. */
+/** A decision that needs producer work: a refresh, or foreground work. */
 type ProducerSlotDecision<E> = Extract<
   SlotDecision<E>,
   { action: "serve-and-refresh" | "produce" }
@@ -489,14 +497,6 @@ export function decideSlot<E>(
   return { action: "produce", ifError: lookup.usableIfError };
 }
 
-function needsProducer<E>(
-  decision: SlotDecision<E>,
-): decision is ProducerSlotDecision<E> {
-  return (
-    decision.action === "serve-and-refresh" || decision.action === "produce"
-  );
-}
-
 /** The fetch dispositions of a slot that serves an entry it read. */
 type ServedFromCacheDisposition = Extract<
   CacheFetchDisposition,
@@ -514,54 +514,50 @@ type SlotRecord<E> = {
   readonly write: Promise<void> | undefined;
 };
 
-/** What the slots of one public call share. */
+/**
+ * What the slots of one public call share. One object per call: the
+ * scheduler compares it by identity (see `ProducerRequest.call`).
+ */
 type CallContext = {
   readonly signal: AbortSignal | undefined;
   readonly joinInFlight: false | undefined;
+  /** True for a call with `autoBatch.producer: false`. */
+  readonly expediteProducer: boolean;
 };
 
-/**
- * The scheduler request for a slot that needs producer work. The trigger
- * labels the invocation's INITIATING cause; if this request instead rides an
- * invocation already in flight, that invocation's original trigger stands.
- * A background refresh gets no signal: it is fire-and-forget work, and the
- * caller has already been given a (stale) result. So the refresh never
- * cancels a task that it starts or rides.
- */
-function producerTask<Request>(
-  item: {
-    readonly request: Request;
-    readonly resourceType: string;
-    readonly bypass: boolean;
-  },
-  decision: ProducerSlotDecision<unknown>,
-  { signal, joinInFlight }: CallContext,
-): SchedulerRequest<{
-  request: Request;
-  resourceType: string;
-  trigger: ProducerTrigger;
-}> {
-  const background = decision.action === "serve-and-refresh";
+/** The context that the slots of one public call share. */
+function callContext(callOptions: ClientReadOptions): CallContext {
   return {
-    request: {
-      request: item.request,
-      resourceType: item.resourceType,
-      trigger: item.bypass ? "bypass" : background ? "revalidation" : "miss",
-    },
-    signal: background ? undefined : signal,
-    joinInFlight,
+    signal: callOptions.signal,
+    joinInFlight: callOptions.joinInFlight,
+    expediteProducer: callOptions.autoBatch?.producer === false,
   };
 }
 
+/** The options of each slot's cache read, from its call's options. */
+function slotReadOptions({
+  signal,
+  autoBatch,
+}: ClientReadOptions): ReadOptions {
+  return { signal, autoBatch: autoBatch?.store };
+}
+
+/** The producer work of one request, as the scheduler holds it. */
+type ProducerWork<Request> = {
+  readonly request: Request;
+  readonly resourceType: string;
+  readonly trigger: ProducerTrigger;
+};
+
 /**
- * The key that decides which pending task a request may ride. It covers the
+ * The key that decides which pending work a request may join. It covers the
  * full request (id, normalized params, directives) but not resourceType,
  * which is derived from the id and so adds nothing. It also omits the
- * trigger, so a revalidation can ride a pending miss. It names the request's
+ * trigger, so a revalidation can join a pending miss. It names the request's
  * fields, because the request is the caller's own object (see
  * ReachesProducerAsIs) and may carry other properties.
  */
-function producerTaskKey<Params>(
+function producerWorkKey<Params>(
   request: {
     readonly id: string;
     readonly params: Params;
@@ -620,7 +616,7 @@ function assertOneResultPerRequest(
 }
 
 /**
- * Publishes one producer invocation's `produce` message once the producer
+ * Publishes one producer call's `produce` message once the producer
  * settles. `results` is undefined when the producer call rejected, which
  * fails every request.
  *
@@ -628,39 +624,44 @@ function assertOneResultPerRequest(
  * built -- so the test has to be here, not left to the channel. The
  * argument is O(batch-size), so it is especially worth not building
  * when nobody is listening. Same reasoning as `Cache.store`.
- * `collapsedRequestCount` is read here, at settlement, so that riders
- * that joined while the producer ran count too.
+ * `joinedCount` is read here, at settlement, so that requests that joined
+ * while the producer ran count too.
  */
-function publishProduce(
+function publishProduce<
+  // Structural, because `Item` is invariant in its input and result types.
+  Item extends {
+    readonly input: { readonly work: ProducerWork<{ readonly id: string }> };
+    readonly submittedAt: number;
+    readonly startedAt: number | undefined;
+  },
+>(
   cacheName: string,
-  tasks: readonly DispatchedRequest<{
-    readonly request: { readonly id: string };
-    readonly resourceType: string;
-    readonly trigger: ProducerTrigger;
-  }>[],
+  items: readonly Item[],
+  joinedCount: (item: Item) => number,
   autoBatched: boolean,
   startedAt: PerformanceNow,
   results: readonly unknown[] | undefined,
 ): void {
   if (!cacheProduceChannel.hasSubscribers) return;
 
-  const trigger = tasks[0]!.request.trigger;
+  const works = items.map((item) => item.input.work);
+  const trigger = works[0]!.trigger;
   publishCacheProduce({
     cache: cacheName,
     autoBatched,
-    requestCount: tasks.length,
-    queueWaitTotalMs: sumBy(tasks, (task) => task.queueWaitMs),
-    trigger: tasks.every((task) => task.request.trigger === trigger)
+    requestCount: items.length,
+    queueWaitTotalMs: sumBy(items, queueWaitMs),
+    trigger: works.every((work) => work.trigger === trigger)
       ? trigger
       : "mixed",
-    requests: tasks.map(({ request }) => ({
-      resourceType: request.resourceType,
-      resourceId: request.request.id,
+    requests: works.map(({ request, resourceType }) => ({
+      resourceType,
+      resourceId: request.id,
     })),
-    collapsedRequestCount: sumBy(tasks, (task) => task.collapsedRequestCount()),
+    collapsedRequestCount: sumBy(items, joinedCount),
     failedRequestCount:
       results === undefined
-        ? tasks.length
+        ? items.length
         : results.filter((result) => result instanceof Error).length,
     outcome: results === undefined ? "error" : "success",
     durationMs: msSince(startedAt),
@@ -670,9 +671,9 @@ function publishProduce(
 /** A refresh outlives its caller, so nobody awaits its failure. Log it instead. */
 function logRefreshFailure(
   logger: Logger,
-  refresh: { promise: Promise<unknown> },
+  refresh: { result: Promise<unknown> },
 ): void {
-  void refresh.promise.catch((error: unknown) =>
+  void refresh.result.catch((error: unknown) =>
     logger(
       "wrap-producer",
       "warn",
@@ -727,7 +728,7 @@ export function createProducerClient<
   Params extends AnyParams,
 >(
   options: ProducerClientOptions<RT, Validators, Params>,
-  { producer, call, makeScheduler }: ProducerBinding<RT, Validators, Params>,
+  { producer, call, batching }: ProducerBinding<RT, Validators, Params>,
 ): WrappedProducerClient<RT, Covered, Validators, Params> {
   const {
     collapseOverlappingRequestsTime = 3,
@@ -752,16 +753,13 @@ export function createProducerClient<
   type Produced = { entry: ResultEntry; stored: Promise<void> };
   // Carries the classified type so the produce message can attribute each
   // request to its own type without re-classifying. The scheduler keeps the
-  // Work of the request that starts a task, so the starting request's trigger
-  // labels the invocation. It also keeps the starting request object alive
-  // until the task settles, which a producer keyed by that object relies on
-  // (see ReachesProducerAsIs). Riders reach the producer only through the
-  // starter's object; an equal key means an equal request.
-  type Work = {
-    request: Request;
-    resourceType: string;
-    trigger: ProducerTrigger;
-  };
+  // Work of the request that starts a unit of work, so the starting request's
+  // trigger labels the producer call. It also keeps the starting request
+  // object alive until the work settles, which a producer keyed by that
+  // object relies on (see ReachesProducerAsIs). Requests that join reach the
+  // producer only through the starter's object; an equal key means an equal
+  // request.
+  type Work = ProducerWork<Request>;
 
   // In-flight work that close() drains, in this order: accepted calls, their
   // per-slot pipelines, the producer scheduler, then cache writes. Writes come
@@ -838,7 +836,7 @@ export function createProducerClient<
   // make `collapseOverlappingRequestsTime` configurable to placate any user
   // worried about the miniscule risk of inconsistency from this caching.
   //
-  // The producer scheduler tracks the pending tasks in memory, so this
+  // The producer scheduler tracks the pending work in memory, so this
   // optimzation will be hindered a bit if the cache frontend is
   // horizontally-scaled across more than one server, but that's fine. We
   // _could_ put this data in the backing store, but that seems like it could
@@ -863,37 +861,40 @@ export function createProducerClient<
   // flows into the cache -- ensuring it isn't wasted even when the caller that
   // triggered it has aborted.
   //
-  // Because the store is not awaited, the pending-task map alone leaves a
+  // Because the store is not awaited, the pending work alone leaves a
   // window -- from the producer resolving until the write lands -- in which an
   // identical call would read the store, miss, and run the producer again.
   // The cache therefore holds the entries handed to store() until that write
   // settles, and every ordinary lookup merges them with the Store's
   // candidates.
   //
-  // Each dispatch also publishes one `produce` diagnostics message when the
-  // producer settles (one message per actual invocation; requests that
+  // Each producer call also publishes one `produce` diagnostics message when
+  // the producer settles (one message per actual call; requests that
   // collapse onto it share it).
-  const scheduler = makeScheduler<Work, Produced>({
-    logger: options.logger,
-    limiter:
-      options.maxConcurrentProducerCalls === undefined ||
-      options.maxConcurrentProducerCalls === Infinity
-        ? undefined
-        : new ConcurrencyLimiter(options.maxConcurrentProducerCalls),
-    collapseTasksMs: collapseOverlappingRequestsTime * 1000,
-    makeKey: ({ request }) =>
-      producerTaskKey(request, (params) => cache.normalizeParams(params)),
-    dispatch: async (tasks, { autoBatched }) => {
-      const startedAt = performanceNow();
+  const scheduler = createProducerScheduler<Work, Produced>({
+    batching,
+    maxConcurrentCalls: options.maxConcurrentProducerCalls,
+    sharingWindowMs: collapseOverlappingRequestsTime * 1000,
+    keyOf: ({ request }) =>
+      producerWorkKey(request, (params) => cache.normalizeParams(params)),
+    invoke: async (items, { autoBatched }) => {
+      const callStartedAt = performanceNow();
       let results: readonly (Result | Error)[];
 
       const publish = (results: readonly unknown[] | undefined) =>
-        publishProduce(cache.name, tasks, autoBatched, startedAt, results);
+        publishProduce(
+          cache.name,
+          items,
+          (item) => scheduler.joinedCount(item),
+          autoBatched,
+          callStartedAt,
+          results,
+        );
 
       try {
-        results = await call(tasks.map(({ request }) => request.request));
+        results = await call(items.map((item) => item.input.work.request));
 
-        assertOneResultPerRequest(results, tasks.length);
+        assertOneResultPerRequest(results, items.length);
       } catch (error) {
         // A rejected producer call fails every request in the invocation.
         // (A bulk producer should return Error elements for per-request
@@ -915,7 +916,7 @@ export function createProducerClient<
       const prepared = results.map((result, index) => {
         if (result instanceof Error) return result;
 
-        const id = tasks[index]!.request.request.id;
+        const id = items[index]!.input.work.request.id;
         try {
           const resources = requestPairedProducerResultToResources<
             SpecOf<RT>,
@@ -960,13 +961,10 @@ export function createProducerClient<
     },
   });
 
-  // Undefined for a scheduler whose sender never accumulates work.
-  const startDirect = scheduler.startOrRideDirect?.bind(scheduler);
-
   // The rest of the client is a set of small steps that `get` and `getMany`
   // compose. Each call prepares its items, reads and decides each slot,
-  // executes each slot with a `ProducerStarter`, and publishes each slot's
-  // message. `get` runs the steps for one item, with no per-call arrays.
+  // executes each slot, and publishes each slot's message. `get` runs the
+  // steps for one item, with no per-call arrays.
   // `getMany` maps them over its items. The steps are built once per client,
   // not once per call.
 
@@ -976,12 +974,12 @@ export function createProducerClient<
     readonly resourceType: string;
     readonly bypass: boolean;
     /**
-     * Whether the slot's request rode a pending task. Only a slot that waits
+     * Whether the slot's request joined pending work. Only a slot that waits
      * for the producer sets it. It lives here, not in the slot's record,
      * because an aborted slot returns no record, but its `aborted` message
      * still reports it.
      */
-    rode: boolean;
+    joined: boolean;
   };
 
   // Classify every ID before dispatch. Contract failures never become slot
@@ -1003,7 +1001,7 @@ export function createProducerClient<
       request,
       resourceType,
       bypass: isRequestingCacheBypass(request.directives),
-      rode: false,
+      joined: false,
     };
   };
 
@@ -1014,7 +1012,7 @@ export function createProducerClient<
       cache: cache.name,
       resourceType: item.resourceType,
       resourceId: item.request.id,
-      collapsed: item.rode,
+      collapsed: item.joined,
       disposition: "aborted",
       directivesImpliedBypass: item.bypass,
       durationMs: msSince(startedAt),
@@ -1030,7 +1028,7 @@ export function createProducerClient<
       cache: cache.name,
       resourceType: item.resourceType,
       resourceId: item.request.id,
-      collapsed: item.rode,
+      collapsed: item.joined,
       ...fetch,
       durationMs: msSince(startedAt),
     });
@@ -1045,9 +1043,6 @@ export function createProducerClient<
     action: "produce",
     ifError: undefined,
   };
-
-  /** A slot's decision, or a promise for it when the slot reads the cache. */
-  type Decided = SlotDecision<ResultEntry> | Promise<SlotDecision<ResultEntry>>;
 
   /**
    * Decides one slot from its cache read. It rejects only for an abort or a
@@ -1075,146 +1070,40 @@ export function createProducerClient<
   };
 
   /**
-   * Reads and decides every item of a `getMany` call. Automatic reads settle
-   * independently, when their own Store call finishes, with no whole-set
-   * barrier. With `autoBatch.store: false`, the non-bypass items are one
-   * Cache call.
+   * Joins or starts the producer work that a slot needs. The trigger labels
+   * the producer call's INITIATING cause; if this request instead joins work
+   * that is already pending, that work's original trigger stands.
+   *
+   * A background refresh gets no signal: it is fire-and-forget work, and the
+   * caller has already been given a (stale) result. So the refresh never
+   * cancels work that it starts or joins.
+   *
+   * A call with `autoBatch.producer: false` expedites the work, also work
+   * that it joined while that work still accumulated.
    */
-  const decideAll = (
-    items: readonly Item[],
-    callOptions: ClientReadOptions,
-  ): Decided[] => {
-    const { signal } = callOptions;
-    if (callOptions.autoBatch?.store !== false) {
-      const readOptions = { signal };
-      return items.map((item) =>
-        item.bypass
-          ? PRODUCE_UNCACHED
-          : decide(cache.get(item.request, readOptions), signal),
-      );
-    }
-
-    const eligible = items.filter(({ bypass }) => !bypass);
-    if (eligible.length === 0) return items.map(() => PRODUCE_UNCACHED);
-
-    const reads = cache.getMany(
-      eligible.map(({ request }) => request),
-      { signal, autoBatch: false },
-    );
-    const eligibleIndexes = new Map(
-      eligible.map((item, index) => [item, index]),
-    );
-    return items.map((item) => {
-      const index = eligibleIndexes.get(item);
-      if (index === undefined) return PRODUCE_UNCACHED;
-      return decide(
-        reads.then((results) => {
-          const result = results[index]!;
-          if (result instanceof Error) throw result;
-          return result;
-        }),
-        signal,
-      );
-    });
-  };
-
-  /**
-   * How a call's slots start their producer work. The slot pipeline is the
-   * same for every call; only this part differs between a call whose slots
-   * each start their own work and a call that sends its work together.
-   */
-  type ProducerStarter = {
-    /** Starts or rides the task that a slot waits for. */
-    produce(
-      item: Item,
-      decision: ProducerSlotDecision<ResultEntry>,
-      call: CallContext,
-    ): TaskOutcome<Produced> | Promise<TaskOutcome<Produced>>;
-    /** Starts or rides a slot's background refresh, which nothing awaits. */
-    refresh(
-      item: Item,
-      decision: ProducerSlotDecision<ResultEntry>,
-      call: CallContext,
-    ): void;
-  };
-
-  /** A starter whose slots each start or ride their own task with `start`. */
-  const starterOver = (
-    start: (
-      requests: readonly SchedulerRequest<Work>[],
-    ) => TaskOutcome<Produced>[],
-  ): ProducerStarter => ({
-    produce: (item, decision, call) =>
-      start([producerTask(item, decision, call)])[0]!,
-    refresh: (item, decision, call) => {
-      logRefreshFailure(
-        logger,
-        start([producerTask(item, decision, call)])[0]!,
-      );
-    },
-  });
-
-  // Each slot's work goes to the scheduler's sender on its own.
-  const perSlot = starterOver((requests) =>
-    scheduler.startOrRideTasks(requests),
-  );
-  // For a `get` with `autoBatch.producer: false`: its one slot is the whole
-  // call, so it needs no barrier. A scheduler that never accumulates sends
-  // every task on its own already.
-  const perSlotDirect =
-    startDirect === undefined ? perSlot : starterOver(startDirect);
-
-  /**
-   * The starter of a `getMany` call with `autoBatch.producer: false`, on a
-   * scheduler that accumulates work. It sends the call's misses, bypass
-   * requests, and stale-while-revalidate refreshes to the producer together,
-   * as one invocation. allSettled waits for every decision, so one failed
-   * lookup does not drop the others from the cohort. The map holds only
-   * foreground outcomes. Each foreground slot reads its own entry, and
-   * refreshes are logged here because no slot awaits them.
-   */
-  const cohortStarter = (
-    items: readonly Item[],
-    decisions: readonly Decided[],
+  const requestProducer = (
+    item: Item,
+    decision: ProducerSlotDecision<ResultEntry>,
     call: CallContext,
-    start: NonNullable<typeof startDirect>,
-  ): ProducerStarter => {
-    const outcomes = Promise.allSettled(
-      // A bypass slot's decision is already known.
-      decisions.map(async (decision) => decision),
-    ).then((settled) => {
-      const cohort = items.flatMap((item, index) => {
-        const decision = settled[index]!;
-        return decision.status === "fulfilled" && needsProducer(decision.value)
-          ? [{ item, decision: decision.value }]
-          : [];
-      });
-
-      const started = start(
-        cohort.map(({ item, decision }) => producerTask(item, decision, call)),
-      );
-
-      return new Map(
-        cohort.flatMap(({ item, decision }, index) => {
-          const outcome = started[index]!;
-          if (decision.action === "produce") {
-            return [[item, outcome] as const];
-          }
-
-          logRefreshFailure(logger, outcome);
-          return [];
-        }),
-      );
-    });
-    // The barrier rejects only if `start` throws, for example from a user key
-    // function. A call whose slots are all refreshes never awaits it.
-    void outcomes.catch(() => {});
-
-    return {
-      produce: async (item) => (await outcomes).get(item)!,
-      // The cohort above starts or rides every refresh.
-      refresh: () => {},
-    };
+  ): SharedOutcome<ProducerRequest<Work>, Produced> => {
+    const background = decision.action === "serve-and-refresh";
+    const outcome = scheduler.request(
+      {
+        work: {
+          request: item.request,
+          resourceType: item.resourceType,
+          trigger: item.bypass
+            ? "bypass"
+            : background
+              ? "revalidation"
+              : "miss",
+        },
+        call,
+      },
+      background ? undefined : call.signal,
+    );
+    if (call.expediteProducer) outcome.item?.expedite();
+    return outcome;
   };
 
   const serve = (
@@ -1227,16 +1116,14 @@ export function createProducerClient<
   });
 
   /**
-   * Carries out one slot's decision: starts or rides producer work through
-   * `starter`, races it against the caller's signal, and applies the
-   * if-error fallback. It returns what the slot served, its fetch
-   * disposition, and the write that `onStore` reports, so that no branch has
-   * to record them itself.
+   * Carries out one slot's decision: joins or starts producer work, races it
+   * against the caller's signal, and applies the if-error fallback. It
+   * returns what the slot served, its fetch disposition, and the write that
+   * `onStore` reports, so that no branch has to record them itself.
    */
   const executeSlot = async (
     item: Item,
     decision: SlotDecision<ResultEntry>,
-    starter: ProducerStarter,
     call: CallContext,
   ): Promise<SlotRecord<ResultEntry>> => {
     switch (decision.action) {
@@ -1255,24 +1142,21 @@ export function createProducerClient<
       }
       case "serve-and-refresh": {
         // The refresh obligation survives both the stale return and later
-        // joiner cancellation.
-        starter.refresh(item, decision, call);
+        // joiner cancellation. Nothing awaits it.
+        logRefreshFailure(logger, requestProducer(item, decision, call));
         return serve(decision.entry, "served-stale-while-revalidating");
       }
       case "produce": {
-        // Await only a starter that is asynchronous, so that a slot that
-        // starts its own work does so in this same turn.
-        const started = starter.produce(item, decision, call);
-        const outcome = started instanceof Promise ? await started : started;
-        item.rode = outcome.rode;
+        const outcome = requestProducer(item, decision, call);
+        item.joined = outcome.joined;
 
         // The shared producer work doesn't receive the signal directly (since
         // it may be shared with other callers who haven't aborted). However,
         // we race the caller's observation of the result against the signal
-        // so they can bail out immediately. Dispatched producer work keeps
-        // running, and its result is still stored.
+        // so they can bail out immediately. Producer work that has started
+        // keeps running, and its result is still stored.
         try {
-          const produced = await raceWithSignal(outcome.promise, call.signal);
+          const produced = await raceWithSignal(outcome.result, call.signal);
           return {
             result: produced.entry,
             fetch: {
@@ -1312,16 +1196,27 @@ export function createProducerClient<
     }
   };
 
-  /** One slot's whole pipeline: wait for its decision, then execute it. */
+  /**
+   * One slot's whole pipeline: read the cache and decide, then execute the
+   * decision. A bypass slot skips the read.
+   *
+   * Every slot reads with its own `Cache.get`, so a slot settles when its
+   * own Store call does, with no whole-set barrier. The reads of one call
+   * still form Store calls together, because they are submitted in one turn.
+   */
   const settleSlot = async (
     item: Item,
-    decision: Decided,
-    starter: ProducerStarter,
+    readOptions: ReadOptions,
     call: CallContext,
   ): Promise<SlotRecord<ResultEntry>> => {
-    const decided = await decision;
+    // Awaited also for a bypass slot, whose decision is already known. So a
+    // slot never requests producer work synchronously inside the public
+    // call, also when a producer makes that call from its own body.
+    const decided = await (item.bypass
+      ? PRODUCE_UNCACHED
+      : decide(cache.get(item.request, readOptions), call.signal));
     call.signal?.throwIfAborted();
-    return executeSlot(item, decided, starter, call);
+    return executeSlot(item, decided, call);
   };
 
   /** `get`: the slot pipeline for one item. It rejects with its slot's Error. */
@@ -1331,32 +1226,13 @@ export function createProducerClient<
     startedAt: PerformanceNow,
   ): Promise<ResultEntry> => {
     const { signal } = callOptions;
-    const call: CallContext = {
-      signal,
-      joinInFlight: callOptions.joinInFlight,
-    };
+    const call = callContext(callOptions);
     const item = prepare(input);
 
     let record: SlotRecord<ResultEntry>;
     try {
       signal?.throwIfAborted();
-      const decision = item.bypass
-        ? PRODUCE_UNCACHED
-        : decide(
-            cache.get(
-              item.request,
-              callOptions.autoBatch?.store === false
-                ? { signal, autoBatch: false }
-                : { signal },
-            ),
-            signal,
-          );
-      const slot = settleSlot(
-        item,
-        decision,
-        callOptions.autoBatch?.producer === false ? perSlotDirect : perSlot,
-        call,
-      );
+      const slot = settleSlot(item, slotReadOptions(callOptions), call);
       void pipelines.track(slot);
       record = await slot;
       signal?.throwIfAborted();
@@ -1384,10 +1260,7 @@ export function createProducerClient<
     startedAt: PerformanceNow,
   ): Promise<(ResultEntry | Error)[]> => {
     const { signal } = callOptions;
-    const call: CallContext = {
-      signal,
-      joinInFlight: callOptions.joinInFlight,
-    };
+    const call = callContext(callOptions);
     const items = inputs.map(prepare);
     const publishAllAborted = () => {
       items.forEach((item) => {
@@ -1399,14 +1272,8 @@ export function createProducerClient<
       signal.throwIfAborted();
     }
 
-    const decisions = decideAll(items, callOptions);
-    const starter =
-      startDirect !== undefined && callOptions.autoBatch?.producer === false
-        ? cohortStarter(items, decisions, call, startDirect)
-        : perSlot;
-    const slots = items.map((item, index) =>
-      settleSlot(item, decisions[index]!, starter, call),
-    );
+    const readOptions = slotReadOptions(callOptions);
+    const slots = items.map((item) => settleSlot(item, readOptions, call));
     slots.forEach((slot) => {
       void pipelines.track(slot);
     });
@@ -1477,8 +1344,8 @@ export function createProducerClient<
       if (closing) return closing;
 
       closed = true;
-      // Accepted calls still start or ride tasks after this point, so only flush
-      // now, and close the scheduler once they finish.
+      // Accepted calls still join or start work after this point, so only
+      // flush now, and close the scheduler once they finish.
       scheduler.flush();
 
       closing = (async () => {

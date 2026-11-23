@@ -70,11 +70,12 @@ export type WrapProducerOptions<
  * and their results are still stored.
  *
  * Single producers dispatch promptly. Bulk producers accumulate ready work by
- * default, separately from Store accumulation. autoBatch.producer: false waits
- * for classification of the known set. It then sends the call's misses,
- * bypass requests, and stale refreshes to the producer as one invocation,
- * whatever the producerBatching limit.
- * A direct caller can also dispatch compatible queued work immediately.
+ * default, separately from Store accumulation. autoBatch.producer: false
+ * skips that accumulation wait for the call's misses, bypass requests, and
+ * stale refreshes. Each request's work is ready as soon as its own cache read
+ * settles, and reaches the producer in calls of at most the producerBatching
+ * limit, which can also carry other callers' ready work.
+ * Such a caller also makes compatible queued work ready immediately.
  *
  * Sharing covers pending requests within collapseOverlappingRequestsTime.
  * Compatibility uses normalized parameters and directives. Producers receive

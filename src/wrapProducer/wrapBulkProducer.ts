@@ -1,7 +1,7 @@
 /**
  * @fileoverview The client for a bulk producer (`produceMany`). It shares
- * pending work between requests, and batches the started tasks into producer
- * invocations. See producerScheduler.ts for the parts.
+ * pending work between requests, and batches the work into producer calls.
+ * See producerScheduler.ts for the parts.
  *
  * @module
  */
@@ -21,12 +21,6 @@ import {
   type ProducerClientOptions,
   type WrappedProducerClient,
 } from "./producerClient.js";
-import {
-  batchingSender,
-  createProducerScheduler,
-  type ProducerScheduler,
-  type ProducerSchedulerOptions,
-} from "./producerScheduler.js";
 
 /**
  * The options that a bulk producer wrapper takes: the shared client's, plus
@@ -38,14 +32,15 @@ export type BulkProducerOptions<
   Params extends AnyParams = AnyParams,
 > = ProducerClientOptions<RT, Validators, Params> & {
   /**
-   * Bulk accumulation settings; default limit 20. The limit applies only to
-   * accumulated work. Does not change participation. Only a `produceMany`
-   * producer accepts it, because a single producer never batches.
+   * Bulk accumulation settings; default limit 20. `maxBatchSize` limits
+   * every `produceMany` call, also for work with
+   * `autoBatch.producer: false`, which skips only the accumulation wait.
+   * Does not change participation. Only a `produceMany` producer accepts it,
+   * because a single producer never batches.
    *
-   * By default, automatic batches run concurrently, with no limit: a
-   * wrapped `getMany` of 1,000 misses makes 50 concurrent `produceMany`
-   * calls at the default batch limit. `maxConcurrentProducerCalls` limits
-   * them.
+   * By default, batches run concurrently, with no limit: a wrapped `getMany`
+   * of 1,000 misses makes 50 concurrent `produceMany` calls at the default
+   * batch limit. `maxConcurrentProducerCalls` limits them.
    */
   producerBatching?: BatchOptions;
 };
@@ -73,26 +68,6 @@ export function wrapBulkProducer<
   return createProducerClient<RT, Covered, Validators, Params>(options, {
     producer: produceMany,
     call: looseProduceMany,
-    makeScheduler: (schedulerOptions) =>
-      bulkProducerScheduler({
-        ...schedulerOptions,
-        batching: options.producerBatching ?? {},
-      }),
+    batching: options.producerBatching ?? {},
   });
-}
-
-/**
- * The scheduler of a bulk producer: requests with the same key share one
- * task, and the started tasks accumulate into batches. A waiting task whose
- * requests are all cancelled leaves the queue.
- *
- * @internal
- */
-export function bulkProducerScheduler<Work, Produced>(
-  options: ProducerSchedulerOptions<Work, Produced> & {
-    /** The accumulation settings. They apply only to automatic batches. */
-    batching: BatchOptions;
-  },
-): ProducerScheduler<Work, Produced> {
-  return createProducerScheduler(options, batchingSender(options));
 }

@@ -1,457 +1,195 @@
 /**
- * @fileoverview How a producer client shares and sends its producer work. The
- * parts are separate so that each wrapper picks them independently:
+ * @fileoverview How a producer client shares and sends its producer work. It
+ * composes three parts of `@zingage/scheduling`:
  *
- * - Sharing: {@link createProducerScheduler} lets requests with the same key
- *   ride one pending task. It is the same for every producer.
- * - Sending: a {@link TaskSender} decides when the producer is invoked for
- *   the started tasks, and in what groups. {@link immediateSender} invokes
- *   it once per task. {@link batchingSender} accumulates tasks into batches.
- * - Limiting: either sender takes an optional `ConcurrencyLimiter`, which
- *   limits the producer invocations that run at one time.
+ * - A dispatcher runs the producer calls. Its waiting set decides which work
+ *   shares a call: `fifoBatches` accumulates work for a producer that takes
+ *   batches (`produceMany`). Without a waiting set, each unit is its own
+ *   call, ready at once, for a producer that takes one request (`produce`).
+ * - An optional `concurrencyLimit` admission limits the producer calls that
+ *   run at one time.
+ * - A `Sharing` in front of the dispatcher lets requests with the same key
+ *   share one unit of work. {@link createProducerScheduler} holds the one
+ *   rule for that.
  *
  * @module
  */
 import {
-  Batcher,
-  CollapsedTaskCreator,
-  type BatchHandle,
+  concurrencyLimit,
+  createDispatcher,
+  fifoBatches,
+  Sharing,
   type BatchOptions,
-  type ConcurrencyLimiter,
-  type DispatchInfo,
-  type SharedTaskView,
+  type Item,
+  type SharedOutcome,
 } from "@zingage/scheduling";
-import { pick } from "es-toolkit";
 
-import type { Logger } from "../types/index.js";
-import {
-  asError,
-  assertResultCount,
-  defaultLoggersByComponent,
-  runLimited,
-} from "../utils/utils.js";
-
-/** One task as a scheduler hands it to `dispatch`. */
-export type DispatchedRequest<Work> = {
+/** One request for producer work. */
+export type ProducerRequest<Work> = {
+  readonly work: Work;
   /**
-   * The work of the request that STARTED the task. Requests that ride the
-   * task never replace it, so per-request labels such as a producer trigger
-   * keep the starting request's value.
+   * The public call that makes the request. It is compared by identity: a
+   * request always joins work that its own call started.
    */
-  readonly request: Work;
-  /**
-   * The number of requests that have ridden the task so far. Each one is a
-   * request that sharing served without starting new work. The request that
-   * started the task does not count, and a cancelled rider still does. Live:
-   * read it at publish time, so that requests that ride the task while it runs
-   * count too.
-   */
-  readonly collapsedRequestCount: () => number;
-  /**
-   * Milliseconds the task waited before the producer was invoked: in the
-   * automatic queue, and for a slot under a call limit. 0 for a task that
-   * was sent at once.
-   */
-  readonly queueWaitMs: number;
+  readonly call: {
+    /**
+     * `false` keeps the call's requests from joining work whose producer
+     * call has already started. They still join work that waits, in a batch
+     * or for a slot, because that producer call starts after the request.
+     */
+    readonly joinInFlight?: false | undefined;
+  };
 };
 
 /**
- * Runs one producer invocation for the given tasks. Its `info` describes the
- * whole invocation. It resolves with one result or Error per task, in order.
- * A rejection fails every task in the invocation.
+ * One unit of producer work. Its `input` is the request that STARTED it.
+ * Requests that join it never replace that, so per-request labels such as a
+ * producer trigger keep the starting request's value.
  */
-export type DispatchTasks<Work, Produced> = (
-  tasks: readonly DispatchedRequest<Work>[],
-  info: DispatchInfo,
+export type ProducerItem<Work, Produced> = Item<
+  ProducerRequest<Work>,
+  Produced
+>;
+
+/**
+ * Runs one producer call for the given items. It resolves with one result or
+ * Error per item, in order. A rejection fails every item of the call.
+ */
+export type InvokeProducer<Work, Produced> = (
+  items: readonly ProducerItem<Work, Produced>[],
+  info: {
+    /**
+     * True when at least one item of the call came from automatic
+     * accumulation. False when every item was expedited, and always false
+     * for a producer that takes one request per call.
+     */
+    readonly autoBatched: boolean;
+  },
 ) => Promise<readonly (Produced | Error)[]>;
 
-/** One request to a {@link ProducerScheduler}. */
-export type SchedulerRequest<Work> = {
-  request: Work;
+export type ProducerSchedulerOptions<Work, Produced> = {
   /**
-   * Cancels the request. A request without a signal can never be cancelled,
-   * so the task it starts or rides can never be cancelled either.
+   * A request joins work whose producer call has started only if that call
+   * started no more than this many milliseconds ago.
    */
-  signal?: AbortSignal | undefined;
+  sharingWindowMs: number;
   /**
-   * `false` keeps the request from riding a task whose producer invocation
-   * has already started. It still rides a task that waits, in a batch or for
-   * a slot, because that invocation starts after this request.
+   * Converts a request's work into the key that decides which pending work
+   * it may join. `undefined` means the request must not share work with any
+   * other: it then starts its own.
    */
-  joinInFlight?: false | undefined;
-};
-
-/** What a scheduler returns for one request. */
-export type TaskOutcome<Produced> = {
-  /** The task's shared result. */
-  promise: Promise<Produced>;
-  /** True when the request rode a pending task, false when it started one. */
-  rode: boolean;
+  keyOf: (work: Work) => string | undefined;
+  /**
+   * The most producer calls that run at one time. Undefined or `Infinity`
+   * for no limit. Work that waits for a slot stays joinable, and leaves the
+   * queue when every request on it is cancelled.
+   */
+  maxConcurrentCalls: number | undefined;
+  /**
+   * The accumulation settings of a producer that takes batches. Undefined
+   * for a producer that takes one request per call: its work never
+   * accumulates.
+   */
+  batching: BatchOptions | undefined;
+  invoke: InvokeProducer<Work, Produced>;
 };
 
 /**
  * Shares pending producer work between independent requests, and sends it.
- * Dispatched work always completes.
+ * Work whose producer call has started always completes.
  */
 export type ProducerScheduler<Work, Produced> = {
   /**
-   * Starts or rides a task for each request. The sender decides when each
-   * new task's producer invocation starts.
+   * Joins pending work for the request's key, or starts some. `signal`
+   * cancels the request. A request without a signal can never be cancelled,
+   * so the work that it joins or starts can never be cancelled either.
+   *
+   * New work waits for its producer call as the scheduler's batching and
+   * call limit say. The returned `item.expedite()` skips the accumulation
+   * wait.
    */
-  startOrRideTasks(
-    requests: readonly SchedulerRequest<Work>[],
-  ): TaskOutcome<Produced>[];
+  request(
+    request: ProducerRequest<Work>,
+    signal: AbortSignal | undefined,
+  ): SharedOutcome<ProducerRequest<Work>, Produced>;
   /**
-   * Like `startOrRideTasks`, but sends the call's new tasks, together with
-   * the waiting tasks that it rides, as one invocation. Only a scheduler
-   * whose sender accumulates work has it. A call with
-   * `autoBatch.producer: false` then collects all of its producer work, and
-   * sends it with one `startOrRideDirect` call.
+   * The number of requests that joined `item` without starting it, so far.
+   * Each one is a request that sharing served without new work. A request
+   * that was cancelled later still counts. Read it when the producer call
+   * settles, so that requests that joined while it ran count too.
    */
-  startOrRideDirect?(
-    requests: readonly SchedulerRequest<Work>[],
-  ): TaskOutcome<Produced>[];
-  /** Sends every accumulated task now. */
+  joinedCount(item: ProducerItem<Work, Produced>): number;
+  /**
+   * Makes all accumulated work ready for its producer call now. It also
+   * drops `batching.batchScheduleFn` for good, because an owner can stop
+   * that schedule during a shutdown: work that is requested later
+   * accumulates on the default schedule.
+   */
   flush(): void;
   /**
-   * Flushes, then waits until no task waits or runs. The client calls it
-   * once it stops starting or riding tasks.
+   * Flushes, then resolves when no work waits or runs. The client calls it
+   * once, after it stops making requests: it does not wait for work that is
+   * requested after it resolves.
    */
   close(): Promise<void>;
 };
 
-/**
- * One started task, from the time the sharing layer starts it until its
- * producer invocation settles.
- */
-export type StartedTask<Work, Queued> = {
-  /** The task's live view: its work, signal, and rider count. */
-  readonly view: SharedTaskView<Work>;
-  /**
-   * `Date.now()` when the task's producer invocation started. Undefined
-   * while the task waits. The sender sets it. The sharing layer reads it: a
-   * waiting task is always ridable, and the sharing window of an invoked
-   * task runs from this time.
-   */
-  invokedAt: number | undefined;
-  /**
-   * The sender's own reference to the waiting task, which
-   * {@link TaskSender.sendTogether} uses to take it out of the queue.
-   * Undefined for a sender that keeps none, and once the task is invoked.
-   */
-  queued: Queued | undefined;
-};
-
-/**
- * Sends started tasks to the producer. It decides when the producer is
- * invoked, and which tasks share an invocation. It does not share work: every
- * task that it receives is invoked exactly once, unless the task's signal
- * aborts while the task waits.
- */
-export type TaskSender<Work, Produced, Queued> = {
-  /** Sends each task on the sender's own schedule. Returns each task's result. */
-  send(tasks: readonly StartedTask<Work, Queued>[]): Promise<Produced>[];
-  /**
-   * Sends `tasks`, and those of `waiting` that still wait, as one invocation
-   * that is never split. Returns the result of each of `tasks`. Only a
-   * sender that accumulates work has it.
-   */
-  sendTogether?(
-    waiting: readonly StartedTask<Work, Queued>[],
-    tasks: readonly StartedTask<Work, Queued>[],
-  ): Promise<Produced>[];
-  /** Sends every accumulated task now. */
-  flush(): void;
-  /** Flushes, then waits until the sender is idle. */
-  close(): Promise<void>;
-};
-
-/** What every {@link TaskSender} needs. */
-export type TaskSenderOptions<Work, Produced> = {
-  dispatch: DispatchTasks<Work, Produced>;
-  /**
-   * Limits the producer invocations that run at one time. A task that waits
-   * for a slot stays ridable, and leaves the queue when its signal aborts.
-   */
-  limiter: ConcurrencyLimiter | undefined;
-};
-
-function toDispatched<Work>(
-  task: StartedTask<Work, unknown>,
-  queueWaitMs: number,
-): DispatchedRequest<Work> {
-  const { view } = task;
-  return {
-    request: view.input,
-    collapsedRequestCount: () => view.collapsedRequestCount,
-    queueWaitMs,
-  };
-}
-
-/** Every invocation of an {@link immediateSender} holds one task. */
-const SENT_AT_ONCE = { autoBatched: false } as const;
-
-/**
- * Invokes the producer once per task: at once, or when a slot frees under
- * `limiter`. It never accumulates, so it has no `sendTogether`, and `flush`
- * does nothing. Like a `Batcher`, it rejects a task whose slot is an Error,
- * and wraps a non-Error rejection.
- */
-export function immediateSender<Work, Produced>({
-  dispatch,
-  limiter,
-}: TaskSenderOptions<Work, Produced>): TaskSender<Work, Produced, undefined> {
-  type Task = StartedTask<Work, undefined>;
-
-  const invoke = (task: Task, queueWaitMs: number): Promise<Produced> => {
-    task.invokedAt = Date.now();
-    return Promise.try(
-      dispatch,
-      [toDispatched(task, queueWaitMs)],
-      SENT_AT_ONCE,
-    ).then(
-      (results) => {
-        assertResultCount(results, 1);
-        const slot = results[0]!;
-        if (slot instanceof Error) throw slot;
-        return slot;
-      },
-      (error: unknown) => {
-        throw asError(error);
-      },
-    );
-  };
-
-  return {
-    send: (tasks) =>
-      tasks.map((task) =>
-        limiter === undefined
-          ? invoke(task, 0)
-          : runLimited(
-              limiter,
-              (queueWaitMs) => invoke(task, queueWaitMs),
-              task.view.signal,
-            ),
-      ),
-    flush: () => {},
-    // The sharing layer waits for every task's result, also for a task that
-    // waits for a slot.
-    close: async () => {},
-  };
-}
-
-/** A task as a {@link batchingSender} holds it: `queued` is its batch entry. */
-// An interface, because a type alias cannot name itself in its own argument.
-interface BatchedTask<Work, Produced> extends StartedTask<
-  Work,
-  BatchHandle<BatchedTask<Work, Produced>, Produced>
-> {}
-
-/**
- * Accumulates tasks in a `Batcher`, and invokes the producer once per batch.
- * A waiting task whose signal aborts leaves the queue. The `Batcher` also
- * logs the warning for work started after `close`.
- */
-export function batchingSender<Work, Produced>({
-  dispatch,
-  limiter,
-  logger,
+/** Builds a {@link ProducerScheduler}. */
+export function createProducerScheduler<Work, Produced>({
+  sharingWindowMs,
+  keyOf,
+  maxConcurrentCalls,
   batching,
-}: TaskSenderOptions<Work, Produced> & {
-  /**
-   * The caller's logger, or undefined for the default. The `Batcher` warns
-   * about work started after `close` under its own component.
-   */
-  logger: Logger | undefined;
-  /** The accumulation settings. They apply only to automatic batches. */
-  batching: BatchOptions;
-}): TaskSender<
+  invoke,
+}: ProducerSchedulerOptions<Work, Produced>): ProducerScheduler<
   Work,
-  Produced,
-  BatchHandle<BatchedTask<Work, Produced>, Produced>
+  Produced
 > {
-  type Task = BatchedTask<Work, Produced>;
+  type Request = ProducerRequest<Work>;
 
-  const batcher = new Batcher<Task, Produced>({
-    ...pick(batching, [
-      "maxBatchSize",
-      "batchScheduleFn",
-      "preserveAsyncContext",
-    ]),
-    ...(limiter === undefined ? {} : { limiter }),
-    // Keep the `@zingage/cache:batcher` debug namespace by default.
-    logger: logger ?? defaultLoggersByComponent.batcher,
-    dispatch: (items, info) => {
-      const now = Date.now();
-      return dispatch(
-        items.map(({ input: task, queueWaitMs }) => {
-          task.invokedAt = now;
-          task.queued = undefined;
-          return toDispatched(task, queueWaitMs);
-        }),
-        info,
-      );
-    },
-  });
-  const toItem = (task: Task) => ({ input: task, signal: task.view.signal });
-
-  return {
-    send: (tasks) =>
-      batcher.enqueue(tasks.map(toItem)).map(({ result, handle }, index) => {
-        tasks[index]!.queued = handle;
-        return result;
+  const accumulates = batching !== undefined;
+  const dispatcher = createDispatcher({
+    waiting: batching === undefined ? undefined : fifoBatches(batching),
+    admission:
+      maxConcurrentCalls === undefined || maxConcurrentCalls === Infinity
+        ? undefined
+        : concurrencyLimit(maxConcurrentCalls),
+    invoke: (items: readonly Item<Request, Produced>[]) =>
+      invoke(items, {
+        autoBatched: accumulates && items.some((item) => !item.expedited),
       }),
-    // The new tasks never wait in a batch, so a `batchScheduleFn` cannot
-    // send part of a direct call early.
-    sendTogether: (waiting, tasks) =>
-      batcher.dispatchNow(
-        waiting.flatMap(({ queued }) => (queued === undefined ? [] : [queued])),
-        tasks.map(toItem),
-      ),
-    // After a flush, automatic work still queues. The flushed batcher sends
-    // it on its default schedule, which always fires, so shutdown still
-    // batches it instead of sending one call per request.
-    flush: () => {
-      batcher.flush();
-    },
-    close: async () => batcher.close(),
-  };
-}
-
-/** What the sharing layer needs: when requests are compatible, and for how long. */
-export type TaskSharingOptions<Work> = {
-  /**
-   * A new request rides a pending task with the same key if the task still
-   * waits, or if its producer invocation started no more than this many
-   * milliseconds ago.
-   */
-  collapseTasksMs: number;
-  /**
-   * Converts a request into the key that decides which pending task it may
-   * ride. `undefined` means the request must not share work with any other:
-   * it then starts its own task.
-   */
-  makeKey: (work: Work) => string | undefined;
-};
-
-/**
- * What the shared client gives a wrapper to build its scheduler: the sharing
- * options, and what every sender needs.
- */
-export type ProducerSchedulerOptions<Work, Produced> =
-  TaskSharingOptions<Work> &
-    TaskSenderOptions<Work, Produced> & {
-      /** The caller's logger, or undefined to let the scheduler pick its default. */
-      logger: Logger | undefined;
-    };
-
-/**
- * Builds a {@link ProducerScheduler}: a `CollapsedTaskCreator` shares work
- * between requests, and `sender` sends each started task.
- */
-export function createProducerScheduler<Work, Produced, Queued>(
-  { collapseTasksMs, makeKey }: TaskSharingOptions<Work>,
-  sender: TaskSender<Work, Produced, Queued>,
-): ProducerScheduler<Work, Produced> {
-  type Task = StartedTask<Work, Queued>;
-  /** A task that a direct call started, and has not sent yet. */
-  type DirectStart = { task: Task; result: PromiseWithResolvers<Produced> };
-
-  // Its context is a direct call's list of new tasks to send together, or
-  // undefined for a call whose new tasks go to `sender.send`.
-  const taskCreator = new CollapsedTaskCreator<
-    Work,
-    Produced,
-    Task,
-    string,
-    DirectStart[] | undefined
-  >({
-    collapseTasksMs,
-    makeKey,
-    invokedAt: (task) => task.invokedAt,
-    schedule: (toStart, directStarts) => {
-      const tasks = toStart.map(
-        (view): Task => ({ view, invokedAt: undefined, queued: undefined }),
-      );
-      // `schedule` must return each task's result at once, but only the
-      // `startOrRideTasks` call learns which waiting tasks the call rode. So a
-      // direct call's new tasks get pending results here, and
-      // `startOrRideDirect` sends them with the ridden tasks.
-      if (directStarts !== undefined) {
-        return tasks.map((task) => {
-          const result = Promise.withResolvers<Produced>();
-          directStarts.push({ task, result });
-          return { result: result.promise, handle: task };
-        });
-      }
-
-      const results = sender.send(tasks);
-      return tasks.map((task, index) => ({
-        result: results[index]!,
-        handle: task,
-      }));
-    },
   });
 
-  const toTaskRequest = ({
-    request,
-    signal,
-    joinInFlight,
-  }: SchedulerRequest<Work>) =>
-    joinInFlight === false
-      ? { input: request, signal, rideInvoked: false }
-      : { input: request, signal };
-  const toOutcome = ({
-    result,
-    rode,
-  }: {
-    result: Promise<Produced>;
-    rode: boolean;
-  }): TaskOutcome<Produced> => ({ promise: result, rode });
-
-  const sendTogether = sender.sendTogether?.bind(sender);
-  let closing: Promise<void> | undefined;
+  const sharing = new Sharing<Request, Request, Produced>({
+    keyOf: ({ work }) => keyOf(work),
+    // The one rule for sharing. Requests with equal keys ask for the same
+    // producer result, so the only question is whether the pending work is
+    // recent enough for the new request.
+    canJoin: (item, request, now) => {
+      // Work that still waits, in a batch or for a slot, starts its producer
+      // call after this request. So does every producer call for work that
+      // the request's own call started.
+      if (item.state === "waiting" || item.input.call === request.call) {
+        return true;
+      }
+      if (request.call.joinInFlight === false) return "inFlight";
+      // The window runs from the start of the producer call, not from the
+      // request that started the work: time that work spends waiting does
+      // not make the producer's answer older.
+      return now - (item.startedAt ?? now) <= sharingWindowMs
+        ? true
+        : "outsideWindow";
+    },
+    start: (requests) => dispatcher.submitMany(requests),
+  });
 
   return {
-    startOrRideTasks: (requests) =>
-      taskCreator
-        .startOrRideTasks(requests.map(toTaskRequest), undefined)
-        .map(toOutcome),
-    ...(sendTogether === undefined
-      ? {}
-      : {
-          startOrRideDirect: (requests) => {
-            const directStarts: DirectStart[] = [];
-            // If this throws, the task creator kept none of the new tasks, so
-            // no caller waits for their results.
-            const outcomes = taskCreator.startOrRideTasks(
-              requests.map(toTaskRequest),
-              directStarts,
-            );
-            // The call also sends the waiting tasks that it rode, so they
-            // leave accumulation. A task that this call started has nothing
-            // queued, and neither does a ridden task that was already sent.
-            const results = sendTogether(
-              outcomes.flatMap(({ handle }) =>
-                handle?.queued === undefined ? [] : [handle],
-              ),
-              directStarts.map(({ task }) => task),
-            );
-            directStarts.forEach(({ result }, index) => {
-              result.resolve(results[index]!);
-            });
-            return outcomes.map(toOutcome);
-          },
-        }),
+    request: (request, signal) => sharing.request(request, signal),
+    joinedCount: (item) => sharing.joinedCount(item),
     flush: () => {
-      sender.flush();
+      dispatcher.flush();
     },
-    close: () => {
-      closing ??= (async () => {
-        await sender.close();
-        await taskCreator.drain();
-      })();
-      return closing;
-    },
+    // Repeated calls share the dispatcher's one close promise.
+    close: () => dispatcher.close(),
   };
 }

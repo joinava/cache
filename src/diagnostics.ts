@@ -381,10 +381,11 @@ export const CACHE_PRODUCE_CHANNEL_NAME = "@zingage/cache:produce";
 export type CacheProduceMessage = {
   cache: string;
   /**
-   * True when the producer scheduler dispatched this invocation from its
-   * automatic queue, including the flush that `close()` starts. False when it
-   * ran directly: a single `produce` call, or a call with
-   * `autoBatch: { producer: false }`.
+   * True when at least one request of this invocation came from the
+   * automatic queue, including the flush that `close()` starts. False for
+   * every single `produce` call, and for a `produceMany` call whose requests
+   * all skipped the accumulation wait with `autoBatch: { producer: false }`.
+   * One invocation can mix both kinds of request, and then reports true.
    */
   autoBatched: boolean;
   /** Requests in this invocation. */
@@ -394,8 +395,8 @@ export type CacheProduceMessage = {
   /**
    * Time the requests waited before the producer was invoked, summed over
    * requests: in the automatic queue, and for a slot under
-   * `maxConcurrentProducerCalls`. Zero for a direct invocation that got a
-   * slot at once.
+   * `maxConcurrentProducerCalls`. It is measured, so it is close to zero,
+   * not exactly zero, for an invocation that nothing held back.
    */
   queueWaitTotalMs: number;
   /**
@@ -427,7 +428,8 @@ export type CacheProduceMessage = {
    * It counts requests, not callers. So it counts:
    * - a duplicate request in one wrapped call, which rides the task that the
    *   call's first copy started;
-   * - a direct call that rides tasks still waiting in the automatic queue;
+   * - a call with `autoBatch: { producer: false }` that rides tasks still
+   *   waiting in the automatic queue;
    * - a rider that later cancels.
    *
    * Requests that automatic batching merges into one invocation do not count,
@@ -523,9 +525,8 @@ export function publishCacheStoreEntry(message: CacheStoreEntryMessage): void {
 }
 
 /**
- * One physical Store read by a `Cache`: an automatic batch, a
- * read with `autoBatch: false`, or one `get` call to a Store that has no
- * `getMany`.
+ * One physical Store read by a `Cache`: one `getMany` call for a batch of
+ * reads, or one `get` call to a Store that has no `getMany`.
  * Empty calls and entirely cancelled automatic batches emit nothing. Requests
  * cancelled before dispatch do not count. No resource IDs, payloads, or error
  * values are included.
@@ -536,23 +537,26 @@ export type CacheReadStoreMessage = {
   /** The Store method the Cache called. */
   operation: "get" | "getMany";
   /**
-   * True when the Cache's read batcher dispatched this read after it
-   * accumulated requests from one or more callers. False when the read ran
-   * directly: a read with `autoBatch: false`, or a Store that has no
-   * `getMany`.
+   * True when at least one request of this Store call came from automatic
+   * accumulation. False when every request skipped the accumulation wait
+   * with `autoBatch: false`, and for every call to a Store that has no
+   * `getMany`. One Store call can mix both kinds of request, and then
+   * reports true.
    */
   autoBatched: boolean;
   /**
    * `failure` when any slot holds an Error or the whole call failed.
-   * `cancelled` when a direct Store call rejects after its caller cancels.
-   * Cancellation after automatic dispatch keeps the Store's eventual outcome.
+   * `cancelled` when a Store call that got its caller's signal rejects after
+   * that caller cancels. A Store call gets a signal only when it is not
+   * `autoBatched` and all of its requests carry the same signal. Any other
+   * Store call keeps the Store's eventual outcome after a cancellation.
    */
   outcome: "success" | "failure" | "cancelled";
   /** Dispatched request slots, including duplicate requests. */
   requestCount: number;
   /**
    * Error slots, or every dispatched request when the whole call fails.
-   * Zero for a cancelled direct call.
+   * Zero for a `cancelled` call.
    */
   failedRequestCount: number;
   /**
@@ -569,8 +573,9 @@ export type CacheReadStoreMessage = {
   /**
    * Time the dispatched requests waited before the Store call, summed over
    * requests: in the automatic queue, and for a slot under
-   * `maxConcurrentStoreReads`. Divide by `requestCount` for the mean. Zero
-   * for a direct read that got a slot at once.
+   * `maxConcurrentStoreReads`. Divide by `requestCount` for the mean. It is
+   * measured, so it is close to zero, not exactly zero, for a read that
+   * nothing held back.
    */
   queueWaitTotalMs: number;
 };

@@ -76,14 +76,16 @@ describe("Cache read batching", suiteOptions, () => {
         ]),
       );
 
-      // The same lookups through getMany, one call each: one
-      // single-request getMany call each, and the same results.
+      // The same lookups through getMany without the accumulation wait, one
+      // call each. Reads that are ready in the same turn form Store calls
+      // together, so the ten callers still share one Store call. The results
+      // are the same.
       const directResults = await Promise.all(
         requests.map(
           async (req) => (await cache.getMany([req], { autoBatch: false }))[0],
         ),
       );
-      assert.deepEqual(getManyRequestCounts(), [10, ...Array(10).fill(1)]);
+      assert.deepEqual(getManyRequestCounts(), [10, 10]);
       assert.deepEqual(batchedResults, directResults);
     } finally {
       capture.stop();
@@ -246,7 +248,7 @@ describe("Cache read batching", suiteOptions, () => {
     }
   });
 
-  it("with preserveAsyncContext, keeps each batch's first reader context when close forces dispatch", async () => {
+  it("with preserveAsyncContext, runs an accumulation's Store calls in its first reader's context", async () => {
     const context = new AsyncLocalStorage<string>();
     const observed: (string | undefined)[] = [];
     const scheduled: (() => void)[] = [];
@@ -267,14 +269,25 @@ describe("Cache read batching", suiteOptions, () => {
     });
     const a = context.run("reader-a", () => cache.get(lookup("a")));
     const b = context.run("reader-b", () => cache.get(lookup("b")));
-    await context.run("closer", () => cache.close());
+    // One accumulation arms one schedule callback, bound to the context of
+    // the read that opened it. Every Store call of the accumulation runs
+    // there, not in the context that runs the callback.
+    assert.equal(scheduled.length, 1);
+    context.run("scheduler", () => scheduled.forEach((dispatch) => dispatch()));
     await Promise.all([a, b]);
-    assert.deepEqual(observed, ["reader-a", "reader-b"]);
+    assert.deepEqual(observed, ["reader-a", "reader-a"]);
+
+    // A close that makes waiting reads ready does not use that callback, so
+    // their Store call runs in the closer's context.
+    const c = context.run("reader-c", () => cache.get(lookup("c")));
+    await context.run("closer", () => cache.close());
+    await c;
+    assert.deepEqual(observed, ["reader-a", "reader-a", "closer"]);
     // The scheduled callbacks still exist after a forced flush; neither a
     // second close nor invoking those callbacks may execute a batch twice.
     await cache.close();
     context.run("scheduler", () => scheduled.forEach((dispatch) => dispatch()));
-    assert.deepEqual(getManyRequestCounts(), [1, 1]);
+    assert.deepEqual(getManyRequestCounts(), [1, 1, 1]);
   });
 
   it("starts queued reads before close() closes the store", async () => {
@@ -300,6 +313,23 @@ describe("Cache read batching", suiteOptions, () => {
     assert.deepEqual(events, ["getMany", "close"]);
     assert.equal(a?.usable?.content, "a");
     assert.equal(b?.usable, undefined);
+  });
+
+  it("close() makes the waiting reads of an accepted getMany ready", async () => {
+    const { store, getManyRequestCounts } = spiedStore();
+    const cache = cacheOver(store, {
+      // A schedule that never fires, as an owner's may during shutdown.
+      readBatching: { batchScheduleFn: () => {} },
+    });
+
+    const reads = cache.getMany([lookup("a"), lookup("b")]);
+    // Normalization is time-sliced, so the reads queue after a few microtasks.
+    await nextTurn();
+    assert.deepEqual(getManyRequestCounts(), []);
+    await cache.close();
+
+    assert.equal((await reads).length, 2);
+    assert.deepEqual(getManyRequestCounts(), [2]);
   });
 
   it("honors readBatching.batchScheduleFn and maxBatchSize, and never serves a read from a previous batch", async () => {
@@ -428,10 +458,10 @@ describe(
 );
 
 describe(
-  "getMany with autoBatch: false (direct Store reads)",
+  "getMany with autoBatch: false (reads without the accumulation wait)",
   suiteOptions,
   () => {
-    it("dispatches a direct known set without waiting for the automatic queue", async (t) => {
+    it("reads a known set without waiting for the automatic queue", async (t) => {
       const { store, getManyRequestCounts } = spiedStore();
       const scheduled: (() => void)[] = [];
       const cache = cacheOver(store, {
@@ -447,7 +477,7 @@ describe(
       assert.deepEqual(getManyRequestCounts(), [2, 1]);
     });
 
-    it("applies readBatching.maxBatchSize only to automatic accumulation", async (t) => {
+    it("applies readBatching.maxBatchSize to every Store call", async (t) => {
       const { store, getManyRequestCounts } = spiedStore();
       const cache = cacheOver(store, {
         name: "direct-limit",
@@ -455,10 +485,11 @@ describe(
       });
       t.after(async () => await cache.close());
       const ids = ["a", "b", "c", "d", "e"].map((id) => lookup(id));
+      // `autoBatch: false` skips only the wait. The limit still splits the set.
       await cache.getMany(ids, { autoBatch: false });
-      assert.deepEqual(getManyRequestCounts(), [5]);
+      assert.deepEqual(getManyRequestCounts(), [2, 2, 1]);
       await Promise.all(ids.map(async (id) => cache.get(id)));
-      assert.deepEqual(getManyRequestCounts(), [5, 2, 2, 1]);
+      assert.deepEqual(getManyRequestCounts(), [2, 2, 1, 2, 2, 1]);
       const client = wrapProducer({
         cache,
         produceMany: async (requests) =>
@@ -474,7 +505,76 @@ describe(
         { autoBatch: { store: false } },
       );
       await client.close();
-      assert.deepEqual(getManyRequestCounts(), [5, 2, 2, 1, 3]);
+      assert.deepEqual(getManyRequestCounts(), [2, 2, 1, 2, 2, 1, 2, 1]);
+    });
+
+    it("runs at most 10 get calls of one known set at one time on a Store without getMany", async (t) => {
+      const store = new MemoryStore<Spec>();
+      const counts = { running: 0, maxRunning: 0, calls: 0 };
+      const get = store.get.bind(store);
+      t.mock.method(store, "get", async (...args: Parameters<typeof get>) => {
+        counts.calls += 1;
+        counts.running += 1;
+        counts.maxRunning = Math.max(counts.maxRunning, counts.running);
+        await nextTurn();
+        try {
+          return await get(...args);
+        } finally {
+          counts.running -= 1;
+        }
+      });
+      const cache = cacheOver(store);
+      t.after(async () => await cache.close());
+      const requests = Array.from({ length: 25 }, (_, i) =>
+        lookup(`id:${String(i)}`),
+      );
+
+      for (const autoBatch of [undefined, false] as const) {
+        counts.maxRunning = 0;
+        const results = await cache.getMany(requests, { autoBatch });
+        assert.equal(results.length, 25);
+        assert.equal(counts.maxRunning, 10);
+      }
+      assert.equal(counts.calls, 50);
+      // Separate callers are not limited together.
+      counts.maxRunning = 0;
+      await Promise.all(requests.map(async (request) => cache.get(request)));
+      assert.equal(counts.maxRunning, 25);
+    });
+
+    it("stops starting the get calls of a known set after its signal aborts", async (t) => {
+      const store = new MemoryStore<Spec>();
+      const gate = Promise.withResolvers<void>();
+      const get = store.get.bind(store);
+      const read = t.mock.method(
+        store,
+        "get",
+        async (...args: Parameters<typeof get>) => {
+          await gate.promise;
+          return await get(...args);
+        },
+      );
+      const cache = cacheOver(store);
+      t.after(async () => await cache.close());
+      const controller = new AbortController();
+      const reason = new Error("stop");
+
+      const pending = cache.getMany(
+        Array.from({ length: 25 }, (_, i) => lookup(`id:${String(i)}`)),
+        { signal: controller.signal },
+      );
+      const rejected = assert.rejects(pending, reason);
+      await waitUntil(
+        () => read.mock.callCount() === 10,
+        "the first 10 get calls to start",
+      );
+      controller.abort(reason);
+      await rejected;
+      gate.resolve();
+      await cache.close();
+
+      // The 15 reads that the per-set limit still held never reach the Store.
+      assert.equal(read.mock.callCount(), 10);
     });
 
     it("never accumulates single-only Store reads", async (t) => {
@@ -671,7 +771,7 @@ describe("getMany (automatic accumulation by default)", suiteOptions, () => {
 });
 
 describe("get with autoBatch: false", suiteOptions, () => {
-  it("is one Store call of its own, sent before the automatic queue", async (t) => {
+  it("skips the accumulation wait, and leaves the automatic queue waiting", async (t) => {
     const { store, getManyRequestCounts } = spiedStore();
     const scheduled: (() => void)[] = [];
     const cache = cacheOver(store, {
@@ -796,7 +896,8 @@ describe("maxConcurrentStoreReads", suiteOptions, () => {
       await waiting;
 
       const [first, second] = capture.readStore;
-      assert.equal(first!.queueWaitTotalMs, 0);
+      // The real time from submit to the Store call: small, but not 0.
+      assert.ok(first!.queueWaitTotalMs! < 15, "the first read did not wait");
       assert.ok(second!.queueWaitTotalMs! >= 2 * 15, "two requests waited");
       assert.equal(second!.autoBatched, false);
     } finally {

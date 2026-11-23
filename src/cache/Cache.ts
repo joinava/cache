@@ -1,4 +1,4 @@
-import { sumBy } from "es-toolkit";
+import { noop, sumBy } from "es-toolkit";
 import { isNonEmptyArray, mapNonEmpty } from "type-party/runtime/nonempty.js";
 import type { ReadonlyDeep } from "type-fest";
 import type { PickEach } from "type-party";
@@ -54,19 +54,26 @@ import {
 } from "../utils/cacheHelpers.js";
 import type { CacheOptions } from "./CacheOptions.js";
 import { PendingResources } from "./pendingResources.js";
+import pLimit from "p-limit";
 import {
-  Batcher,
-  ConcurrencyLimiter,
+  concurrencyLimit,
+  createDispatcher,
+  fifoBatches,
   PendingPromisesTracker,
+  TimeSliceBudget,
+  type Dispatcher,
+  type Item,
 } from "@zingage/scheduling";
 import {
   readStoreObserved,
   raceWithSignal,
   asError,
   assertUnreachable,
+  cancelWaitingOnAbort,
   isContractError,
-  runLimited,
+  queueWaitMs,
   defaultLoggersByComponent,
+  SINGLE_STORE_READS_PER_SET,
   timeSlicedMapNonEmpty,
 } from "../utils/utils.js";
 import {
@@ -78,7 +85,7 @@ import {
 /**
  * The default `readBatching.maxBatchSize`. It is larger than the producer
  * default (`DEFAULT_MAX_BATCH_SIZE`, 20), because a wrapped `getMany` sends one `Cache.get` per item,
- * and every automatic batch is its own concurrent Store call: a 1,000-item
+ * and every batch is its own concurrent Store call: a 1,000-item
  * set makes 10 Store calls at 100, and 50 at 20. It stays well below a full
  * Postgres chunk (1,000 requests), because stored entries can be large and
  * one call returns every matching payload.
@@ -89,9 +96,12 @@ const DEFAULT_READ_BATCH_SIZE = 100;
 export type ReadOptions = {
   signal?: AbortSignal | undefined;
   /**
-   * `false` sends the call's requests to the Store as one call of their own.
-   * The call then never joins the automatic accumulation, and the batch limit
-   * does not split it. It still waits for a slot under
+   * `false` skips the wait that accumulates an automatic batch: the call's
+   * reads are ready for a Store call at once. It changes only the wait. The
+   * reads still go to the Store in calls of at most
+   * `readBatching.maxBatchSize`, so a large call can be several Store calls,
+   * and a Store call can also carry other callers' reads that are ready at
+   * the same time. The reads still wait for a slot under
    * `maxConcurrentStoreReads`. A Store without `getMany` never accumulates,
    * so the option changes nothing there. `true` is not accepted, because
    * accumulation is already the default.
@@ -140,17 +150,27 @@ export default class Cache<
    */
   readonly #dataStore: Store<SpecOf<RT>, Validators, Params>;
   /**
-   * Batches the reads of `get`. Set iff the Store has getMany. A get-only
-   * Store reads each request directly. Reads never share work (see the Store
-   * read in get), so a batcher is all that reads need.
+   * Runs every Store read. For a Store with `getMany`, reads accumulate into
+   * batches, and each batch is one `getMany` call. For a Store without it,
+   * each read is its own `get` call, ready at once. With
+   * `maxConcurrentStoreReads`, a call waits for a slot. Reads never share
+   * work, because a shared read would replay a freshness decision that was
+   * made at another time (see the comment before the read is submitted in
+   * `#getWithoutPending`). So the dispatcher has no `Sharing` in front of it.
    */
-  readonly #readBatcher: ReadBatcher<RT, Validators, Params> | undefined;
+  readonly #readDispatcher: Dispatcher<
+    StoreRead<RT, Params>,
+    Entry<SpecOf<RT>, Validators, Params>[]
+  >;
   /**
-   * Limits the Store read calls that run at one time. Undefined without
-   * `maxConcurrentStoreReads`. The read batcher and the direct reads share
-   * it, so the limit counts every `getMany` or `get` call to the Store.
+   * True for a Store without `getMany` when the cache has no
+   * `maxConcurrentStoreReads`. Nothing else then bounds the `get` calls of a
+   * known-set read, so `getMany` starts at most
+   * {@link SINGLE_STORE_READS_PER_SET} of its own reads at one time.
+   * Computed once in the constructor, because the cache does not keep the
+   * option.
    */
-  readonly #storeReadLimiter: ConcurrencyLimiter | undefined;
+  readonly #capsEachKnownSet: boolean;
   #closed = false;
   #closePromise: Promise<void> | undefined;
   /**
@@ -158,8 +178,9 @@ export default class Cache<
    * them, then closes the Store. So one tracked operation must cover
    * every step of a public call that ends in a Store call, including steps
    * such as normalization that run before the call starts. Each public call
-   * tracks itself, except batched reads: the read batcher tracks its own
-   * dispatches, and close() drains it first.
+   * tracks itself, except `get`: it submits its read synchronously, and the
+   * read dispatcher tracks every Store call. close() closes the dispatcher
+   * first.
    */
   readonly #operations = new PendingPromisesTracker();
   /**
@@ -258,35 +279,23 @@ export default class Cache<
       Validators,
       Params
     >;
-    this.#storeReadLimiter =
+    const storeReadLimit =
       options.maxConcurrentStoreReads === undefined ||
       options.maxConcurrentStoreReads === Infinity
         ? undefined
-        : new ConcurrencyLimiter(options.maxConcurrentStoreReads);
-    this.#readBatcher =
-      this.#dataStore.getMany === undefined
-        ? undefined
-        : new Batcher({
+        : concurrencyLimit(options.maxConcurrentStoreReads);
+    const hasGetMany = this.#dataStore.getMany !== undefined;
+    this.#readDispatcher = createDispatcher({
+      waiting: hasGetMany
+        ? fifoBatches({
             maxBatchSize: DEFAULT_READ_BATCH_SIZE,
             ...options.readBatching,
-            ...(this.#storeReadLimiter === undefined
-              ? {}
-              : { limiter: this.#storeReadLimiter }),
-            // Keep the `@zingage/cache:batcher` debug namespace by default.
-            logger: options.logger ?? defaultLoggersByComponent.batcher,
-            dispatch: (reads, { autoBatched }) =>
-              this.#readStore(
-                reads.map(({ input }) => input),
-                undefined,
-                {
-                  autoBatched,
-                  queueWaitTotalMs: reads.reduce(
-                    (sum, read) => sum + read.queueWaitMs,
-                    0,
-                  ),
-                },
-              ),
-          });
+          })
+        : undefined,
+      admission: storeReadLimit,
+      invoke: (reads) => this.#readStore(reads),
+    });
+    this.#capsEachKnownSet = !hasGetMany && storeReadLimit === undefined;
     this.#onGetAfterClose = options.onGetAfterClose ?? "throw";
     this.#onStoreAfterClose = options.onStoreAfterClose ?? "throw";
     this.name = options.name;
@@ -403,10 +412,10 @@ export default class Cache<
    *
    * A bulk-capable Store accumulates reads from many `get` and
    * {@link Cache.getMany} calls into shared Store calls. With
-   * `autoBatch: false`, the request is one Store call of its own instead.
+   * `autoBatch: false`, the read skips the accumulation wait.
    *
    * This is a hot path. A wrapped client's `get` calls it once, and a wrapped
-   * `getMany` calls it once per item, and lets the read batcher group the
+   * `getMany` calls it once per item, and lets the read dispatcher group the
    * Store calls. So `get` keeps per-call work small: one request, no per-call
    * arrays, and no time slicing or awaits beyond the Store read. That is why
    * it does not share `getMany`'s pipeline. The two share their per-request
@@ -414,7 +423,7 @@ export default class Cache<
    * lookup.
    *
    * If Store.getMany returns an Error in this request's slot, only this caller
-   * rejects. Other callers in the automatic batch retain their hits or misses.
+   * rejects. Other callers in the batch retain their hits or misses.
    * A rejected store promise rejects every non-cancelled caller in the batch.
    *
    * The result also considers the entries of every `store` call whose write has
@@ -483,47 +492,49 @@ export default class Cache<
     // serves decisions computed against a stale clock. Only a PENDING-only
     // promise share is sound, which bounds the skew to the read's own
     // duration.
-    const read =
-      this.#readBatcher === undefined || options?.autoBatch === false
-        ? // The batcher tracks its own dispatches (`close` drains it), so only
-          // this direct read needs tracking here.
-          this.#operations
-            .run(() => this.#readStore([storeRequest] as const, options))
-            .then(([entries]) => {
-              if (entries instanceof Error) throw entries;
-              return entries;
-            })
-        : this.#readBatcher.enqueue([
-            {
-              input: storeRequest,
-              ...(options?.signal ? { signal: options.signal } : {}),
-            },
-          ])[0]!.result;
+    //
+    // Submitted synchronously, so a close() that starts later waits for the
+    // read: the dispatcher tracks it.
+    const signal = options?.signal;
+    const read = this.#readDispatcher.submit({
+      request: storeRequest,
+      signal,
+      budget: undefined,
+    });
+    if (options?.autoBatch === false) read.expedite();
+    // An abort takes a read that still waits out of the queue. A read whose
+    // Store call has started keeps running, and `raceWithSignal` rejects
+    // this caller at once.
+    const stopCancelling =
+      signal === undefined ? noop : cancelWaitingOnAbort([read], signal);
 
-    const cacheEntries = await raceWithSignal(read, options?.signal).catch(
-      (error: unknown) => {
-        // An *aborted* read is not a failed read: the caller cancelled, and
-        // aborts already emit nothing (the `throwIfAborted` at the top of this
-        // method rejects before any message), so staying silent keeps that
-        // consistent instead of inflating read-failure rates with client
-        // cancellations.
-        if (options?.signal?.aborted !== true) {
-          this.#publishRead(target, readStartedAt, {
-            found: "read-failed",
-            error,
-          });
-        }
+    let cacheEntries: Entry<SpecOf<RT>, Validators, Params>[];
+    try {
+      cacheEntries = await raceWithSignal(read.result, signal);
+    } catch (error) {
+      // An *aborted* read is not a failed read: the caller cancelled, and
+      // aborts already emit nothing (the `throwIfAborted` at the top of this
+      // method rejects before any message), so staying silent keeps that
+      // consistent instead of inflating read-failure rates with client
+      // cancellations.
+      if (signal?.aborted !== true) {
+        this.#publishRead(target, readStartedAt, {
+          found: "read-failed",
+          error,
+        });
+      }
 
-        throw error;
-      },
-    );
+      throw error;
+    } finally {
+      stopCancelling();
+    }
 
     this.#logger("trace", "received entries from the store", {
       resultCount: cacheEntries.length,
     });
 
-    // The batcher is not typed per id, so the entries are narrowed here. The
-    // Store returns only entries for the requested id.
+    // The dispatcher is not typed per id, so the entries are narrowed here.
+    // The Store returns only entries for the requested id.
     return this.#lookup(
       cacheEntries as Entry<SpecForId<SpecOf<RT>, Id>, Validators, Params>[],
       req.directives,
@@ -537,13 +548,14 @@ export default class Cache<
    * Reads a known set of requests. Returns one lookup or Error per request,
    * in request order.
    *
-   * By default, each request joins the automatic accumulation that
-   * {@link Cache.get} uses, as if each were its own `get` call, so the set
-   * can share Store calls with other callers, and the batch limit can split
-   * it. With `autoBatch: false`, the set is one Store call, sent promptly:
-   * it never joins the accumulation, and the batch limit does not split it.
-   * A Store without `getMany` never accumulates. It reads each request with
-   * `get` in both modes.
+   * Each request is its own read, as if each were its own {@link Cache.get}
+   * call, so the set can share Store calls with other callers, and the batch
+   * limit can split it. By default the reads join the automatic
+   * accumulation. With `autoBatch: false` they skip that wait, and are
+   * ready for a Store call at once; the batch limit still splits them. A
+   * Store without `getMany` never accumulates. It reads each request with
+   * its own `get` call in both modes. Without `maxConcurrentStoreReads`,
+   * one call then runs at most 10 of its `get` calls at one time.
    *
    * Preserves positional successes and operational errors. Cancellation and
    * invalid contracts reject the complete public call. Classification and
@@ -592,10 +604,7 @@ export default class Cache<
   }
 
   /**
-   * {@link Cache.getMany} without the pending writes. Both modes share every
-   * step except the Store read itself: {@link Cache.#readDirect} reads the
-   * set as one call, and {@link Cache.#readBatched} reads each request
-   * through the read batcher.
+   * {@link Cache.getMany} without the pending writes.
    */
   async #getManyWithoutPending<
     const Reqs extends readonly ReadonlyConsumerRequest<
@@ -637,9 +646,6 @@ export default class Cache<
     });
     this.#logger("trace", "requested entries from the store");
 
-    const batcher =
-      options?.autoBatch === false ? undefined : this.#readBatcher;
-
     // Store requests retain separate slots, even when their IDs are equal.
     // Freshness belongs to each logical read, never to shared physical work.
     //
@@ -651,9 +657,7 @@ export default class Cache<
         id: req.id,
         params: this.normalizeParams(req.params),
       }));
-      return batcher === undefined
-        ? this.#readStore(storeRequests, options)
-        : this.#readBatched(batcher, storeRequests, options?.signal);
+      return this.#readEach(storeRequests, options);
     });
 
     const cacheEntriesForRequests = await raceWithSignal(
@@ -712,26 +716,63 @@ export default class Cache<
   }
 
   /**
-   * Reads each request through the read batcher, with one `enqueue` call for
-   * the set. Returns one entry array or Error per request, like a Store's
-   * `getMany`, once every read has settled. A read's operational failure
-   * becomes its slot's Error, and the other reads keep their results.
-   * Cancellation and contract errors reject the whole read.
+   * Reads each request of a known set as its own read of the dispatcher.
+   * Returns one entry array or Error per request, like a Store's `getMany`,
+   * once every read has settled. A read's operational failure becomes its
+   * slot's Error, and the other reads keep their results. Cancellation and
+   * contract errors reject the whole read.
+   *
+   * It waits for every read that it submitted, also after the signal aborts,
+   * so that the operation that tracks it covers every Store call that it
+   * caused. The caller races the signal itself.
    */
-  async #readBatched(
-    batcher: ReadBatcher<RT, Validators, Params>,
+  async #readEach(
     storeRequests: readonly StoreGetManyRequest<SpecOf<RT>, Params>[],
-    signal: AbortSignal | undefined,
+    options: ReadOptions | undefined,
   ): Promise<(Entry<SpecOf<RT>, Validators, Params>[] | Error)[]> {
+    const signal = options?.signal;
     signal?.throwIfAborted();
-    const reads = batcher.enqueue(
-      storeRequests.map((input) =>
-        signal === undefined ? { input } : { input, signal },
-      ),
+
+    // A Store without `getMany` gets one `get` call per read. The calls of
+    // one set share a time-slice budget, so a large set on a synchronous
+    // Store still yields to the event loop.
+    const budget = this.#dataStore.getMany ? undefined : new TimeSliceBudget();
+    const inputs = storeRequests.map(
+      (request): StoreRead<RT, Params> => ({ request, signal, budget }),
     );
-    // allSettled waits for every read, so a failure in one automatic batch
-    // does not hide the results of the others.
-    const settled = await Promise.allSettled(reads.map(({ result }) => result));
+
+    const { results, stopCancelling } = (() => {
+      if (this.#capsEachKnownSet) {
+        // These reads never wait in the dispatcher, so they need no
+        // cancellation there. A read that the limit still holds when the
+        // signal aborts fails before it reaches the Store: each read is its
+        // own Store call, which gets the signal (see `#readStore`).
+        const limit = pLimit(SINGLE_STORE_READS_PER_SET);
+        return {
+          results: inputs.map(async (input) =>
+            limit(async () => this.#readDispatcher.submit(input).result),
+          ),
+          stopCancelling: noop,
+        };
+      }
+
+      const reads = this.#readDispatcher.submitMany(inputs);
+      if (options?.autoBatch === false) {
+        reads.forEach((read) => {
+          read.expedite();
+        });
+      }
+      return {
+        results: reads.map(({ result }) => result),
+        // An abort takes the reads that still wait out of the queue.
+        stopCancelling: cancelWaitingOnAbort(reads, signal),
+      };
+    })();
+
+    // allSettled waits for every read, so a failure in one Store call does
+    // not hide the results of the others. It never rejects.
+    const settled = await Promise.allSettled(results);
+    stopCancelling();
     signal?.throwIfAborted();
 
     return settled.map((read) => {
@@ -896,13 +937,18 @@ export default class Cache<
     if (this.#closePromise !== undefined) return this.#closePromise;
 
     this.#closed = true;
-    // A batched read that `get()` accepted before this call still runs. The
-    // batcher's close sends the queued ones synchronously, and waits for
-    // every read it accepted.
-    const readsClosed = this.#readBatcher?.close();
+    // A read that `get()` submitted before this call still runs. Make the
+    // waiting reads ready now, so that no accepted call waits for a schedule
+    // that may never fire.
+    this.#readDispatcher.flush();
     this.#closePromise = (async () => {
-      await readsClosed;
+      // An accepted `getMany` can still submit reads, after it normalized
+      // its requests. So the dispatcher closes only after the accepted
+      // operations finish: its close resolves once, and would not wait for
+      // reads that are submitted later. No call is accepted after this
+      // point, so nothing submits a read after the drain.
       await this.#operations.drain();
+      await this.#readDispatcher.close();
       await this.#dataStore.close();
     })();
 
@@ -969,36 +1015,53 @@ export default class Cache<
     ).result;
   }
 
-  #readStore<
-    const Requests extends readonly StoreGetManyRequest<SpecOf<RT>, Params>[],
-  >(
-    requests: Requests,
-    options?: ReadOptions,
-    batch?: { autoBatched: boolean; queueWaitTotalMs: number },
-  ) {
-    const observed = cacheReadStoreChannel.hasSubscribers;
-    const limiter = this.#storeReadLimiter;
+  /**
+   * Runs one Store call for the reads that the dispatcher took, and
+   * publishes its `read-store` message.
+   *
+   * A call is automatic unless every read in it was expedited. Only a Store
+   * with `getMany` accumulates reads, so no call to a Store without it is
+   * automatic.
+   *
+   * The Store gets a signal only for a call that is not automatic and whose
+   * reads all carry the same signal. Then only callers that cancelled can
+   * lose the call. An automatic call, or one whose reads carry different
+   * signals, gets no signal: it always completes, and each caller races its
+   * own signal.
+   */
+  async #readStore(
+    reads: readonly Item<
+      StoreRead<RT, Params>,
+      Entry<SpecOf<RT>, Validators, Params>[]
+    >[],
+  ): Promise<(Entry<SpecOf<RT>, Validators, Params>[] | Error)[]> {
+    const autoBatched =
+      this.#dataStore.getMany !== undefined &&
+      reads.some((read) => !read.expedited);
+    const first = reads[0]?.input;
+    const signal =
+      autoBatched || reads.some(({ input }) => input.signal !== first?.signal)
+        ? undefined
+        : first?.signal;
+
     return readStoreObserved(
       this.#dataStore,
-      requests,
-      options,
-      // A batch already holds its slot: the batcher took it before this call.
-      batch === undefined && limiter !== undefined
-        ? (call) => runLimited(limiter, call, options?.signal)
-        : undefined,
-      observed
+      reads.map(({ input }) => input.request),
+      // Only the reads of a Store without `getMany` have a budget, and each
+      // of them is its own call.
+      { signal, budget: first?.budget },
+      cacheReadStoreChannel.hasSubscribers
         ? (event) => {
             cacheReadStoreChannel.publish({
               cache: this.name,
               operation: event.operation,
-              autoBatched: batch?.autoBatched ?? false,
+              autoBatched,
               outcome: event.outcome,
               requestCount: event.requestCount,
               failedRequestCount: event.failedRequestCount,
               entryCount: event.entryCount,
               durationMs: event.durationMs,
-              queueWaitTotalMs:
-                batch?.queueWaitTotalMs ?? event.queueWaitTotalMs,
+              queueWaitTotalMs: sumBy(reads, queueWaitMs),
             });
           }
         : undefined,
@@ -1053,15 +1116,17 @@ export default class Cache<
   }
 }
 
-/** The batcher of a cache's Store reads: one entry array per request. */
-type ReadBatcher<
-  RT extends ResourceTypes,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-> = Batcher<
-  StoreGetManyRequest<SpecOf<RT>, Params>,
-  Entry<SpecOf<RT>, Validators, Params>[]
->;
+/** One Store read, as the read dispatcher holds it. */
+type StoreRead<RT extends ResourceTypes, Params extends AnyParams> = {
+  readonly request: StoreGetManyRequest<SpecOf<RT>, Params>;
+  /** The signal of the call that made the read. See `Cache.#readStore`. */
+  readonly signal: AbortSignal | undefined;
+  /**
+   * The time-slice budget of the known-set read that made this read, for a
+   * Store without `getMany`. Undefined for any other read.
+   */
+  readonly budget: TimeSliceBudget | undefined;
+};
 
 /** One request of a read, as its `read` message and trace logs name it. */
 type ReadTarget = {

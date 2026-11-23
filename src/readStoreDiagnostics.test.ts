@@ -12,6 +12,12 @@ import {
 import { captureChannels, freshFor100 } from "../test/v2AcceptanceHelpers.js";
 import MemoryStore from "./stores/MemoryStore/MemoryStore.js";
 
+/**
+ * An upper bound for the queue wait of a read that nothing held back. The
+ * wait is the real time from submit to the Store call, so it is not exactly 0.
+ */
+const SOON_MS = 15;
+
 describe("read dispatch diagnostics", () => {
   it("separates queue wait, physical dispatch duration, and logical wait", async (t) => {
     const clock = { now: 50 };
@@ -74,7 +80,8 @@ describe("read dispatch diagnostics", () => {
     assert.equal(capture.readStore.length, 1);
     assert.equal(capture.readStore[0]?.outcome, "failure");
     assert.equal(capture.readStore[0]?.failedRequestCount, 2);
-    assert.equal(capture.readStore[0]?.queueWaitTotalMs, 0);
+    // The real time from submit to the Store call: small, but not 0.
+    assert.ok(capture.readStore[0]!.queueWaitTotalMs! < SOON_MS);
     assert.equal(capture.readStore[0]?.autoBatched, false);
   });
 });
@@ -122,9 +129,74 @@ describe("read-store channel", suiteOptions, () => {
       assert.equal(message?.failedRequestCount, 0);
       assert.equal(message?.requestCount, 1);
       assert.equal(message?.entryCount, 0);
-      assert.equal(message?.queueWaitTotalMs, 0);
+      assert.ok(message!.queueWaitTotalMs! < SOON_MS);
     });
   }
+
+  it("does not cancel a Store call that carries the reads of two callers", async (t) => {
+    const gate = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const { store, getManyRequestCounts } = spiedStore({
+      beforeGetMany: async () => {
+        started.resolve();
+        await gate.promise;
+      },
+    });
+    const cache = cacheOver(store, { name: "direct-mixed-cancel" });
+    const capture = captureChannels(cache.name);
+    t.after(async () => {
+      capture.stop();
+      await cache.close();
+    });
+    const controller = new AbortController();
+    // Both reads skip the accumulation wait in one turn, so they share one
+    // Store call. Only one of the two callers has this signal, so the Store
+    // call does not get it.
+    const cancelled = cache.get(lookup("a"), {
+      signal: controller.signal,
+      autoBatch: false,
+    });
+    const kept = cache.get(lookup("b"), { autoBatch: false });
+    const rejected = assert.rejects(cancelled);
+    await started.promise;
+    controller.abort();
+    await rejected;
+    gate.resolve();
+    assert.equal((await kept).usable, undefined);
+
+    assert.deepEqual(getManyRequestCounts(), [2]);
+    assert.equal(capture.readStore.length, 1);
+    assert.equal(capture.readStore[0]?.outcome, "success");
+    assert.equal(capture.readStore[0]?.autoBatched, false);
+  });
+
+  it("reports a Store call as automatic unless every read in it skipped the wait", async (t) => {
+    const { store, getManyRequestCounts } = spiedStore();
+    const scheduled: (() => void)[] = [];
+    const cache = cacheOver(store, {
+      name: "mixed-auto-batched",
+      readBatching: { batchScheduleFn: (run) => scheduled.push(run) },
+    });
+    const capture = captureChannels(cache.name);
+    t.after(async () => {
+      capture.stop();
+      await cache.close();
+    });
+
+    const accumulated = cache.get(lookup("a"));
+    // The schedule makes "a" ready in the turn in which "b" skips the wait,
+    // so one Store call takes both.
+    const direct = cache.get(lookup("b"), { autoBatch: false });
+    scheduled.forEach((run) => run());
+    await Promise.all([accumulated, direct]);
+    await cache.get(lookup("c"), { autoBatch: false });
+
+    assert.deepEqual(getManyRequestCounts(), [2, 1]);
+    assert.deepEqual(
+      capture.readStore.map(({ autoBatched }) => autoBatched),
+      [true, false],
+    );
+  });
 
   for (const mode of ["automatic", "direct"] as const) {
     it(`reports partial slots as failure for ${mode} reads`, async (t) => {

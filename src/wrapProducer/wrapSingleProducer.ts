@@ -1,8 +1,8 @@
 /**
  * @fileoverview The client for a single-request producer (`produce`). It
- * shares pending work between requests, and sends each started task to the
- * producer as its own invocation. A single producer has nothing to batch,
- * so it needs no batcher. See producerScheduler.ts for the parts.
+ * shares pending work between requests, and sends each unit of work to the
+ * producer as its own call. A single producer has nothing to batch, so its
+ * work never accumulates. See producerScheduler.ts for the parts.
  *
  * @module
  */
@@ -21,12 +21,6 @@ import {
   type ProducerClientOptions,
   type WrappedProducerClient,
 } from "./producerClient.js";
-import {
-  createProducerScheduler,
-  immediateSender,
-  type ProducerScheduler,
-  type ProducerSchedulerOptions,
-} from "./producerScheduler.js";
 
 /**
  * Wraps a single-request producer. `wrapProducer` calls it for `produce`, and
@@ -46,20 +40,6 @@ export function wrapSingleProducer<
   return createProducerClient<RT, Covered, Validators, Params>(options, {
     producer: produce,
     call: async (requests) => [await looseProduce(requests[0]!)],
-    makeScheduler: singleProducerScheduler,
+    batching: undefined,
   });
-}
-
-/**
- * The scheduler of a single-request producer: requests with the same key
- * share one task, and each started task is its own producer invocation.
- * Nothing accumulates, so it has no `startOrRideDirect`. With a limiter, a
- * task can wait for a slot.
- *
- * @internal
- */
-export function singleProducerScheduler<Work, Produced>(
-  options: ProducerSchedulerOptions<Work, Produced>,
-): ProducerScheduler<Work, Produced> {
-  return createProducerScheduler(options, immediateSender(options));
 }

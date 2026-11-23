@@ -1925,6 +1925,8 @@ describe("diagnostics channels (§6.5)", () => {
           assert.equal(capture.fetch.length, 0);
           clock.now = 5;
           dispatch();
+          // The producer call starts in a microtask after the schedule runs.
+          await nextTurn();
           clock.now = 12;
           producerGate.resolve();
           assert.equal((await result).length, 3);
