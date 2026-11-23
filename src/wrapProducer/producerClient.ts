@@ -2,20 +2,21 @@
  * @fileoverview The client that both producer wrappers share:
  * `wrapSingleProducer` and `wrapBulkProducer`. It reads the cache, overlays
  * pending writes, shares and sends producer work through a
- * {@link ProducerScheduler}, stores produced resources, and publishes
- * diagnostics. A wrapper supplies only what differs: how to call its producer,
- * and the scheduler that sends the work.
+ * {@link ProducerScheduler} (producerScheduler.ts), stores produced
+ * resources, and publishes diagnostics. A wrapper supplies only what
+ * differs: how to call its producer, and the scheduler that sends the work.
  *
- * The runtime helpers that the client needs live here too, so that the runtime
- * import graph stays acyclic: `wrapProducer` imports the wrappers, which import
- * this module, whose edge back to `wrapProducer` is type-only.
- * `wrapProducer` re-exports the ones its importers use.
+ * The client's option and result types and the runtime helpers that it needs
+ * live here too, so that imports run one way: `wrapProducer` imports the
+ * wrappers, which import this module, which imports none of them.
+ * `wrapProducer` re-exports the public types.
  *
  * @module
  */
 import { sumBy } from "es-toolkit";
 import stableStringify from "safe-stable-stringify";
 import type { ReadonlyDeep } from "type-fest";
+import type { PublicInterface } from "type-party";
 
 import {
   AmbiguousResourceTypeError,
@@ -29,7 +30,9 @@ import {
   type CacheFetchDisposition,
   type CacheProduceMessage,
 } from "../diagnostics.js";
+import type Cache from "../cache/Cache.js";
 import type {
+  IdOfResourceType,
   ResourceTypeName,
   ResourceTypes,
   SpecOf,
@@ -39,12 +42,23 @@ import type {
   AnyValidators,
   ConsumerDirectives,
   Entry,
+  EntryForId,
   Logger,
   PartialReadonlyConsumerRequest,
   ProducerResultResource,
 } from "../types/index.js";
 import type { CacheLookupResult } from "../utils/cacheHelpers.js";
-import { PendingPromisesTracker, type DispatchInfo } from "@zingage/scheduling";
+import {
+  ConcurrencyLimiter,
+  PendingPromisesTracker,
+} from "@zingage/scheduling";
+import type {
+  DispatchedRequest,
+  ProducerScheduler,
+  ProducerSchedulerOptions,
+  SchedulerRequest,
+  TaskOutcome,
+} from "./producerScheduler.js";
 import {
   completeRequest,
   type ReachesProducerAsIs,
@@ -62,11 +76,6 @@ import {
 import type { SpecForId } from "../types/00_CacheSpec.js";
 import type { LooseRequestFor, LooseResultFor } from "../types/05_Producer.js";
 import { coveredTypes } from "../types/index.js";
-import type {
-  WrappedProducerClient,
-  WrappedReadOptions,
-  ProducerClientOptions,
-} from "./wrapProducer.js";
 import {
   msSince,
   performanceNow,
@@ -155,6 +164,139 @@ export function rethrowUnroutableWithCacheName(
     }
   }
 }
+
+/**
+ * The options that every producer wrapper takes: all of `WrapProducerOptions`
+ * except `producerBatching`, which only a bulk producer uses (see
+ * `BulkProducerOptions` in wrapBulkProducer.ts). The single wrapper and the
+ * shared client take this type, so neither can read batch settings that do
+ * not apply to it.
+ */
+export type ProducerClientOptions<
+  RT extends ResourceTypes,
+  Validators extends AnyValidators = AnyValidators,
+  Params extends AnyParams = AnyParams,
+> = {
+  /**
+   * REQUIRED. An instance of the cache class. This is where values returned by
+   * the producer will actually be stored, and it is the inference site for
+   * `RT`/`Validators`/`Params` (see {@link Cache.resourceTypes} for why a
+   * bare-`RT` member is needed for that at all).
+   */
+  cache: PublicInterface<Cache<RT, Validators, Params>>;
+  /**
+   * Operational cache read failures call the producer by default. "throw"
+   * returns an Error slot instead; scalar calls reject. Cancellation and
+   * package contract violations never use this fallback. A cache outage can
+   * multiply origin load: a 95% hit rate becomes 20 times as much production.
+   * Choose this policy against the origin's capacity and load shedding.
+   */
+  onCacheReadFailure?: "throw" | "call-producer";
+  /**
+   * Maximum joining age in seconds for compatible pending work. Defaults to 3.
+   *
+   * Overlapping requests that would all go to the producer (because no cached
+   * value satisfies them) can share one producer request. The wrapper then
+   * uses that one response for all of them. A request always joins pending
+   * work that still waits, in a batch or for a slot under
+   * `maxConcurrentProducerCalls`. It joins work whose producer call has
+   * started only when that call started no more than
+   * `collapseOverlappingRequestsTime` seconds earlier. Otherwise, a new
+   * request goes to the producer.
+   */
+  collapseOverlappingRequestsTime?: number;
+  /**
+   * The most producer calls that run at one time: `produce` calls, or
+   * `produceMany` calls. A positive integer. Defaults to no limit.
+   *
+   * Work that waits for a slot stays queued, in arrival order. Other
+   * requests can still join it, and it leaves the queue when every request
+   * on it is cancelled. For `produceMany`, an automatic batch keeps taking
+   * work until it is full, so a busy producer gets fuller batches, not more
+   * calls. A call with `autoBatch.producer: false` also waits for a slot,
+   * and so does a background refresh. The wait counts as queue time in the
+   * `produce` message, not as producer time.
+   *
+   * A limit inside the producer function, for example `pLimit`, cannot do
+   * this: the wrapper then counts waiting work as running.
+   */
+  maxConcurrentProducerCalls?: number;
+  /**
+   * A custom logger to use (optional).
+   */
+  logger?: Logger;
+};
+
+export type WrappedReadOptions = {
+  signal?: AbortSignal;
+  /**
+   * Turns off automatic accumulation for this call, at either stage. `true`
+   * is not accepted, because accumulation is already the default where the
+   * stage supports it.
+   *
+   * - `store: false` reads the call's requests as one Store call of their
+   *   own (see `ReadOptions.autoBatch` on `Cache`).
+   * - `producer: false` sends the call's producer work as one `produceMany`
+   *   call of its own, whatever the `producerBatching` limit. A `getMany`
+   *   call first waits until all of its requests are read from the cache. A
+   *   `produce` producer never accumulates, so the option changes nothing
+   *   there.
+   */
+  autoBatch?: { store?: false; producer?: false };
+  /**
+   * `false` keeps this call from joining producer work whose producer call
+   * has already started. Use it for a read that must see a change that the
+   * caller just made, together with `maxAge: 0`: a producer call that started
+   * before the change can return the old value.
+   *
+   * The call still joins work that waits, in a batch or for a slot, because
+   * that producer call starts after this call. Later callers can join the
+   * work that this call starts. Requests of one call with the same key
+   * always share one task.
+   */
+  joinInFlight?: false;
+  onStore?: OnStore;
+};
+
+/**
+ * What `wrapProducer` returns. Named because the facade, both variant
+ * wrappers, and the closing cast in {@link createProducerClient} all spell it,
+ * and the cast is the only thing that would notice them disagreeing.
+ */
+export type WrappedProducerClient<
+  RT extends ResourceTypes,
+  Covered extends ResourceTypeName<RT>,
+  Validators extends AnyValidators,
+  Params extends AnyParams,
+> = {
+  // Generic over the request's id, so the result's content type narrows to
+  // the covered spec variants compatible with that id.
+  get: <Id extends IdOfResourceType<RT[Covered]>>(
+    request: PartialReadonlyConsumerRequest<Params, Id>,
+    options?: WrappedReadOptions,
+  ) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>>;
+  // Generic over the requests' ids, so each output slot's content type narrows
+  // to the covered spec variants compatible with its request's id.
+  getMany: <
+    const Requests extends readonly PartialReadonlyConsumerRequest<
+      Params,
+      IdOfResourceType<RT[Covered]>
+    >[],
+  >(
+    requests: Requests,
+    options?: WrappedReadOptions,
+  ) => Promise<{
+    -readonly [K in keyof Requests]:
+      | EntryForId<
+          SpecOf<RT>,
+          Validators,
+          Params,
+          Extract<Requests[K]["id"], SpecOf<RT>["id"]>
+        >
+      | Error;
+  }>;
+  close: () => Promise<void>;
+};
 
 /**
  * Lets an outer wrapper pass its own call start time in the read options, so
@@ -248,93 +390,6 @@ export type LooseEntryFor<
   Validators extends AnyValidators,
   Params extends AnyParams,
 > = Entry<SpecForId<SpecOf<RT>, SpecOf<RT>["id"]>, Validators, Params>;
-
-/** One task as a {@link ProducerScheduler} hands it to `dispatch`. */
-export type DispatchedRequest<Work> = {
-  /**
-   * The work of the request that STARTED the task. Requests that ride the
-   * task never replace it, so per-request labels such as a producer trigger
-   * keep the starting request's value.
-   */
-  readonly request: Work;
-  /**
-   * The number of requests that have ridden the task so far. Each one is a
-   * request that sharing served without starting new work. The request that
-   * started the task does not count, and a cancelled rider still does. Live:
-   * read it at publish time, so that requests that ride the task while it runs
-   * count too.
-   */
-  readonly collapsedRequestCount: () => number;
-  /**
-   * Milliseconds the task waited in the automatic queue. 0 for a task that
-   * was sent at once.
-   */
-  readonly queueWaitMs: number;
-};
-
-/** What the shared client gives a {@link ProducerScheduler} when it builds it. */
-export type ProducerSchedulerOptions<Work, Produced> = {
-  /**
-   * The caller's logger, or undefined to let the scheduler pick its default.
-   * The bulk scheduler passes it to its `Batcher`, which warns about work
-   * started after `close` under its own component.
-   */
-  logger: Logger | undefined;
-  /**
-   * A new request rides a pending task with the same key only if that task
-   * started no more than this many milliseconds ago.
-   */
-  collapseTasksMs: number;
-  /**
-   * Converts a request into the key that decides which pending task it may
-   * ride. `undefined` means the request must not share work with any other:
-   * it then starts its own task.
-   */
-  makeKey: (work: Work) => string | undefined;
-  /**
-   * Runs one producer invocation for the given tasks. Its `info` describes
-   * the whole invocation. It resolves with one result or Error per task, in
-   * order. A rejection fails every task in the invocation.
-   */
-  dispatch: (
-    tasks: readonly DispatchedRequest<Work>[],
-    info: DispatchInfo,
-  ) => Promise<readonly (Produced | Error)[]>;
-};
-
-/**
- * Shares pending producer work between independent requests, and sends it.
- * Each wrapper has its own: a single producer sends each task at once, and a
- * bulk producer batches the tasks. Dispatched work always completes.
- */
-export type ProducerScheduler<Work, Produced> = {
-  /**
-   * Starts or rides a task for each request. Reports for each request whether
-   * it `rode` a pending task (true) or started one (false). A request without
-   * a signal can never be cancelled, so the task it starts or rides can never
-   * be cancelled either. Automatic work may wait in a batch.
-   */
-  startOrRideTasks(
-    requests: readonly { request: Work; signal?: AbortSignal | undefined }[],
-  ): { promise: Promise<Produced>; rode: boolean }[];
-  /**
-   * Like `startOrRideTasks`, but sends the call's tasks at once, together with
-   * the queued tasks that it rides, as one invocation. Only a scheduler whose
-   * automatic work waits in batches has it. A call with
-   * `autoBatch.producer: false` then collects all of its producer work, and
-   * sends it with one `startOrRideDirect` call.
-   */
-  startOrRideDirect?(
-    requests: readonly { request: Work; signal?: AbortSignal | undefined }[],
-  ): { promise: Promise<Produced>; rode: boolean }[];
-  flush(): void;
-  /**
-   * Flushes, then waits until no task is queued or running. The client calls
-   * it once it stops starting or riding tasks. Work started after it finishes
-   * logs a warning.
-   */
-  close(): Promise<void>;
-};
 
 /** What a producer wrapper gives the shared client. */
 export type ProducerBinding<
@@ -459,6 +514,12 @@ type SlotRecord<E> = {
   readonly write: Promise<void> | undefined;
 };
 
+/** What the slots of one public call share. */
+type CallContext = {
+  readonly signal: AbortSignal | undefined;
+  readonly joinInFlight: false | undefined;
+};
+
 /**
  * The scheduler request for a slot that needs producer work. The trigger
  * labels the invocation's INITIATING cause; if this request instead rides an
@@ -474,11 +535,12 @@ function producerTask<Request>(
     readonly bypass: boolean;
   },
   decision: ProducerSlotDecision<unknown>,
-  signal: AbortSignal | undefined,
-): {
-  request: { request: Request; resourceType: string; trigger: ProducerTrigger };
-  signal?: AbortSignal | undefined;
-} {
+  { signal, joinInFlight }: CallContext,
+): SchedulerRequest<{
+  request: Request;
+  resourceType: string;
+  trigger: ProducerTrigger;
+}> {
   const background = decision.action === "serve-and-refresh";
   return {
     request: {
@@ -486,7 +548,8 @@ function producerTask<Request>(
       resourceType: item.resourceType,
       trigger: item.bypass ? "bypass" : background ? "revalidation" : "miss",
     },
-    ...(background ? {} : { signal }),
+    signal: background ? undefined : signal,
+    joinInFlight,
   };
 }
 
@@ -812,6 +875,11 @@ export function createProducerClient<
   // collapse onto it share it).
   const scheduler = makeScheduler<Work, Produced>({
     logger: options.logger,
+    limiter:
+      options.maxConcurrentProducerCalls === undefined ||
+      options.maxConcurrentProducerCalls === Infinity
+        ? undefined
+        : new ConcurrencyLimiter(options.maxConcurrentProducerCalls),
     collapseTasksMs: collapseOverlappingRequestsTime * 1000,
     makeKey: ({ request }) =>
       producerTaskKey(request, (params) => cache.normalizeParams(params)),
@@ -892,285 +960,469 @@ export function createProducerClient<
     },
   });
 
-  // Undefined for a scheduler that sends every task at once.
+  // Undefined for a scheduler whose sender never accumulates work.
   const startDirect = scheduler.startOrRideDirect?.bind(scheduler);
 
-  const run = async (
-    requests: readonly PartialReadonlyConsumerRequest<
-      Params,
-      SpecOf<RT>["id"]
-    >[],
-    callOptions: ClientReadOptions = {},
-    startedAt = performanceNow(),
-  ): Promise<(ResultEntry | Error)[]> => {
-    const { signal } = callOptions;
-    const batching = callOptions.autoBatch;
+  // The rest of the client is a set of small steps that `get` and `getMany`
+  // compose. Each call prepares its items, reads and decides each slot,
+  // executes each slot with a `ProducerStarter`, and publishes each slot's
+  // message. `get` runs the steps for one item, with no per-call arrays.
+  // `getMany` maps them over its items. The steps are built once per client,
+  // not once per call.
 
-    // Classify every ID before dispatch. Contract failures never become slot errors.
-    // Classify once per request: the result dispatches to the producer AND
-    // stamps `resourceType` on the fetch/produce messages, so dispatch and
-    // telemetry cannot disagree.
-    const items = requests.map((input) => {
-      const request: Request = completeRequest(input);
-      const resourceType = cache.classify(request.id);
-      // A classified type outside this wrapper's DECLARED coverage throws
-      // BEFORE any cache read (see NoProducerForResourceTypeError's docs).
-      // Skipped entirely for a bare producer, which declares no covered set
-      // because it covers the whole registry.
-      assertResourceTypeCovered(cache.name, covered, resourceType, request.id);
+  /** One request of a call, prepared for its slot. */
+  type Item = {
+    readonly request: Request;
+    readonly resourceType: string;
+    readonly bypass: boolean;
+    /**
+     * Whether the slot's request rode a pending task. Only a slot that waits
+     * for the producer sets it. It lives here, not in the slot's record,
+     * because an aborted slot returns no record, but its `aborted` message
+     * still reports it.
+     */
+    rode: boolean;
+  };
 
-      const bypass = isRequestingCacheBypass(request.directives);
+  // Classify every ID before dispatch. Contract failures never become slot
+  // errors. Classify once per request: the result dispatches to the producer
+  // AND stamps `resourceType` on the fetch/produce messages, so dispatch and
+  // telemetry cannot disagree.
+  const prepare = (
+    input: PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>,
+  ): Item => {
+    const request: Request = completeRequest(input);
+    const resourceType = cache.classify(request.id);
+    // A classified type outside this wrapper's DECLARED coverage throws
+    // BEFORE any cache read (see NoProducerForResourceTypeError's docs).
+    // Skipped entirely for a bare producer, which declares no covered set
+    // because it covers the whole registry.
+    assertResourceTypeCovered(cache.name, covered, resourceType, request.id);
 
-      return {
-        request,
-        resourceType,
-        bypass,
-      };
-    });
-    // Whether each slot's request rode a pending task. Only a slot that waits
-    // for the producer sets it. It is kept outside the slot's record because
-    // an aborted slot returns no record, but its `aborted` message still
-    // reports it.
-    const rodeBySlot = items.map(() => false);
-
-    // Every abort-caused rejection settles each logical request as `aborted`,
-    // whether the call was aborted before its reads or while its slots ran.
-    const publishAborted = () => {
-      items.forEach((item, index) =>
-        publishCacheFetch({
-          cache: cache.name,
-          resourceType: item.resourceType,
-          resourceId: item.request.id,
-          collapsed: rodeBySlot[index]!,
-          disposition: "aborted",
-          directivesImpliedBypass: item.bypass,
-          durationMs: msSince(startedAt),
-        }),
-      );
+    return {
+      request,
+      resourceType,
+      bypass: isRequestingCacheBypass(request.directives),
+      rode: false,
     };
-    if (signal?.aborted) {
-      publishAborted();
-      signal.throwIfAborted();
+  };
+
+  // Every abort-caused rejection settles each logical request as `aborted`,
+  // whether the call was aborted before its reads or while its slots ran.
+  const publishAborted = (item: Item, startedAt: PerformanceNow) => {
+    publishCacheFetch({
+      cache: cache.name,
+      resourceType: item.resourceType,
+      resourceId: item.request.id,
+      collapsed: item.rode,
+      disposition: "aborted",
+      directivesImpliedBypass: item.bypass,
+      durationMs: msSince(startedAt),
+    });
+  };
+
+  const publishFetch = (
+    item: Item,
+    fetch: CacheFetchDisposition,
+    startedAt: PerformanceNow,
+  ) => {
+    publishCacheFetch({
+      cache: cache.name,
+      resourceType: item.resourceType,
+      resourceId: item.request.id,
+      collapsed: item.rode,
+      ...fetch,
+      durationMs: msSince(startedAt),
+    });
+  };
+
+  /**
+   * The decision of a slot with no cached candidate: a bypass request, which
+   * skips the cache read entirely (see `wrapProducer`'s docs), or a failed
+   * read that falls through to the producer.
+   */
+  const PRODUCE_UNCACHED: SlotDecision<ResultEntry> = {
+    action: "produce",
+    ifError: undefined,
+  };
+
+  /** A slot's decision, or a promise for it when the slot reads the cache. */
+  type Decided = SlotDecision<ResultEntry> | Promise<SlotDecision<ResultEntry>>;
+
+  /**
+   * Decides one slot from its cache read. It rejects only for an abort or a
+   * contract violation, which reject the whole public call.
+   */
+  const decide = async (
+    read: Promise<Lookup>,
+    signal: AbortSignal | undefined,
+  ): Promise<SlotDecision<ResultEntry>> => {
+    let lookup: Lookup;
+    try {
+      lookup = await read;
+    } catch (error) {
+      // If the error was the signal being aborted, propagate that (as an
+      // `aborted` settlement); don't assume a read failure.
+      signal?.throwIfAborted();
+      if (isContractError(error)) throw error;
+      // For "call-producer", act as if the cache returned no results, so
+      // that the slot falls through to the producer.
+      return onCacheReadFailure === "throw"
+        ? { action: "fail", error: asError(error) }
+        : PRODUCE_UNCACHED;
+    }
+    return decideSlot(lookup);
+  };
+
+  /**
+   * Reads and decides every item of a `getMany` call. Automatic reads settle
+   * independently, when their own Store call finishes, with no whole-set
+   * barrier. With `autoBatch.store: false`, the non-bypass items are one
+   * Cache call.
+   */
+  const decideAll = (
+    items: readonly Item[],
+    callOptions: ClientReadOptions,
+  ): Decided[] => {
+    const { signal } = callOptions;
+    if (callOptions.autoBatch?.store !== false) {
+      const readOptions = { signal };
+      return items.map((item) =>
+        item.bypass
+          ? PRODUCE_UNCACHED
+          : decide(cache.get(item.request, readOptions), signal),
+      );
     }
 
     const eligible = items.filter(({ bypass }) => !bypass);
+    if (eligible.length === 0) return items.map(() => PRODUCE_UNCACHED);
 
-    // A direct known set uses one Cache call. Automatic reads settle independently
-    // when their own Store invocation finishes, without a whole-set barrier.
-    const directReads =
-      batching?.store === false && eligible.length > 0
-        ? cache.getUnbatched(
-            eligible.map(({ request }) => request),
-            { signal },
-          )
-        : undefined;
-    const readByItem = new Map(
-      eligible.map((item, index) => [
-        item,
-        directReads === undefined
-          ? cache.get(item.request, { signal })
-          : directReads.then((results) => {
-              const result = results[index]!;
-              if (result instanceof Error) throw result;
-              return result;
-            }),
-      ]),
+    const reads = cache.getMany(
+      eligible.map(({ request }) => request),
+      { signal, autoBatch: false },
     );
-
-    const lookups = items.map(async (item): Promise<Lookup | Error> => {
-      // Bypass requests skip the cache read entirely (see `wrapProducer`'s docs).
-      if (item.bypass) return { validatable: [] };
-
-      try {
-        return await readByItem.get(item)!;
-      } catch (error) {
-        // If the error was the signal being aborted, propagate that (as an
-        // `aborted` settlement); don't assume a read failure.
-        signal?.throwIfAborted();
-        if (isContractError(error)) throw error;
-        // For "call-producer", pretend the cache returned no results so that
-        // we'll fall through to the producer.
-        return onCacheReadFailure === "throw"
-          ? asError(error)
-          : { validatable: [] };
-      }
+    const eligibleIndexes = new Map(
+      eligible.map((item, index) => [item, index]),
+    );
+    return items.map((item) => {
+      const index = eligibleIndexes.get(item);
+      if (index === undefined) return PRODUCE_UNCACHED;
+      return decide(
+        reads.then((results) => {
+          const result = results[index]!;
+          if (result instanceof Error) throw result;
+          return result;
+        }),
+        signal,
+      );
     });
+  };
 
-    // Each slot's decision. A lookup that rejects (an abort, or a contract
-    // violation) rejects its decision too.
-    const decisions = lookups.map(async (lookup) => decideSlot(await lookup));
+  /**
+   * How a call's slots start their producer work. The slot pipeline is the
+   * same for every call; only this part differs between a call whose slots
+   * each start their own work and a call that sends its work together.
+   */
+  type ProducerStarter = {
+    /** Starts or rides the task that a slot waits for. */
+    produce(
+      item: Item,
+      decision: ProducerSlotDecision<ResultEntry>,
+      call: CallContext,
+    ): TaskOutcome<Produced> | Promise<TaskOutcome<Produced>>;
+    /** Starts or rides a slot's background refresh, which nothing awaits. */
+    refresh(
+      item: Item,
+      decision: ProducerSlotDecision<ResultEntry>,
+      call: CallContext,
+    ): void;
+  };
 
-    type TaskOutcome = ReturnType<typeof scheduler.startOrRideTasks>[number];
+  /** A starter whose slots each start or ride their own task with `start`. */
+  const starterOver = (
+    start: (
+      requests: readonly SchedulerRequest<Work>[],
+    ) => TaskOutcome<Produced>[],
+  ): ProducerStarter => ({
+    produce: (item, decision, call) =>
+      start([producerTask(item, decision, call)])[0]!,
+    refresh: (item, decision, call) => {
+      logRefreshFailure(
+        logger,
+        start([producerTask(item, decision, call)])[0]!,
+      );
+    },
+  });
 
-    // A direct call to a batching scheduler sends its misses, bypass requests, and
-    // stale-while-revalidate refreshes to the producer together, as one
-    // invocation. allSettled waits for every decision, so one failed lookup does
-    // not drop the others from the cohort. The map holds only foreground
-    // outcomes. Each foreground slot reads its own entry, and refreshes are
-    // logged here because no slot awaits them.
-    const directOutcomes =
-      startDirect !== undefined && batching?.producer === false
-        ? Promise.allSettled(decisions).then((settled) => {
-            const cohort = items.flatMap((item, index) => {
-              const decision = settled[index]!;
-              return decision.status === "fulfilled" &&
-                needsProducer(decision.value)
-                ? [{ item, decision: decision.value }]
-                : [];
-            });
+  // Each slot's work goes to the scheduler's sender on its own.
+  const perSlot = starterOver((requests) =>
+    scheduler.startOrRideTasks(requests),
+  );
+  // For a `get` with `autoBatch.producer: false`: its one slot is the whole
+  // call, so it needs no barrier. A scheduler that never accumulates sends
+  // every task on its own already.
+  const perSlotDirect =
+    startDirect === undefined ? perSlot : starterOver(startDirect);
 
-            const outcomes = startDirect(
-              cohort.map(({ item, decision }) =>
-                producerTask(item, decision, signal),
-              ),
-            );
-
-            return new Map(
-              cohort.flatMap(({ item, decision }, index) => {
-                const outcome = outcomes[index]!;
-                if (decision.action === "produce") {
-                  return [[item, outcome] as const];
-                }
-
-                logRefreshFailure(logger, outcome);
-                return [];
-              }),
-            );
-          })
-        : undefined;
-
-    // The barrier rejects only if startDirect() throws, for example from a user key
-    // function. A call whose slots are all refreshes never awaits it.
-    void directOutcomes?.catch(() => {});
-
-    // Carries out one slot's decision: starts or rides producer work, races it
-    // against the caller's signal, and applies the if-error fallback. It
-    // returns what the slot served, its fetch disposition, and the write that
-    // `onStore` reports, so that no branch has to record them itself.
-    const executeSlot = async (
-      item: (typeof items)[number],
-      index: number,
-      decision: SlotDecision<ResultEntry>,
-    ): Promise<SlotRecord<ResultEntry>> => {
-      const serve = (
-        entry: ResultEntry,
-        disposition: ServedFromCacheDisposition,
-      ): SlotRecord<ResultEntry> => ({
-        result: entry,
-        fetch: { disposition, vary: entry.vary },
-        write: cache.writeFor(entry),
+  /**
+   * The starter of a `getMany` call with `autoBatch.producer: false`, on a
+   * scheduler that accumulates work. It sends the call's misses, bypass
+   * requests, and stale-while-revalidate refreshes to the producer together,
+   * as one invocation. allSettled waits for every decision, so one failed
+   * lookup does not drop the others from the cohort. The map holds only
+   * foreground outcomes. Each foreground slot reads its own entry, and
+   * refreshes are logged here because no slot awaits them.
+   */
+  const cohortStarter = (
+    items: readonly Item[],
+    decisions: readonly Decided[],
+    call: CallContext,
+    start: NonNullable<typeof startDirect>,
+  ): ProducerStarter => {
+    const outcomes = Promise.allSettled(
+      // A bypass slot's decision is already known.
+      decisions.map(async (decision) => decision),
+    ).then((settled) => {
+      const cohort = items.flatMap((item, index) => {
+        const decision = settled[index]!;
+        return decision.status === "fulfilled" && needsProducer(decision.value)
+          ? [{ item, decision: decision.value }]
+          : [];
       });
 
-      switch (decision.action) {
-        case "fail": {
+      const started = start(
+        cohort.map(({ item, decision }) => producerTask(item, decision, call)),
+      );
+
+      return new Map(
+        cohort.flatMap(({ item, decision }, index) => {
+          const outcome = started[index]!;
+          if (decision.action === "produce") {
+            return [[item, outcome] as const];
+          }
+
+          logRefreshFailure(logger, outcome);
+          return [];
+        }),
+      );
+    });
+    // The barrier rejects only if `start` throws, for example from a user key
+    // function. A call whose slots are all refreshes never awaits it.
+    void outcomes.catch(() => {});
+
+    return {
+      produce: async (item) => (await outcomes).get(item)!,
+      // The cohort above starts or rides every refresh.
+      refresh: () => {},
+    };
+  };
+
+  const serve = (
+    entry: ResultEntry,
+    disposition: ServedFromCacheDisposition,
+  ): SlotRecord<ResultEntry> => ({
+    result: entry,
+    fetch: { disposition, vary: entry.vary },
+    write: cache.writeFor(entry),
+  });
+
+  /**
+   * Carries out one slot's decision: starts or rides producer work through
+   * `starter`, races it against the caller's signal, and applies the
+   * if-error fallback. It returns what the slot served, its fetch
+   * disposition, and the write that `onStore` reports, so that no branch has
+   * to record them itself.
+   */
+  const executeSlot = async (
+    item: Item,
+    decision: SlotDecision<ResultEntry>,
+    starter: ProducerStarter,
+    call: CallContext,
+  ): Promise<SlotRecord<ResultEntry>> => {
+    switch (decision.action) {
+      case "fail": {
+        return {
+          result: decision.error,
+          fetch: {
+            disposition: "cache-read-error",
+            directivesImpliedBypass: false,
+          },
+          write: undefined,
+        };
+      }
+      case "serve": {
+        return serve(decision.entry, "served-from-cache");
+      }
+      case "serve-and-refresh": {
+        // The refresh obligation survives both the stale return and later
+        // joiner cancellation.
+        starter.refresh(item, decision, call);
+        return serve(decision.entry, "served-stale-while-revalidating");
+      }
+      case "produce": {
+        // Await only a starter that is asynchronous, so that a slot that
+        // starts its own work does so in this same turn.
+        const started = starter.produce(item, decision, call);
+        const outcome = started instanceof Promise ? await started : started;
+        item.rode = outcome.rode;
+
+        // The shared producer work doesn't receive the signal directly (since
+        // it may be shared with other callers who haven't aborted). However,
+        // we race the caller's observation of the result against the signal
+        // so they can bail out immediately. Dispatched producer work keeps
+        // running, and its result is still stored.
+        try {
+          const produced = await raceWithSignal(outcome.promise, call.signal);
           return {
-            result: decision.error,
+            result: produced.entry,
             fetch: {
-              disposition: "cache-read-error",
-              directivesImpliedBypass: false,
+              disposition: "served-from-producer",
+              directivesImpliedBypass: item.bypass,
+            },
+            write: produced.stored,
+          };
+        } catch (error) {
+          // If the error was the signal being aborted, propagate that; don't
+          // treat it as a producer failure (or fall back to a cached
+          // usable-if-error value).
+          call.signal?.throwIfAborted();
+          if (isContractError(error)) throw error;
+
+          if (decision.ifError) {
+            logger("wrap-producer", "warn", PRODUCER_ERROR_FALLBACK_WARNING, {
+              error,
+              entry: decision.ifError,
+            });
+            return serve(decision.ifError, "served-stale-after-error");
+          }
+
+          return {
+            result: asError(error),
+            fetch: {
+              disposition: "producer-error",
+              directivesImpliedBypass: item.bypass,
             },
             write: undefined,
           };
         }
-        case "serve": {
-          return serve(decision.entry, "served-from-cache");
-        }
-        case "serve-and-refresh": {
-          // The refresh obligation survives both the stale return and later joiner cancellation.
-          // The direct path starts or rides this refresh through directOutcomes,
-          // so skip it here.
-          if (directOutcomes === undefined) {
-            const [refresh] = scheduler.startOrRideTasks([
-              producerTask(item, decision, signal),
-            ]);
-            logRefreshFailure(logger, refresh!);
-          }
-
-          return serve(decision.entry, "served-stale-while-revalidating");
-        }
-        case "produce": {
-          const outcome: TaskOutcome =
-            directOutcomes !== undefined
-              ? await directOutcomes.then((outcomes) => outcomes.get(item)!)
-              : scheduler.startOrRideTasks([
-                  producerTask(item, decision, signal),
-                ])[0]!;
-          rodeBySlot[index] = outcome.rode;
-
-          // The shared producer work doesn't receive the signal directly (since
-          // it may be shared with other callers who haven't aborted). However,
-          // we race the caller's observation of the result against the signal
-          // so they can bail out immediately. Dispatched producer work keeps
-          // running, and its result is still stored.
-          try {
-            const produced = await raceWithSignal(outcome.promise, signal);
-            return {
-              result: produced.entry,
-              fetch: {
-                disposition: "served-from-producer",
-                directivesImpliedBypass: item.bypass,
-              },
-              write: produced.stored,
-            };
-          } catch (error) {
-            // If the error was the signal being aborted, propagate that; don't
-            // treat it as a producer failure (or fall back to a cached
-            // usable-if-error value).
-            signal?.throwIfAborted();
-            if (isContractError(error)) throw error;
-
-            if (decision.ifError) {
-              logger("wrap-producer", "warn", PRODUCER_ERROR_FALLBACK_WARNING, {
-                error,
-                entry: decision.ifError,
-              });
-              return serve(decision.ifError, "served-stale-after-error");
-            }
-
-            return {
-              result: asError(error),
-              fetch: {
-                disposition: "producer-error",
-                directivesImpliedBypass: item.bypass,
-              },
-              write: undefined,
-            };
-          }
-        }
-        default: {
-          return assertUnreachable(decision);
-        }
       }
+      default: {
+        return assertUnreachable(decision);
+      }
+    }
+  };
+
+  /** One slot's whole pipeline: wait for its decision, then execute it. */
+  const settleSlot = async (
+    item: Item,
+    decision: Decided,
+    starter: ProducerStarter,
+    call: CallContext,
+  ): Promise<SlotRecord<ResultEntry>> => {
+    const decided = await decision;
+    call.signal?.throwIfAborted();
+    return executeSlot(item, decided, starter, call);
+  };
+
+  /** `get`: the slot pipeline for one item. It rejects with its slot's Error. */
+  const runOne = async (
+    input: PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>,
+    callOptions: ClientReadOptions,
+    startedAt: PerformanceNow,
+  ): Promise<ResultEntry> => {
+    const { signal } = callOptions;
+    const call: CallContext = {
+      signal,
+      joinInFlight: callOptions.joinInFlight,
     };
+    const item = prepare(input);
 
-    const slotPipelines = items.map(async (item, index) => {
-      const decision = await decisions[index]!;
+    let record: SlotRecord<ResultEntry>;
+    try {
       signal?.throwIfAborted();
-      return executeSlot(item, index, decision);
-    });
-
-    slotPipelines.forEach((pipeline) => {
-      void pipelines.track(pipeline);
-    });
-
-    const records = await Promise.all(slotPipelines).catch((error: unknown) => {
-      if (signal?.aborted) publishAborted();
+      const decision = item.bypass
+        ? PRODUCE_UNCACHED
+        : decide(
+            cache.get(
+              item.request,
+              callOptions.autoBatch?.store === false
+                ? { signal, autoBatch: false }
+                : { signal },
+            ),
+            signal,
+          );
+      const slot = settleSlot(
+        item,
+        decision,
+        callOptions.autoBatch?.producer === false ? perSlotDirect : perSlot,
+        call,
+      );
+      void pipelines.track(slot);
+      record = await slot;
+      signal?.throwIfAborted();
+    } catch (error) {
+      if (signal?.aborted) publishAborted(item, startedAt);
       throw error;
+    }
+
+    publishFetch(item, record.fetch, startedAt);
+    // A caller that saw the call fail has no write to observe.
+    if (record.result instanceof Error) throw record.result;
+    if (callOptions.onStore !== undefined) {
+      notifyStore(
+        record.write === undefined ? [] : [record.write],
+        callOptions.onStore,
+      );
+    }
+    return record.result;
+  };
+
+  /** `getMany`: the slot pipeline for each item. Operational failures stay in their slots. */
+  const runMany = async (
+    inputs: readonly PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>[],
+    callOptions: ClientReadOptions,
+    startedAt: PerformanceNow,
+  ): Promise<(ResultEntry | Error)[]> => {
+    const { signal } = callOptions;
+    const call: CallContext = {
+      signal,
+      joinInFlight: callOptions.joinInFlight,
+    };
+    const items = inputs.map(prepare);
+    const publishAllAborted = () => {
+      items.forEach((item) => {
+        publishAborted(item, startedAt);
+      });
+    };
+    if (signal?.aborted) {
+      publishAllAborted();
+      signal.throwIfAborted();
+    }
+
+    const decisions = decideAll(items, callOptions);
+    const starter =
+      startDirect !== undefined && callOptions.autoBatch?.producer === false
+        ? cohortStarter(items, decisions, call, startDirect)
+        : perSlot;
+    const slots = items.map((item, index) =>
+      settleSlot(item, decisions[index]!, starter, call),
+    );
+    slots.forEach((slot) => {
+      void pipelines.track(slot);
     });
-    signal?.throwIfAborted();
+
+    let records: SlotRecord<ResultEntry>[];
+    try {
+      records = await Promise.all(slots);
+      signal?.throwIfAborted();
+    } catch (error) {
+      if (signal?.aborted) publishAllAborted();
+      throw error;
+    }
 
     records.forEach(({ fetch }, index) => {
-      const item = items[index]!;
-      publishCacheFetch({
-        cache: cache.name,
-        resourceType: item.resourceType,
-        resourceId: item.request.id,
-        collapsed: rodeBySlot[index]!,
-        ...fetch,
-        durationMs: msSince(startedAt),
-      });
+      publishFetch(items[index]!, fetch, startedAt);
     });
-
     notifyStore(
       records.flatMap(({ write }) => (write === undefined ? [] : [write])),
       callOptions.onStore,
@@ -1178,13 +1430,17 @@ export function createProducerClient<
     return records.map(({ result }) => result);
   };
 
-  const getMany = (
-    requests: readonly PartialReadonlyConsumerRequest<
-      Params,
-      SpecOf<RT>["id"]
-    >[],
-    callOptions?: ClientReadOptions,
-  ) => {
+  /**
+   * Admits one public call. It registers the call before user hooks or
+   * producer callbacks can close the client.
+   */
+  const admit = <T>(
+    callOptions: ClientReadOptions | undefined,
+    run: (
+      callOptions: ClientReadOptions,
+      startedAt: PerformanceNow,
+    ) => Promise<T>,
+  ): Promise<T> => {
     if (closed) {
       return Promise.reject(
         new CacheContractError("Producer wrapper is closed"),
@@ -1192,8 +1448,7 @@ export function createProducerClient<
     }
 
     const startedAt = callOptions?.[wrappedReadStartedAt] ?? performanceNow();
-    // Register admission before user hooks or producer callbacks can close the client.
-    return calls.run(() => run(requests, callOptions, startedAt));
+    return calls.run(() => run(callOptions ?? NO_READ_OPTIONS, startedAt));
   };
 
   // SAFETY: the runtime client is id-erased internally (see LooseProducer in types/05_Producer.ts),
@@ -1201,8 +1456,23 @@ export function createProducerClient<
   // reads narrow by id, and each producer's request-paired result is stamped
   // with its own request's id.
   return {
-    get: getFromGetMany(getMany),
-    getMany,
+    get: (
+      request: PartialReadonlyConsumerRequest<Params, SpecOf<RT>["id"]>,
+      callOptions?: ClientReadOptions,
+    ) =>
+      admit(callOptions, (options, startedAt) =>
+        runOne(request, options, startedAt),
+      ),
+    getMany: (
+      requests: readonly PartialReadonlyConsumerRequest<
+        Params,
+        SpecOf<RT>["id"]
+      >[],
+      callOptions?: ClientReadOptions,
+    ) =>
+      admit(callOptions, (options, startedAt) =>
+        runMany(requests, options, startedAt),
+      ),
     close: () => {
       if (closing) return closing;
 
@@ -1222,3 +1492,6 @@ export function createProducerClient<
     },
   } as WrappedProducerClient<RT, Covered, Validators, Params>;
 }
+
+/** The options of a call that passed none. */
+const NO_READ_OPTIONS: ClientReadOptions = {};

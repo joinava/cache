@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "node:test";
 import type { DispatchInfo } from "@zingage/scheduling";
 import type { Logger } from "../types/index.js";
-import { BulkProducerScheduler } from "./wrapBulkProducer.js";
+import { bulkProducerScheduler } from "./wrapBulkProducer.js";
 
 const sharing = {
   collapseTasksMs: 1_000,
@@ -10,7 +10,7 @@ const sharing = {
 };
 
 /** The options every test leaves at their defaults. */
-const defaults = { logger: undefined };
+const defaults = { logger: undefined, limiter: undefined };
 
 it(
   "skips a queued task that an earlier chunk's producer cancels synchronously",
@@ -20,7 +20,7 @@ it(
     const controller = new AbortController();
     const failure = new Error("cancelled during production");
     const calls: string[] = [];
-    const scheduler = new BulkProducerScheduler<string, string>({
+    const scheduler = bulkProducerScheduler<string, string>({
       ...defaults,
       batching: {
         maxBatchSize: 1,
@@ -59,7 +59,7 @@ it(
   async () => {
     const scheduled = Promise.withResolvers<() => void>();
     const calls: string[] = [];
-    const scheduler = new BulkProducerScheduler<string, string>({
+    const scheduler = bulkProducerScheduler<string, string>({
       ...defaults,
       batching: {
         maxBatchSize: 1,
@@ -95,7 +95,7 @@ it(
   async () => {
     const scheduled = Promise.withResolvers<() => void>();
     const calls: number[][] = [];
-    const scheduler = new BulkProducerScheduler<number, number>({
+    const scheduler = bulkProducerScheduler<number, number>({
       ...defaults,
       batching: { batchScheduleFn: (dispatch) => scheduled.resolve(dispatch) },
       collapseTasksMs: 0,
@@ -126,7 +126,7 @@ it(
   async () => {
     const scheduled = Promise.withResolvers<() => void>();
     const calls: string[][] = [];
-    const scheduler = new BulkProducerScheduler<string, string>({
+    const scheduler = bulkProducerScheduler<string, string>({
       ...defaults,
       batching: { batchScheduleFn: (dispatch) => scheduled.resolve(dispatch) },
       collapseTasksMs: 1_000,
@@ -158,7 +158,7 @@ it(
     const logger: Logger = (component, level, message) => {
       if (level === "warn") warnings.push(`${component}: ${message}`);
     };
-    const scheduler = new BulkProducerScheduler<string, string>({
+    const scheduler = bulkProducerScheduler<string, string>({
       ...defaults,
       ...sharing,
       batching: {},
@@ -179,7 +179,7 @@ it(
   { timeout: 5_000 },
   async () => {
     const infos: DispatchInfo[] = [];
-    const scheduler = new BulkProducerScheduler<string, string>({
+    const scheduler = bulkProducerScheduler<string, string>({
       ...defaults,
       ...sharing,
       batching: { batchScheduleFn: () => {} },
@@ -202,7 +202,7 @@ it(
   { timeout: 5_000 },
   async () => {
     const calls: string[][] = [];
-    const scheduler = new BulkProducerScheduler<string, string>({
+    const scheduler = bulkProducerScheduler<string, string>({
       ...defaults,
       batching: {},
       collapseTasksMs: 1_000,
@@ -214,7 +214,7 @@ it(
       },
     });
     const reason = new Error("cancelled");
-    const [cancelled, kept] = scheduler.startOrRideDirect([
+    const [cancelled, kept] = scheduler.startOrRideDirect!([
       { request: "a", signal: AbortSignal.abort(reason) },
       { request: "b" },
     ]);
@@ -229,7 +229,7 @@ it(
   { timeout: 5_000 },
   async () => {
     const calls: { values: string[]; autoBatched: boolean }[] = [];
-    const scheduler = new BulkProducerScheduler<string, string>({
+    const scheduler = bulkProducerScheduler<string, string>({
       ...defaults,
       ...sharing,
       batching: { maxBatchSize: 2, batchScheduleFn: (dispatch) => dispatch() },
@@ -239,7 +239,7 @@ it(
         return values;
       },
     });
-    const outcomes = scheduler.startOrRideDirect(
+    const outcomes = scheduler.startOrRideDirect!(
       ["a", "b", "c", "d", "e"].map((request) => ({ request })),
     );
     assert.deepEqual(
@@ -255,7 +255,7 @@ it(
 it("still batches automatic requests that start after flush", async () => {
   const calls: (readonly string[])[] = [];
   const infos: DispatchInfo[] = [];
-  const scheduler = new BulkProducerScheduler<string, string>({
+  const scheduler = bulkProducerScheduler<string, string>({
     ...defaults,
     // A schedule that never fires, as an owner's may during shutdown.
     batching: { batchScheduleFn: () => {} },

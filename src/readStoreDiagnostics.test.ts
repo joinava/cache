@@ -67,7 +67,9 @@ describe("read dispatch diagnostics", () => {
       capture.stop();
       await cache.close();
     });
-    const results = await cache.getUnbatched([lookup("a"), lookup("b")]);
+    const results = await cache.getMany([lookup("a"), lookup("b")], {
+      autoBatch: false,
+    });
     assert.equal(results[0], results[1]);
     assert.equal(capture.readStore.length, 1);
     assert.equal(capture.readStore[0]?.outcome, "failure");
@@ -102,8 +104,9 @@ describe("read-store channel", suiteOptions, () => {
         await cache.close();
       });
       const controller = new AbortController();
-      const read = cache.getUnbatched([lookup("a")], {
+      const read = cache.getMany([lookup("a")], {
         signal: controller.signal,
+        autoBatch: false,
       });
       const rejected = assert.rejects(read);
       await started.promise;
@@ -140,7 +143,7 @@ describe("read-store channel", suiteOptions, () => {
       const requests = [lookup("bad"), lookup("good")];
       const result =
         mode === "direct"
-          ? await cache.getUnbatched(requests)
+          ? await cache.getMany(requests, { autoBatch: false })
           : await Promise.all(
               requests.map(async (request) =>
                 cache.get(request).catch((error: unknown) => error),
@@ -212,7 +215,7 @@ describe("read-store channel", suiteOptions, () => {
       const cache = cacheOver(store, { name: "read-store-wire" });
       const capture = captureChannels(cache.name);
       try {
-        await cache.getUnbatched([lookup("a")]);
+        await cache.getMany([lookup("a")], { autoBatch: false });
         assert.equal(capture.readStore.length, 1);
       } finally {
         capture.stop();

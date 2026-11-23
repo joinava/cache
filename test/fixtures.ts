@@ -360,6 +360,7 @@ export const cacheOver = (
   options: {
     name?: string;
     readBatching?: BatchOptions;
+    maxConcurrentStoreReads?: number;
   } = {},
 ) =>
   new Cache({
@@ -367,6 +368,9 @@ export const cacheOver = (
     name: uniqueCacheName(options.name ?? "cache"),
     resourceTypes: ACCEPT_ANY_REGISTRY,
     ...(options.readBatching && { readBatching: options.readBatching }),
+    ...(options.maxConcurrentStoreReads !== undefined && {
+      maxConcurrentStoreReads: options.maxConcurrentStoreReads,
+    }),
   });
 
 /**

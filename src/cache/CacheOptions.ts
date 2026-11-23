@@ -96,8 +96,21 @@ export type CacheOptions<
   /**
    * Configure accumulation for bulk-capable Stores. The default limit is
    * 100 requests and applies only to accumulated
-   * reads. Single-only Stores dispatch promptly. `getUnbatched` sends its set
-   * as one Store call instead.
+   * reads. Single-only Stores dispatch promptly. A read with
+   * `autoBatch: false` is one Store call of its own instead.
    */
   readBatching?: BatchOptions;
+  /**
+   * The most Store read calls that run at one time: `getMany` calls, or `get`
+   * calls on a Store without `getMany`. A positive integer. Defaults to no
+   * limit, except that one known-set read on a Store without `getMany` runs
+   * at most 10 `get` calls at one time.
+   *
+   * Reads that wait for a slot stay queued. An automatic batch keeps taking
+   * reads until it is full, so a busy Store gets fuller batches, not more
+   * calls. A waiting read can still be cancelled. A read with
+   * `autoBatch: false` also waits for a slot, in arrival order. The wait
+   * counts as queue time in the `read-store` message.
+   */
+  maxConcurrentStoreReads?: number;
 };

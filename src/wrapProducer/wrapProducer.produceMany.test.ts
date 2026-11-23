@@ -879,7 +879,7 @@ describe("wrapProducer with produceMany", () => {
         const finish = Promise.withResolvers<void>();
         const controller = new AbortController();
         const reason = new Error("abort during cache read");
-        const read = mock.method(cache, "getUnbatched", async () => {
+        const read = mock.method(cache, "getMany", async () => {
           started.resolve();
           await finish.promise;
           // The Cache completes normally despite cancellation. The wrapper must

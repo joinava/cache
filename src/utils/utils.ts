@@ -1,4 +1,5 @@
 import {
+  type ConcurrencyLimiter,
   SchedulingContractError,
   TimeSliceBudget,
   timeSlicedForEach,
@@ -197,10 +198,63 @@ export type StoreReadObservation = {
   failedRequestCount: number;
   entryCount: number;
   durationMs: number;
+  /**
+   * The time that the call's requests waited for a slot under a call limit,
+   * summed over the requests. 0 without a limit.
+   */
+  queueWaitTotalMs: number;
   outcome: "success" | "failure" | "cancelled";
 };
 
-/** Observe an actual Store invocation without including caller classification. */
+/**
+ * Runs `call` under `limiter`: at once if a slot is free, otherwise when one
+ * frees, in arrival order. `call` receives the milliseconds it waited. While
+ * it waits, an abort of `signal` removes it from the queue and rejects with
+ * the signal's reason. Once `call` has started, the signal no longer affects
+ * it here.
+ */
+export function runLimited<T>(
+  limiter: ConcurrencyLimiter,
+  call: (queueWaitMs: number) => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+
+  const { promise, resolve, reject } = Promise.withResolvers<T>();
+  const scheduledAt = performanceNow();
+  let started = false;
+  let waited = false;
+  const onAbort = () => {
+    if (started) return;
+    cancel();
+    reject(signal?.reason);
+  };
+  const cancel = limiter.schedule(() => {
+    started = true;
+    signal?.removeEventListener("abort", onAbort);
+    // A free slot runs this synchronously, inside `schedule`. Then nothing
+    // waited, and the wait is exactly 0.
+    const running = Promise.try(call, waited ? msSince(scheduledAt) : 0);
+    resolve(running);
+    return running;
+  });
+  waited = true;
+  if (!started) signal?.addEventListener("abort", onAbort, { once: true });
+  return promise;
+}
+
+/**
+ * Runs one Store call under the cache's read limit. See {@link runLimited}.
+ */
+export type LimitStoreCall = <T>(
+  call: (queueWaitMs: number) => Promise<T>,
+) => Promise<T>;
+
+/**
+ * Observe an actual Store invocation without including caller classification.
+ * `limit` runs each Store call under a call limit; omit it for a call that
+ * already holds its slot, or when there is no limit.
+ */
 export async function readStoreObserved<
   Spec extends CacheSpec,
   Validators extends AnyValidators,
@@ -210,6 +264,7 @@ export async function readStoreObserved<
   store: Store<Spec, Validators, Params>,
   requests: Reqs,
   options?: { signal?: AbortSignal | undefined },
+  limit?: LimitStoreCall,
   observe?: (event: StoreReadObservation) => void,
 ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
   // The Store contract types `signal` as present-or-absent, never undefined,
@@ -224,14 +279,26 @@ export async function readStoreObserved<
   }
 
   if (store.getMany === undefined) {
-    return readSingleStore(store, requests, 10, storeOptions, observe);
+    return readSingleStore(store, requests, limit, storeOptions, observe);
   }
 
-  const startedAt = performanceNow();
+  // The check above proved `getMany`, but a callback does not keep that
+  // narrowing.
+  const bulkStore = store as typeof store & {
+    getMany: NonNullable<typeof store.getMany>;
+  };
+  let startedAt = performanceNow();
+  let queueWaitTotalMs = 0;
   let results: StoreGetManyResult<Spec, Reqs, Validators, Params>;
 
   try {
-    results = await store.getMany(requests, storeOptions);
+    results = await (limit === undefined
+      ? bulkStore.getMany(requests, storeOptions)
+      : limit(async (queueWaitMs) => {
+          startedAt = performanceNow();
+          queueWaitTotalMs = queueWaitMs * requests.length;
+          return bulkStore.getMany(requests, storeOptions);
+        }));
     if (
       !Array.isArray(results) ||
       results.length !== requests.length ||
@@ -255,6 +322,7 @@ export async function readStoreObserved<
       failedRequestCount: failures.length,
       entryCount: sumBy(successes, (entries) => entries.length),
       durationMs: msSince(startedAt),
+      queueWaitTotalMs,
       outcome: failures.length > 0 ? "failure" : "success",
     });
   } catch (failure) {
@@ -264,6 +332,7 @@ export async function readStoreObserved<
       failedRequestCount: signal?.aborted ? 0 : requests.length,
       entryCount: 0,
       durationMs: msSince(startedAt),
+      queueWaitTotalMs,
       outcome: signal?.aborted ? "cancelled" : "failure",
     });
 
@@ -313,8 +382,9 @@ export function throwIfAnyError<const Results extends readonly unknown[]>(
 /**
  * Reads many requests from a single-read Store with limited parallelism.
  *
- * It calls `store.get` for each request with up to `maxConcurrency`
- * concurrent operations. Each failed read becomes an Error in its request
+ * It calls `store.get` for each request. With `limit`, each call waits for a
+ * slot under that limit. Without it, up to 10 calls of this read run at one
+ * time. Each failed read becomes an Error in its request
  * slot while other reads continue. Existing Error objects keep their
  * identity. Non-Error rejections are wrapped with their original cause.
  * Request order and duplicate slots are preserved. Caller cancellation still
@@ -322,7 +392,7 @@ export function throwIfAnyError<const Results extends readonly unknown[]>(
  *
  * @param store The store instance to use for retrieving entries
  * @param requests Array of requests, each containing an id and params
- * @param maxConcurrency Maximum number of concurrent requests (default: 10)
+ * @param limit Runs each `store.get` call under the cache's read limit
  * @returns A promise that resolves to a tuple-typed array, where each output
  *  slot holds matching entries or an Error for the corresponding request, with
  *  content narrowed to the spec variants compatible with that request's id.
@@ -338,18 +408,20 @@ async function readSingleStore<
 >(
   store: SingleStoreReader<Spec, Validators, Params>,
   requests: Reqs,
-  maxConcurrency = 10,
+  limit?: LimitStoreCall,
   options?: { signal?: AbortSignal },
   observe?: (event: StoreReadObservation) => void,
 ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
   options?.signal?.throwIfAborted();
 
-  const limit = pLimit(maxConcurrency);
+  const defaultLimit = pLimit(10);
+  const runCall: LimitStoreCall =
+    limit ?? ((call) => defaultLimit(() => call(0)));
   const budget = new TimeSliceBudget();
 
   // Process all requests with controlled concurrency.
   const promises = requests.map(async (request) =>
-    limit(async () => {
+    runCall(async (queueWaitTotalMs) => {
       options?.signal?.throwIfAborted();
       const pendingYield = budget.yieldIfNeeded();
       if (pendingYield !== undefined) await pendingYield;
@@ -372,6 +444,7 @@ async function readSingleStore<
           failedRequestCount: 0,
           entryCount: entries.length,
           durationMs: msSince(startedAt),
+          queueWaitTotalMs,
           outcome: "success",
         });
 
@@ -383,6 +456,7 @@ async function readSingleStore<
           failedRequestCount: options?.signal?.aborted ? 0 : 1,
           entryCount: 0,
           durationMs: msSince(startedAt),
+          queueWaitTotalMs,
           outcome: options?.signal?.aborted ? "cancelled" : "failure",
         });
 

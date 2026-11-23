@@ -316,14 +316,17 @@ describe("resource-type classification (§6.1, §6.2)", () => {
           const getManySpy = getSpy;
           const thrown = await expectRejection(() =>
             cache
-              .getUnbatched([
-                { id: "site:good", params: {}, directives: {} },
-                {
-                  id: "nope" as string as `site:${string}`,
-                  params: {},
-                  directives: {},
-                },
-              ])
+              .getMany(
+                [
+                  { id: "site:good", params: {}, directives: {} },
+                  {
+                    id: "nope" as string as `site:${string}`,
+                    params: {},
+                    directives: {},
+                  },
+                ],
+                { autoBatch: false },
+              )
               .then(throwIfAnyError),
           );
           assertUnclassifiable(thrown, { cacheName: name, id: "nope" });
@@ -633,10 +636,13 @@ describe("resource-type classification (§6.1, §6.2)", () => {
             },
           ]);
           const [protoRes, toStringRes] = await cache
-            .getUnbatched([
-              { id: "__proto__", params: {}, directives: {} },
-              { id: "toString", params: {}, directives: {} },
-            ])
+            .getMany(
+              [
+                { id: "__proto__", params: {}, directives: {} },
+                { id: "toString", params: {}, directives: {} },
+              ],
+              { autoBatch: false },
+            )
             .then(throwIfAnyError);
           expect(protoRes.usable?.content).to.equal("proto-content");
           expect(toStringRes.usable?.content).to.equal("tostring-content");

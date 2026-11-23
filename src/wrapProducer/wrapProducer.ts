@@ -1,44 +1,34 @@
 /**
- * @fileoverview The public producer wrapper and its types. `wrapProducer`
- * checks which capability the caller passed, and delegates to
- * `wrapSingleProducer` or `wrapBulkProducer`. Both build on
- * `createProducerClient` (producerClient.ts).
+ * @fileoverview The public producer wrapper. `wrapProducer` checks which
+ * capability the caller passed, and delegates to `wrapSingleProducer` or
+ * `wrapBulkProducer`. Both build on `createProducerClient`
+ * (producerClient.ts), which also defines the client's types; this module
+ * re-exports the public ones.
  *
  * @module
  */
-import type { PublicInterface } from "type-party";
-
-import type Cache from "../cache/Cache.js";
 import {
-  type IdOfResourceType,
   type ResourceTypeName,
   type ResourceTypes,
-  type SpecOf,
 } from "../types/00_ResourceTypes.js";
 import type {
   AnyParams,
   AnyValidators,
   CoveringBulkProducer,
   CoveringProducer,
-  EntryForId,
-  Logger,
-  PartialReadonlyConsumerRequest,
 } from "../types/index.js";
-import type { BatchOptions } from "@zingage/scheduling";
-import type { OnStore } from "./producerClient.js";
-import { wrapBulkProducer } from "./wrapBulkProducer.js";
+import type { WrappedProducerClient } from "./producerClient.js";
+import {
+  wrapBulkProducer,
+  type BulkProducerOptions,
+} from "./wrapBulkProducer.js";
 import { wrapSingleProducer } from "./wrapSingleProducer.js";
 
-export {
-  assertResourceTypeCovered,
-  coveredTypeSet,
-  getFromGetMany,
-  isRequestingCacheBypass,
-  notifyStore,
-  PRODUCER_ERROR_FALLBACK_WARNING,
-  wrappedReadStartedAt,
-  type ClientReadOptions,
-  type OnStore,
+export type {
+  OnStore,
+  ProducerClientOptions,
+  WrappedProducerClient,
+  WrappedReadOptions,
 } from "./producerClient.js";
 
 /**
@@ -47,113 +37,15 @@ export {
  * a wrapper is always "this cache, wrapped this way": the two were never
  * independently meaningful, and splitting them left every call site passing
  * `undefined` in the middle just to reach the producer.
+ *
+ * This is the widest options type, the one a bulk producer takes. The
+ * `wrapProducer` signature forbids `producerBatching` with `produce`.
  */
 export type WrapProducerOptions<
   RT extends ResourceTypes,
   Validators extends AnyValidators = AnyValidators,
   Params extends AnyParams = AnyParams,
-> = ProducerClientOptions<RT, Validators, Params> & {
-  /**
-   * Bulk accumulation settings; default limit 20. The limit applies only to
-   * accumulated work. Does not change participation. Only a `produceMany`
-   * producer accepts it, because a single producer never batches.
-   *
-   * Automatic batches run concurrently, with no limit: a wrapped `getMany`
-   * of 1,000 misses makes 50 concurrent `produceMany` calls at the default
-   * limit. To limit concurrent producer calls, wrap the producer itself, for
-   * example with `pLimit`.
-   */
-  producerBatching?: BatchOptions;
-};
-
-/**
- * The {@link WrapProducerOptions} that every producer wrapper takes: all of
- * them except `producerBatching`, which only a bulk producer uses. The single
- * wrapper and the shared client take this type, so neither can read batch
- * settings that do not apply to it.
- */
-export type ProducerClientOptions<
-  RT extends ResourceTypes,
-  Validators extends AnyValidators = AnyValidators,
-  Params extends AnyParams = AnyParams,
-> = {
-  /**
-   * REQUIRED. An instance of the cache class. This is where values returned by
-   * the producer will actually be stored, and it is the inference site for
-   * `RT`/`Validators`/`Params` (see {@link Cache.resourceTypes} for why a
-   * bare-`RT` member is needed for that at all).
-   */
-  cache: PublicInterface<Cache<RT, Validators, Params>>;
-  /**
-   * Operational cache read failures call the producer by default. "throw"
-   * returns an Error slot instead; scalar calls reject. Cancellation and
-   * package contract violations never use this fallback. A cache outage can
-   * multiply origin load: a 95% hit rate becomes 20 times as much production.
-   * Choose this policy against the origin's capacity and load shedding.
-   */
-  onCacheReadFailure?: "throw" | "call-producer";
-  /**
-   * Maximum joining age in seconds for compatible pending work. Defaults to 3.
-   *
-   * Overlapping requests that would all go to the producer (because no cached
-   * value satisfies them) can share one producer request. The wrapper then
-   * uses that one response for all of them. A request joins pending work only
-   * when that work started no more than `collapseOverlappingRequestsTime`
-   * seconds earlier. Otherwise, a new request goes to the producer.
-   */
-  collapseOverlappingRequestsTime?: number;
-  /**
-   * A custom logger to use (optional).
-   */
-  logger?: Logger;
-};
-
-export type WrappedReadOptions = {
-  signal?: AbortSignal;
-  autoBatch?: { store?: false; producer?: false };
-  onStore?: OnStore;
-};
-
-/**
- * What {@link wrapProducer} returns. Named because the facade, both variant
- * wrappers, and the closing cast in `createProducerClient` (producerClient.ts)
- * all spell it, and the cast is the only thing that would notice them
- * disagreeing.
- */
-export type WrappedProducerClient<
-  RT extends ResourceTypes,
-  Covered extends ResourceTypeName<RT>,
-  Validators extends AnyValidators,
-  Params extends AnyParams,
-> = {
-  // Generic over the request's id, so the result's content type narrows to
-  // the covered spec variants compatible with that id.
-  get: <Id extends IdOfResourceType<RT[Covered]>>(
-    request: PartialReadonlyConsumerRequest<Params, Id>,
-    options?: WrappedReadOptions,
-  ) => Promise<EntryForId<SpecOf<RT>, Validators, Params, Id>>;
-  // Generic over the requests' ids, so each output slot's content type narrows
-  // to the covered spec variants compatible with its request's id.
-  getMany: <
-    const Requests extends readonly PartialReadonlyConsumerRequest<
-      Params,
-      IdOfResourceType<RT[Covered]>
-    >[],
-  >(
-    requests: Requests,
-    options?: WrappedReadOptions,
-  ) => Promise<{
-    -readonly [K in keyof Requests]:
-      | EntryForId<
-          SpecOf<RT>,
-          Validators,
-          Params,
-          Extract<Requests[K]["id"], SpecOf<RT>["id"]>
-        >
-      | Error;
-  }>;
-  close: () => Promise<void>;
-};
+> = BulkProducerOptions<RT, Validators, Params>;
 
 /**
  * Wrap one producer capability and return a client with get, getMany, and close.

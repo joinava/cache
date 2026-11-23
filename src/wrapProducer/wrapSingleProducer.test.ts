@@ -1,17 +1,18 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
 import type { DispatchInfo } from "@zingage/scheduling";
-import { SingleProducerScheduler } from "./wrapSingleProducer.js";
+import { singleProducerScheduler } from "./wrapSingleProducer.js";
 
 const defaults = {
   logger: undefined,
+  limiter: undefined,
   collapseTasksMs: 1_000,
   makeKey: (request: string) => request,
 };
 
 it("sends each started task as its own invocation, and shares equal keys", async () => {
   const calls: { values: string[]; info: DispatchInfo }[] = [];
-  const scheduler = new SingleProducerScheduler<string, string>({
+  const scheduler = singleProducerScheduler<string, string>({
     ...defaults,
     dispatch: async (requests, info) => {
       const values = requests.map(({ request }) => request);
@@ -43,7 +44,7 @@ it("sends each started task as its own invocation, and shares equal keys", async
 
 it("rejects a task whose slot is an Error, and wraps a non-Error rejection", async () => {
   const slotError = new Error("slot");
-  const scheduler = new SingleProducerScheduler<string, string>({
+  const scheduler = singleProducerScheduler<string, string>({
     ...defaults,
     dispatch: async ([task]) => {
       if (task!.request === "slot") return [slotError];
@@ -66,7 +67,7 @@ it("rejects a task whose slot is an Error, and wraps a non-Error rejection", asy
 
 it("close waits for running tasks", async () => {
   const release = Promise.withResolvers<string[]>();
-  const scheduler = new SingleProducerScheduler<string, string>({
+  const scheduler = singleProducerScheduler<string, string>({
     ...defaults,
     dispatch: async () => release.promise,
   });

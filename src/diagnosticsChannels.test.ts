@@ -328,11 +328,14 @@ describe("diagnostics channels (§6.5)", () => {
       const capture = captureChannels(name);
       try {
         await cache
-          .getUnbatched([
-            { id: "site:a", params: {}, directives: {} },
-            { id: "biz:b", params: {}, directives: {} },
-            { id: "site:a", params: {}, directives: {} },
-          ])
+          .getMany(
+            [
+              { id: "site:a", params: {}, directives: {} },
+              { id: "biz:b", params: {}, directives: {} },
+              { id: "site:a", params: {}, directives: {} },
+            ],
+            { autoBatch: false },
+          )
           .then(throwIfAnyError);
         expect(capture.read).to.have.lengthOf(3);
         expect(sortByResourceId(capture.read)).to.deep.equal([
@@ -448,12 +451,15 @@ describe("diagnostics channels (§6.5)", () => {
       try {
         const thrown = await expectRejection(() =>
           cache
-            .getUnbatched([
-              { id: "site:a", params: {}, directives: {} },
-              { id: "biz:b", params: {}, directives: {} },
-              // A duplicate gets its own message, exactly as on the success path.
-              { id: "site:a", params: {}, directives: {} },
-            ])
+            .getMany(
+              [
+                { id: "site:a", params: {}, directives: {} },
+                { id: "biz:b", params: {}, directives: {} },
+                // A duplicate gets its own message, exactly as on the success path.
+                { id: "site:a", params: {}, directives: {} },
+              ],
+              { autoBatch: false },
+            )
             .then(throwIfAnyError),
         );
         expect(thrown).to.equal(readError);
@@ -1607,12 +1613,15 @@ describe("diagnostics channels (§6.5)", () => {
       const capture = captureChannels(name);
       try {
         await cache
-          .getUnbatched([
-            { id: "site:a", params: { locale: "en" }, directives: {} },
-            { id: "site:a", params: { locale: "fr" }, directives: {} },
-            // No matching variant: `found: "none"`, and so no variant to identify.
-            { id: "site:a", params: { locale: "de" }, directives: {} },
-          ])
+          .getMany(
+            [
+              { id: "site:a", params: { locale: "en" }, directives: {} },
+              { id: "site:a", params: { locale: "fr" }, directives: {} },
+              // No matching variant: `found: "none"`, and so no variant to identify.
+              { id: "site:a", params: { locale: "de" }, directives: {} },
+            ],
+            { autoBatch: false },
+          )
           .then(throwIfAnyError);
         expect(capture.read).to.deep.equal([
           {

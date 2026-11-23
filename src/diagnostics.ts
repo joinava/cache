@@ -12,7 +12,7 @@ import type { CacheLookupResult } from "./utils/cacheHelpers.js";
  * @fileoverview The package's diagnostics channels. There are five:
  *
  * - `@zingage/cache:read` -- what did a cache lookup find? Published by
- *   `Cache.get`/`Cache.getUnbatched` (including direct callers that never touch a
+ *   `Cache.get`/`Cache.getMany` (including direct callers that never touch a
  *   wrapper).
  * - `@zingage/cache:read-store` -- one message per physical Store read. Only a
  *   `Cache` reads a Store, so every message carries a cache name.
@@ -105,14 +105,14 @@ const typedChannel =
 /**
  * Name of the diagnostics channel that fires once per cache lookup --
  * i.e., once per `Cache.get()` call and once per request in a
- * `Cache.getUnbatched()` call -- reporting what the lookup found.
+ * `Cache.getMany()` call -- reporting what the lookup found.
  *
  * Wrapper requests with bypass directives (`maxAge: 0`) never appear here:
  * they skip the cache read entirely.
  *
  * A read that itself **fails** (the store threw) publishes `found:
  * "read-failed"` carrying the `error`, one message per request in the failed
- * call, and *then* the error propagates (`Cache.get`/`getUnbatched` still reject).
+ * call, and *then* the error propagates (`Cache.get`/`getMany` still reject).
  * This keeps the channel's one-message-per-lookup invariant total, so a
  * subscriber can use it as a complete denominator. It matters most under the
  * wrappers' default `onCacheReadFailure: "call-producer"`, which absorbs the
@@ -170,7 +170,7 @@ export type CacheReadMessage = Attribution & {
     | {
         /**
          * The store threw; no lookup result exists. The error still propagates
-         * to the `Cache.get`/`getUnbatched` caller after this message is published.
+         * to the `Cache.get`/`getMany` caller after this message is published.
          */
         found: "read-failed";
         /** Whatever the store threw. Unknown by design -- stores may reject with anything. */
@@ -392,8 +392,10 @@ export type CacheProduceMessage = {
   /** Failed result slots, or every request when the invocation rejects. */
   failedRequestCount: number;
   /**
-   * Time the requests waited in the automatic queue, summed over requests.
-   * Zero for direct invocations.
+   * Time the requests waited before the producer was invoked, summed over
+   * requests: in the automatic queue, and for a slot under
+   * `maxConcurrentProducerCalls`. Zero for a direct invocation that got a
+   * slot at once.
    */
   queueWaitTotalMs: number;
   /**
@@ -522,7 +524,8 @@ export function publishCacheStoreEntry(message: CacheStoreEntryMessage): void {
 
 /**
  * One physical Store read by a `Cache`: an automatic batch, a
- * `getUnbatched` call, or one `get` call to a Store that has no `getMany`.
+ * read with `autoBatch: false`, or one `get` call to a Store that has no
+ * `getMany`.
  * Empty calls and entirely cancelled automatic batches emit nothing. Requests
  * cancelled before dispatch do not count. No resource IDs, payloads, or error
  * values are included.
@@ -535,7 +538,8 @@ export type CacheReadStoreMessage = {
   /**
    * True when the Cache's read batcher dispatched this read after it
    * accumulated requests from one or more callers. False when the read ran
-   * directly: a `getUnbatched` call, or a Store that has no `getMany`.
+   * directly: a read with `autoBatch: false`, or a Store that has no
+   * `getMany`.
    */
   autoBatched: boolean;
   /**
@@ -563,8 +567,10 @@ export type CacheReadStoreMessage = {
    */
   durationMs: number;
   /**
-   * Time the dispatched requests waited in the automatic queue, summed over
-   * requests. Divide by `requestCount` for the mean. Zero for direct reads.
+   * Time the dispatched requests waited before the Store call, summed over
+   * requests: in the automatic queue, and for a slot under
+   * `maxConcurrentStoreReads`. Divide by `requestCount` for the mean. Zero
+   * for a direct read that got a slot at once.
    */
   queueWaitTotalMs: number;
 };
