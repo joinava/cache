@@ -1028,9 +1028,11 @@ export default class Cache<
     const signals = reads.map(({ input }) => input.signal);
     // A read without a signal can never be cancelled, so neither can a call
     // that it is in.
-    const cancellation = signals.every((signal) => signal !== undefined)
-      ? allAborted(signals)
-      : undefined;
+    const cancellation =
+      signals.every((signal) => signal !== undefined) &&
+      isNonEmptyArray(signals)
+        ? allAborted(signals)
+        : undefined;
 
     try {
       return await readStoreObserved(

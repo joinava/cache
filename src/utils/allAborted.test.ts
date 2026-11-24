@@ -2,15 +2,27 @@ import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { describe, it } from "node:test";
 
+import type { NonEmptyArray } from "type-party";
+import { mapNonEmpty } from "type-party/runtime/nonempty.js";
+
 import { allAborted } from "./allAborted.js";
+
+/** The signal of each controller. */
+const signalsOf = (controllers: Readonly<NonEmptyArray<AbortController>>) =>
+  mapNonEmpty(controllers, ({ signal }) => signal);
 
 /** The number of `abort` listeners on each controller's signal. */
 const listenerCounts = (controllers: readonly AbortController[]) =>
   controllers.map(({ signal }) => getEventListeners(signal, "abort").length);
 
 describe("allAborted", () => {
-  it("gives no signal for an empty list", () => {
-    assert.equal(allAborted([]).signal, undefined);
+  it("does not accept an empty list in the types", () => {
+    // Never called: only the type check of the call matters.
+    const callWithEmptyList = () => {
+      // @ts-expect-error -- an empty list is not a NonEmptyArray
+      return allAborted([]);
+    };
+    assert.equal(typeof callWithEmptyList, "function");
   });
 
   it("gives the same signal back, and adds no listener, when every element is that signal", () => {
@@ -27,9 +39,8 @@ describe("allAborted", () => {
       new AbortController(),
       new AbortController(),
       new AbortController(),
-    ];
-    const { signal, stop } = allAborted(controllers.map((it) => it.signal));
-    assert.ok(signal);
+    ] as const;
+    const { signal, stop } = allAborted(signalsOf(controllers));
 
     controllers[1]?.abort(new Error("second"));
     controllers[2]?.abort(new Error("third"));
@@ -48,7 +59,6 @@ describe("allAborted", () => {
     const a = new AbortController();
     const b = new AbortController();
     const { signal } = allAborted([a.signal, b.signal, a.signal, b.signal]);
-    assert.ok(signal);
     assert.deepEqual(listenerCounts([a, b]), [1, 1]);
 
     a.abort();
@@ -62,7 +72,6 @@ describe("allAborted", () => {
     early.abort(new Error("early"));
     const late = new AbortController();
     const { signal } = allAborted([late.signal, early.signal]);
-    assert.ok(signal);
     assert.equal(signal.aborted, false);
     assert.deepEqual(listenerCounts([late, early]), [1, 0]);
 
@@ -73,18 +82,18 @@ describe("allAborted", () => {
   });
 
   it("gives an aborted signal when the different signals have all aborted already", () => {
-    const reasons = [new Error("first"), new Error("second")];
-    const signals = reasons.map((reason) => AbortSignal.abort(reason));
-    const { signal } = allAborted(signals);
+    const reasons = [new Error("first"), new Error("second")] as const;
+    const { signal } = allAborted(
+      mapNonEmpty(reasons, (reason) => AbortSignal.abort(reason)),
+    );
 
-    assert.equal(signal?.aborted, true);
-    assert.equal(signal?.reason, reasons[1]);
+    assert.equal(signal.aborted, true);
+    assert.equal(signal.reason, reasons[1]);
   });
 
   it("stops listening on stop, and then never aborts", () => {
-    const controllers = [new AbortController(), new AbortController()];
-    const { signal, stop } = allAborted(controllers.map((it) => it.signal));
-    assert.ok(signal);
+    const controllers = [new AbortController(), new AbortController()] as const;
+    const { signal, stop } = allAborted(signalsOf(controllers));
     assert.deepEqual(listenerCounts(controllers), [1, 1]);
 
     controllers[0]?.abort();

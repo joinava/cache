@@ -1,10 +1,9 @@
+import type { NonEmptyArray } from "type-party";
+
 /** The signal for work that several callers share. See {@link allAborted}. */
 export type AllAborted = {
-  /**
-   * Aborts once every one of the signals has aborted. Undefined when there
-   * is no signal at all: then nothing can cancel the work.
-   */
-  readonly signal: AbortSignal | undefined;
+  /** Aborts once every one of the signals has aborted. */
+  readonly signal: AbortSignal;
   /**
    * Stops listening to the callers' signals. Call it when the work is done.
    * Otherwise a signal that outlives the work keeps a listener.
@@ -13,9 +12,6 @@ export type AllAborted = {
 };
 
 const stopNothing = (): void => {};
-
-/** The answer for an empty list of signals. */
-const NEVER: AllAborted = { signal: undefined, stop: stopNothing };
 
 /**
  * Listens to several signals, and aborts its own signal when the last of
@@ -71,7 +67,6 @@ class LastAbort {
  *
  * The usual cases cost nothing: they add no listener, and make no signal.
  *
- * - The list is empty: the result has no signal.
  * - Every element is the same signal: the result is that signal.
  * - Every signal has aborted already: the result is a signal that has
  *   aborted.
@@ -79,10 +74,15 @@ class LastAbort {
  * Other lists get a new signal that listens to theirs. A signal that occurs
  * more than once counts once. A signal that has aborted already counts as
  * aborted.
+ *
+ * @param signals At least one signal. For an empty list, "every signal has
+ *   aborted" would be true at once, although nothing asked for a cancel. So
+ *   the types do not allow it, and the caller decides what no signal means.
  */
-export function allAborted(signals: readonly AbortSignal[]): AllAborted {
+export function allAborted(
+  signals: Readonly<NonEmptyArray<AbortSignal>>,
+): AllAborted {
   const [first] = signals;
-  if (first === undefined) return NEVER;
 
   // One pass finds every case that needs no listener.
   let allSame = true;
