@@ -203,7 +203,7 @@ describe("Per-id content typing", () => {
     });
   });
 
-  describe("Cache.getUnbatched", () => {
+  describe("Cache.getMany", () => {
     it("narrows the result content per request id (tuple typing)", async () => {
       const cache = makeStoriesCache();
       try {
@@ -222,10 +222,13 @@ describe("Per-id content typing", () => {
         ]);
 
         const [storyRes, collectionRes] = await cache
-          .getUnbatched([
-            { id: "story:42", params: {}, directives: {} },
-            { id: "collection:hot", params: {}, directives: {} },
-          ] as const)
+          .getMany(
+            [
+              { id: "story:42", params: {}, directives: {} },
+              { id: "collection:hot", params: {}, directives: {} },
+            ] as const,
+            { autoBatch: false },
+          )
           .then(throwIfAnyError);
 
         expectType<

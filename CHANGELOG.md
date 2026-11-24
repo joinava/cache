@@ -15,11 +15,12 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
 - Stores declare exactly one read capability: `get` or `getMany`. Read through
   a Cache, which adapts to either kind of Store. The package no longer exports
   `naiveGetMany`, because a Store no longer needs a fallback `getMany`.
-- Replace `Cache.getMany` with two methods. `Cache.get` reads one request and
-  joins automatic accumulation, so reads from many calls share Store calls.
-  `Cache.getUnbatched` sends a known set to the Store as one call, whatever
-  the batch limit.
-- `Cache.getUnbatched` returns positional results containing successes or
+- `Cache.get` and `Cache.getMany` join automatic accumulation by default, so
+  reads from many calls share Store calls, and the batch limit can split a
+  `getMany` set. Pass `{ autoBatch: false }` to either method to skip the
+  accumulation wait. The batch limit still splits a large set, and a Store
+  call can still carry other callers' reads that are ready at the same time.
+- `Cache.getMany` returns positional results containing successes or
   `Error` values. Handle each slot or use `throwIfAnyError` to reject partial
   failure.
 - Replace `batchReads` with `readBatching`, which configures automatic
@@ -57,12 +58,32 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
 
 - Separate Store-read and producer queues automatically batch bulk-capable
   operations. The default maximum batch size is 100 for Store reads and 20
-  for producers. Batches run concurrently, with no limit; wrap a producer in
-  `pLimit` to limit its concurrent invocations. Single-only
-  capabilities dispatch promptly. Wrapper calls can disable Store and
-  producer accumulation independently with `autoBatch` options. The batch
-  limit applies only to accumulated work: a direct call reaches the Store or
-  producer as one invocation.
+  for producers. By default, batches run concurrently, with no limit.
+  Single-only capabilities dispatch promptly. Wrapper calls can skip the Store
+  and the producer accumulation wait independently with `autoBatch` options.
+  The batch limit applies to every Store and producer call, so a call with
+  `autoBatch: false` is not guaranteed to be one invocation, and its work can
+  share an invocation with other callers' work that is ready at the same
+  time. A wrapped `getMany` with `autoBatch.producer: false` sends each
+  request's producer work as soon as that request's cache read settles. It
+  does not wait for the whole set.
+- Batching, sharing and call limits are built on the dispatcher of
+  `@zingage/scheduling` (`createDispatcher`, `Sharing`, `ConcurrencyLimit`).
+  A batched Store or producer call now starts in a microtask after its work
+  becomes ready, not synchronously inside the schedule callback or `close()`.
+  With `preserveAsyncContext`, every Store or producer call of one
+  accumulation runs in the async context of the request that opened the
+  accumulation, also when `close()` starts the call. Queue waits in
+  diagnostics are measured times, so a call that nothing held back reports
+  a wait close to zero, not exactly zero. Work that is submitted after
+  `close()` no longer logs a warning.
+- A Store read call receives an `AbortSignal` that aborts when the signal of
+  every read in the call has aborted, also for an automatic batch. So the
+  Store call can stop only when no caller wants its result any more, and the
+  `read-store` message then reports `cancelled`. When every read carries the
+  same signal, the Store gets that signal itself. A Store call with a read
+  that has no signal gets no signal and always completes. Before, only a
+  read with `autoBatch: false` passed its signal to the Store.
 - A package contract violation in one producer result slot, or in one
   `bulkProducerByIdType` slice, rejects only the callers of the affected
   requests. Automatic batching merges unrelated callers into one invocation,
@@ -70,7 +91,22 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
   count these slots in `failedRequestCount`, and the invocation's `outcome`
   stays `"success"`. A wrong result count for the whole invocation still
   rejects every caller.
-- `Cache.get` and `Cache.getUnbatched` also find the resources of every
+- `maxConcurrentStoreReads` (Cache) and `maxConcurrentProducerCalls`
+  (producer clients) limit the Store read calls and the producer calls that
+  run at one time, for single and bulk capabilities. Work that waits for a
+  slot stays queued: other requests can join it, it can be cancelled, the
+  call that gets the slot takes all the work that is ready then, up to the
+  batch limit, and the wait counts as queue time in diagnostics.
+- The sharing window of `collapseOverlappingRequestsTime` now runs from the
+  start of the producer call, not from the request that queued the work.
+  Work that still waits, in a batch or for a slot, can always be joined.
+- Per-call `joinInFlight: false` keeps a wrapped read from joining a producer
+  call that has already started, for reads that must see a change the caller
+  just made. The call's own requests with the same key still join the work
+  that the call started.
+- A wrapped `get` no longer runs through `getMany`: it runs the same per-slot
+  steps for its one request, without the per-call arrays.
+- `Cache.get` and `Cache.getMany` also find the resources of every
   `Cache.store` call whose write has not settled. Before, only the producer
   client that started a write found it, so a second client over the same
   cache could run its producer again. Every read still reaches the Store.

@@ -171,19 +171,6 @@ export function isContractError(
   );
 }
 
-/**
- * Throws a {@link CacheContractError} unless a batched call returned exactly
- * one result per request.
- */
-export function assertResultCount(
-  results: readonly unknown[],
-  requestCount: number,
-): void {
-  if (results.length !== requestCount) {
-    throw new CacheContractError("Result count must match request count");
-  }
-}
-
 export function asError(error: unknown): Error {
   return error instanceof Error
     ? error
@@ -200,7 +187,27 @@ export type StoreReadObservation = {
   outcome: "success" | "failure" | "cancelled";
 };
 
-/** Observe an actual Store invocation without including caller classification. */
+/**
+ * Milliseconds that a started item waited before its call started: in an
+ * automatic batch, and for a slot under a call limit. It is the real time
+ * between the two steps, so it is a little above 0 even for an item whose
+ * call started at once. An item's `startedAt` is typed as optional, but an
+ * `invoke` callback only sees started items. An item that has not started
+ * reports 0.
+ */
+export function queueWaitMs(item: {
+  readonly submittedAt: number;
+  readonly startedAt: number | undefined;
+}): number {
+  return (item.startedAt ?? item.submittedAt) - item.submittedAt;
+}
+
+/**
+ * Observe an actual Store invocation without including caller classification.
+ * `options.budget` is the time-slice budget that the `get` calls of a Store
+ * without `getMany` share. Pass it when several calls of this function read
+ * one known set, so that the set still yields to the event loop as a whole.
+ */
 export async function readStoreObserved<
   Spec extends CacheSpec,
   Validators extends AnyValidators,
@@ -209,7 +216,10 @@ export async function readStoreObserved<
 >(
   store: Store<Spec, Validators, Params>,
   requests: Reqs,
-  options?: { signal?: AbortSignal | undefined },
+  options?: {
+    signal?: AbortSignal | undefined;
+    budget?: TimeSliceBudget | undefined;
+  },
   observe?: (event: StoreReadObservation) => void,
 ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
   // The Store contract types `signal` as present-or-absent, never undefined,
@@ -224,7 +234,14 @@ export async function readStoreObserved<
   }
 
   if (store.getMany === undefined) {
-    return readSingleStore(store, requests, 10, storeOptions, observe);
+    return readSingleStore(
+      store,
+      requests,
+      SINGLE_STORE_READS_PER_SET,
+      storeOptions,
+      observe,
+      options?.budget,
+    );
   }
 
   const startedAt = performanceNow();
@@ -300,6 +317,12 @@ export async function timeSlicedMapNonEmpty<
   };
 }
 
+/**
+ * The most `get` calls that one known-set read on a Store without `getMany`
+ * runs at one time, when the cache has no `maxConcurrentStoreReads`.
+ */
+export const SINGLE_STORE_READS_PER_SET = 10;
+
 /** Reject the first Error in request order after all results have settled. */
 export function throwIfAnyError<const Results extends readonly unknown[]>(
   results: Results,
@@ -313,6 +336,13 @@ export function throwIfAnyError<const Results extends readonly unknown[]>(
 /**
  * Reads many requests from a single-read Store with limited parallelism.
  *
+ * TODO: A Cache now reads a Store without `getMany` through a dispatcher that
+ * gives each read its own call, so production code always passes exactly one
+ * request here, and the limit and the list handling only serve the test
+ * fixtures that read a Store directly. Reduce this to a one-request read
+ * (`readOneObserved(store, request, options, observe)`), and move the fan-out
+ * that the fixtures need into `test/fixtures.ts`.
+ *
  * It calls `store.get` for each request with up to `maxConcurrency`
  * concurrent operations. Each failed read becomes an Error in its request
  * slot while other reads continue. Existing Error objects keep their
@@ -322,7 +352,9 @@ export function throwIfAnyError<const Results extends readonly unknown[]>(
  *
  * @param store The store instance to use for retrieving entries
  * @param requests Array of requests, each containing an id and params
- * @param maxConcurrency Maximum number of concurrent requests (default: 10)
+ * @param maxConcurrency Maximum number of concurrent requests
+ * @param budget The time-slice budget that the reads charge. Defaults to a
+ *  budget of this call's own.
  * @returns A promise that resolves to a tuple-typed array, where each output
  *  slot holds matching entries or an Error for the corresponding request, with
  *  content narrowed to the spec variants compatible with that request's id.
@@ -338,14 +370,14 @@ async function readSingleStore<
 >(
   store: SingleStoreReader<Spec, Validators, Params>,
   requests: Reqs,
-  maxConcurrency = 10,
+  maxConcurrency: number,
   options?: { signal?: AbortSignal },
   observe?: (event: StoreReadObservation) => void,
+  budget = new TimeSliceBudget(),
 ): Promise<StoreGetManyResult<Spec, Reqs, Validators, Params>> {
   options?.signal?.throwIfAborted();
 
   const limit = pLimit(maxConcurrency);
-  const budget = new TimeSliceBudget();
 
   // Process all requests with controlled concurrency.
   const promises = requests.map(async (request) =>

@@ -720,9 +720,10 @@ describe("wrapProducer", () => {
             }
           : {}),
       }));
-      // Collapse window 0: no call rides another's invocation unless they
-      // start in the same millisecond, so the tests below exercise the
-      // overlay, not request collapsing (which has its own test here).
+      // Collapse window 0: no call joins another's running producer call
+      // unless it arrives in the millisecond in which that call started, and
+      // these tests never leave work waiting. So the tests below exercise
+      // the overlay, not request collapsing (which has its own test here).
       gatedSut = wrapProducer({
         cache: gatedCache,
         collapseOverlappingRequestsTime: 0,

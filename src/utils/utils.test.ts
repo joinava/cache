@@ -263,7 +263,9 @@ describe("adapter lifecycle and positional contracts", () => {
     const cache = new Cache(
       singleTypeCacheOptions<string>()({ name: "single-drain", store }),
     );
-    const read = cache.getUnbatched([lookup("invalid"), lookup("held")]);
+    const read = cache.getMany([lookup("invalid"), lookup("held")], {
+      autoBatch: false,
+    });
     const rejected = assert.rejects(read, CacheContractError);
     await started.promise;
     const close = cache.close();

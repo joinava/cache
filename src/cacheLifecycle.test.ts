@@ -173,7 +173,7 @@ describe("close() drains accepted work", suiteOptions, () => {
     await cache.close();
   });
 
-  it("finishes an accepted getUnbatched read before it closes the Store", async (t) => {
+  it("finishes an accepted direct getMany read before it closes the Store", async (t) => {
     const store = new MemoryStore<Spec>();
     const events: string[] = [];
     const read = store.get.bind(store);
@@ -186,9 +186,11 @@ describe("close() drains accepted work", suiteOptions, () => {
     });
     const cache = cacheOver(store, { name: "unbatched-close" });
 
-    // getUnbatched normalizes its requests before it reads the Store, and
+    // getMany normalizes its requests before it reads the Store, and
     // close() starts while that normalization is pending.
-    const pending = cache.getUnbatched([lookup("a"), lookup("b")]);
+    const pending = cache.getMany([lookup("a"), lookup("b")], {
+      autoBatch: false,
+    });
     const closing = cache.close();
 
     assert.equal((await pending).length, 2);

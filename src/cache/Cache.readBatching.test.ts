@@ -76,12 +76,16 @@ describe("Cache read batching", suiteOptions, () => {
         ]),
       );
 
-      // The same lookups through getUnbatched, one call each: one
-      // single-request getMany call each, and the same results.
+      // The same lookups through getMany without the accumulation wait, one
+      // call each. Reads that are ready in the same turn form Store calls
+      // together, so the ten callers still share one Store call. The results
+      // are the same.
       const directResults = await Promise.all(
-        requests.map(async (req) => (await cache.getUnbatched([req]))[0]),
+        requests.map(
+          async (req) => (await cache.getMany([req], { autoBatch: false }))[0],
+        ),
       );
-      assert.deepEqual(getManyRequestCounts(), [10, ...Array(10).fill(1)]);
+      assert.deepEqual(getManyRequestCounts(), [10, 10]);
       assert.deepEqual(batchedResults, directResults);
     } finally {
       capture.stop();
@@ -244,7 +248,7 @@ describe("Cache read batching", suiteOptions, () => {
     }
   });
 
-  it("with preserveAsyncContext, keeps each batch's first reader context when close forces dispatch", async () => {
+  it("with preserveAsyncContext, runs an accumulation's Store calls in its first reader's context", async () => {
     const context = new AsyncLocalStorage<string>();
     const observed: (string | undefined)[] = [];
     const scheduled: (() => void)[] = [];
@@ -265,14 +269,25 @@ describe("Cache read batching", suiteOptions, () => {
     });
     const a = context.run("reader-a", () => cache.get(lookup("a")));
     const b = context.run("reader-b", () => cache.get(lookup("b")));
-    await context.run("closer", () => cache.close());
+    // One accumulation arms one schedule callback, bound to the context of
+    // the read that opened it. Every Store call of the accumulation runs
+    // there, not in the context that runs the callback.
+    assert.equal(scheduled.length, 1);
+    context.run("scheduler", () => scheduled.forEach((dispatch) => dispatch()));
     await Promise.all([a, b]);
-    assert.deepEqual(observed, ["reader-a", "reader-b"]);
+    assert.deepEqual(observed, ["reader-a", "reader-a"]);
+
+    // A close that makes waiting reads ready also runs their Store call in
+    // the context of the read that opened the accumulation, not the closer's.
+    const c = context.run("reader-c", () => cache.get(lookup("c")));
+    await context.run("closer", () => cache.close());
+    await c;
+    assert.deepEqual(observed, ["reader-a", "reader-a", "reader-c"]);
     // The scheduled callbacks still exist after a forced flush; neither a
     // second close nor invoking those callbacks may execute a batch twice.
     await cache.close();
     context.run("scheduler", () => scheduled.forEach((dispatch) => dispatch()));
-    assert.deepEqual(getManyRequestCounts(), [1, 1]);
+    assert.deepEqual(getManyRequestCounts(), [1, 1, 1]);
   });
 
   it("starts queued reads before close() closes the store", async () => {
@@ -298,6 +313,23 @@ describe("Cache read batching", suiteOptions, () => {
     assert.deepEqual(events, ["getMany", "close"]);
     assert.equal(a?.usable?.content, "a");
     assert.equal(b?.usable, undefined);
+  });
+
+  it("close() makes the waiting reads of an accepted getMany ready", async () => {
+    const { store, getManyRequestCounts } = spiedStore();
+    const cache = cacheOver(store, {
+      // A schedule that never fires, as an owner's may during shutdown.
+      readBatching: { batchScheduleFn: () => {} },
+    });
+
+    const reads = cache.getMany([lookup("a"), lookup("b")]);
+    // Normalization is time-sliced, so the reads queue after a few microtasks.
+    await nextTurn();
+    assert.deepEqual(getManyRequestCounts(), []);
+    await cache.close();
+
+    assert.equal((await reads).length, 2);
+    assert.deepEqual(getManyRequestCounts(), [2]);
   });
 
   it("honors readBatching.batchScheduleFn and maxBatchSize, and never serves a read from a previous batch", async () => {
@@ -425,131 +457,486 @@ describe(
   },
 );
 
-describe("getUnbatched (direct Store reads)", suiteOptions, () => {
-  it("dispatches a direct known set without waiting for the automatic queue", async (t) => {
+describe(
+  "getMany with autoBatch: false (reads without the accumulation wait)",
+  suiteOptions,
+  () => {
+    it("reads a known set without waiting for the automatic queue", async (t) => {
+      const { store, getManyRequestCounts } = spiedStore();
+      const scheduled: (() => void)[] = [];
+      const cache = cacheOver(store, {
+        name: "direct-known-set",
+        readBatching: { batchScheduleFn: (run) => scheduled.push(run) },
+      });
+      t.after(async () => await cache.close());
+      const queued = cache.get(lookup("queued"));
+      await cache.getMany([lookup("a"), lookup("b")], { autoBatch: false });
+      assert.deepEqual(getManyRequestCounts(), [2]);
+      scheduled.forEach((run) => run());
+      await queued;
+      assert.deepEqual(getManyRequestCounts(), [2, 1]);
+    });
+
+    it("applies readBatching.maxBatchSize to every Store call", async (t) => {
+      const { store, getManyRequestCounts } = spiedStore();
+      const cache = cacheOver(store, {
+        name: "direct-limit",
+        readBatching: { maxBatchSize: 2 },
+      });
+      t.after(async () => await cache.close());
+      const ids = ["a", "b", "c", "d", "e"].map((id) => lookup(id));
+      // `autoBatch: false` skips only the wait. The limit still splits the set.
+      await cache.getMany(ids, { autoBatch: false });
+      assert.deepEqual(getManyRequestCounts(), [2, 2, 1]);
+      await Promise.all(ids.map(async (id) => cache.get(id)));
+      assert.deepEqual(getManyRequestCounts(), [2, 2, 1, 2, 2, 1]);
+      const client = wrapProducer({
+        cache,
+        produceMany: async (requests) =>
+          await Promise.resolve(
+            requests.map(({ id }) => ({
+              content: id,
+              directives: freshFor100,
+            })),
+          ),
+      });
+      await client.getMany(
+        ["f", "g", "h"].map((id) => ({ id })),
+        { autoBatch: { store: false } },
+      );
+      await client.close();
+      assert.deepEqual(getManyRequestCounts(), [2, 2, 1, 2, 2, 1, 2, 1]);
+    });
+
+    it("runs at most 10 get calls of one known set at one time on a Store without getMany", async (t) => {
+      const store = new MemoryStore<Spec>();
+      const counts = { running: 0, maxRunning: 0, calls: 0 };
+      const get = store.get.bind(store);
+      t.mock.method(store, "get", async (...args: Parameters<typeof get>) => {
+        counts.calls += 1;
+        counts.running += 1;
+        counts.maxRunning = Math.max(counts.maxRunning, counts.running);
+        await nextTurn();
+        try {
+          return await get(...args);
+        } finally {
+          counts.running -= 1;
+        }
+      });
+      const cache = cacheOver(store);
+      t.after(async () => await cache.close());
+      const requests = Array.from({ length: 25 }, (_, i) =>
+        lookup(`id:${String(i)}`),
+      );
+
+      for (const autoBatch of [undefined, false] as const) {
+        counts.maxRunning = 0;
+        const results = await cache.getMany(requests, { autoBatch });
+        assert.equal(results.length, 25);
+        assert.equal(counts.maxRunning, 10);
+      }
+      assert.equal(counts.calls, 50);
+      // Separate callers are not limited together.
+      counts.maxRunning = 0;
+      await Promise.all(requests.map(async (request) => cache.get(request)));
+      assert.equal(counts.maxRunning, 25);
+    });
+
+    it("stops starting the get calls of a known set after its signal aborts", async (t) => {
+      const store = new MemoryStore<Spec>();
+      const gate = Promise.withResolvers<void>();
+      const get = store.get.bind(store);
+      const read = t.mock.method(
+        store,
+        "get",
+        async (...args: Parameters<typeof get>) => {
+          await gate.promise;
+          return await get(...args);
+        },
+      );
+      const cache = cacheOver(store);
+      t.after(async () => await cache.close());
+      const controller = new AbortController();
+      const reason = new Error("stop");
+
+      const pending = cache.getMany(
+        Array.from({ length: 25 }, (_, i) => lookup(`id:${String(i)}`)),
+        { signal: controller.signal },
+      );
+      const rejected = assert.rejects(pending, reason);
+      await waitUntil(
+        () => read.mock.callCount() === 10,
+        "the first 10 get calls to start",
+      );
+      controller.abort(reason);
+      await rejected;
+      gate.resolve();
+      await cache.close();
+
+      // The 15 reads that the per-set limit still held never reach the Store.
+      assert.equal(read.mock.callCount(), 10);
+    });
+
+    it("never accumulates single-only Store reads", async (t) => {
+      const store = new MemoryStore<Spec>();
+      const read = t.mock.method(store, "get");
+      const schedule = t.mock.fn();
+      const cache = cacheOver(store, {
+        name: "single-prompt",
+        readBatching: { batchScheduleFn: schedule },
+      });
+      t.after(async () => await cache.close());
+      await Promise.all(
+        [lookup("a"), lookup("b")].map(async (request) => cache.get(request)),
+      );
+      assert.equal(read.mock.callCount(), 2);
+      assert.equal(schedule.mock.callCount(), 0);
+    });
+
+    it("close() waits for a Store call that its only caller aborted", async (t) => {
+      const started = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const { store, getManyRequestCounts } = spiedStore({
+        beforeGetMany: async () => {
+          started.resolve();
+          await release.promise;
+        },
+      });
+      const cleanup = t.mock.method(store, "close");
+      const cache = cacheOver(store);
+      const controller = new AbortController();
+      const read = cache.get(lookup("a"), { signal: controller.signal });
+      await started.promise;
+      controller.abort();
+      await assert.rejects(read);
+      const closing = cache.close();
+      assert.equal(cache.close(), closing);
+      assert.equal(cleanup.mock.callCount(), 0);
+      release.resolve();
+      await closing;
+      assert.deepEqual(getManyRequestCounts(), [1]);
+      assert.equal(cleanup.mock.callCount(), 1);
+    });
+
+    it("keeps per-slot successes and rejects malformed output", async (t) => {
+      const failure = new TypeError("custom operational failure");
+      const { store } = spiedStore({ slotErrors: { failed: failure } });
+      const cache = cacheOver(store);
+      t.after(async () => await cache.close());
+      await cache.store([
+        { id: "hit", content: "value", directives: freshFor100 },
+      ]);
+      const capture = captureChannels(cache.name);
+      try {
+        const results = await cache.getMany(
+          [lookup("hit"), lookup("failed"), lookup("miss"), lookup("hit")],
+          { autoBatch: false },
+        );
+        assert.ok(!(results[0] instanceof Error));
+        assert.equal(results[0].usable?.content, "value");
+        assert.equal(results[1], failure);
+        assert.ok(!(results[2] instanceof Error));
+        assert.equal(results[2].usable, undefined);
+        assert.ok(!(results[3] instanceof Error));
+        assert.equal(results[3].usable?.content, "value");
+        // Only the failed slot reports a read failure.
+        assert.equal(
+          capture.read.filter(({ found }) => found === "read-failed").length,
+          1,
+        );
+      } finally {
+        capture.stop();
+      }
+      // A get rejects with its own slot's Error.
+      await assert.rejects(
+        cache.get(lookup("failed")),
+        (error) => error === failure,
+      );
+      t.mock.method(store, "getMany", async () => []);
+      await assert.rejects(
+        cache.getMany([lookup("hit")], { autoBatch: false }),
+        /one entry array or Error/,
+      );
+    });
+  },
+);
+
+describe("getMany (automatic accumulation by default)", suiteOptions, () => {
+  it("joins the accumulation that get uses, and the batch limit splits it", async (t) => {
     const { store, getManyRequestCounts } = spiedStore();
-    const scheduled: (() => void)[] = [];
-    const cache = cacheOver(store, {
-      name: "direct-known-set",
-      readBatching: { batchScheduleFn: (run) => scheduled.push(run) },
-    });
+    const cache = cacheOver(store, { readBatching: { maxBatchSize: 3 } });
     t.after(async () => await cache.close());
-    const queued = cache.get(lookup("queued"));
-    await cache.getUnbatched([lookup("a"), lookup("b")]);
-    assert.deepEqual(getManyRequestCounts(), [2]);
-    scheduled.forEach((run) => run());
-    await queued;
-    assert.deepEqual(getManyRequestCounts(), [2, 1]);
-  });
+    await cache.store([{ id: "b", content: "b", directives: freshFor100 }]);
 
-  it("applies readBatching.maxBatchSize only to automatic accumulation", async (t) => {
-    const { store, getManyRequestCounts } = spiedStore();
-    const cache = cacheOver(store, {
-      name: "direct-limit",
-      readBatching: { maxBatchSize: 2 },
-    });
-    t.after(async () => await cache.close());
-    const ids = ["a", "b", "c", "d", "e"].map((id) => lookup(id));
-    await cache.getUnbatched(ids);
-    assert.deepEqual(getManyRequestCounts(), [5]);
-    await Promise.all(ids.map(async (id) => cache.get(id)));
-    assert.deepEqual(getManyRequestCounts(), [5, 2, 2, 1]);
-    const client = wrapProducer({
-      cache,
-      produceMany: async (requests) =>
-        await Promise.resolve(
-          requests.map(({ id }) => ({ content: id, directives: freshFor100 })),
-        ),
-    });
-    await client.getMany(
-      ["f", "g", "h"].map((id) => ({ id })),
-      { autoBatch: { store: false } },
+    const [single, many] = await Promise.all([
+      cache.get(lookup("a")),
+      cache.getMany(["b", "c", "d", "e"].map((id) => lookup(id))),
+    ]);
+
+    // One get and four getMany requests fill a batch of 3, then one of 2.
+    assert.deepEqual(getManyRequestCounts(), [3, 2]);
+    assert.equal(single.usable, undefined);
+    assert.deepEqual(
+      many.map((slot) => (slot instanceof Error ? slot : slot.usable?.content)),
+      ["b", undefined, undefined, undefined],
     );
-    await client.close();
-    assert.deepEqual(getManyRequestCounts(), [5, 2, 2, 1, 3]);
   });
 
-  it("never accumulates single-only Store reads", async (t) => {
-    const store = new MemoryStore<Spec>();
-    const read = t.mock.method(store, "get");
-    const schedule = t.mock.fn();
-    const cache = cacheOver(store, {
-      name: "single-prompt",
-      readBatching: { batchScheduleFn: schedule },
-    });
-    t.after(async () => await cache.close());
-    await Promise.all(
-      [lookup("a"), lookup("b")].map(async (request) => cache.get(request)),
-    );
-    assert.equal(read.mock.callCount(), 2);
-    assert.equal(schedule.mock.callCount(), 0);
-  });
-
-  it("does not cancel a dispatched shared operation when every caller aborts", async (t) => {
-    const started = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    const { store, getManyRequestCounts } = spiedStore({
-      beforeGetMany: async () => {
-        started.resolve();
-        await release.promise;
+  it("keeps the results of other batches when one batch fails", async (t) => {
+    const failure = new Error("store down for b");
+    const { store } = spiedStore({
+      beforeGetMany: async (requests) => {
+        if (requests.some(({ id }) => id === "b")) throw failure;
+        await Promise.resolve();
       },
     });
-    const cleanup = t.mock.method(store, "close");
-    const cache = cacheOver(store);
-    const controller = new AbortController();
-    const read = cache.get(lookup("a"), { signal: controller.signal });
-    await started.promise;
-    controller.abort();
-    await assert.rejects(read);
-    const closing = cache.close();
-    assert.equal(cache.close(), closing);
-    assert.equal(cleanup.mock.callCount(), 0);
-    release.resolve();
-    await closing;
-    assert.deepEqual(getManyRequestCounts(), [1]);
-    assert.equal(cleanup.mock.callCount(), 1);
-  });
-
-  it("keeps per-slot successes and rejects malformed output", async (t) => {
-    const failure = new TypeError("custom operational failure");
-    const { store } = spiedStore({ slotErrors: { failed: failure } });
-    const cache = cacheOver(store);
+    const cache = cacheOver(store, { readBatching: { maxBatchSize: 1 } });
     t.after(async () => await cache.close());
-    await cache.store([
-      { id: "hit", content: "value", directives: freshFor100 },
-    ]);
+    await cache.store([{ id: "a", content: "a", directives: freshFor100 }]);
+
     const capture = captureChannels(cache.name);
     try {
-      const results = await cache.getUnbatched([
-        lookup("hit"),
-        lookup("failed"),
-        lookup("miss"),
-        lookup("hit"),
+      const [a, b, c] = await cache.getMany([
+        lookup("a"),
+        lookup("b"),
+        lookup("c"),
       ]);
-      assert.ok(!(results[0] instanceof Error));
-      assert.equal(results[0].usable?.content, "value");
-      assert.equal(results[1], failure);
-      assert.ok(!(results[2] instanceof Error));
-      assert.equal(results[2].usable, undefined);
-      assert.ok(!(results[3] instanceof Error));
-      assert.equal(results[3].usable?.content, "value");
-      // Only the failed slot reports a read failure.
-      assert.equal(
-        capture.read.filter(({ found }) => found === "read-failed").length,
-        1,
+
+      assert.ok(!(a instanceof Error));
+      assert.equal(a.usable?.content, "a");
+      assert.equal(b, failure);
+      assert.ok(!(c instanceof Error));
+      assert.deepEqual(
+        capture.read.map(({ resourceId, found }) => [resourceId, found]),
+        [
+          ["a", "usable"],
+          ["b", "read-failed"],
+          ["c", "none"],
+        ],
       );
     } finally {
       capture.stop();
     }
-    // A get rejects with its own slot's Error.
+  });
+
+  it("rejects the whole call for an unclassifiable id, before any Store read", async (t) => {
+    const { store, getManyRequestCounts } = spiedStore();
+    const cache = new Cache({
+      // The spied store is typed for the any-id registry of the other tests.
+      store: store as never,
+      name: uniqueCacheName("getmany-classify"),
+      resourceTypes: {
+        thing: {
+          matches: (id: string): id is `thing:${string}` =>
+            id.startsWith("thing:"),
+        },
+      },
+    });
+    t.after(async () => await cache.close());
+
     await assert.rejects(
-      cache.get(lookup("failed")),
-      (error) => error === failure,
+      cache.getMany([
+        { id: "thing:1", params: {}, directives: {} },
+        // @ts-expect-error -- the case under test: an id outside the registry
+        { id: "other:1", params: {}, directives: {} },
+      ]),
     );
-    t.mock.method(store, "getMany", async () => []);
-    await assert.rejects(
-      cache.getUnbatched([lookup("hit")]),
-      /one entry array or Error/,
+    await nextTurn();
+    assert.deepEqual(getManyRequestCounts(), []);
+  });
+
+  it("rejects when the signal aborts, and removes its queued reads", async (t) => {
+    const { store, getManyRequestCounts } = spiedStore();
+    const scheduled: (() => void)[] = [];
+    const cache = cacheOver(store, {
+      readBatching: { batchScheduleFn: (run) => scheduled.push(run) },
+    });
+    t.after(async () => await cache.close());
+    const controller = new AbortController();
+    const reason = new Error("stop");
+
+    const aborted = cache.getMany([lookup("a"), lookup("b")], {
+      signal: controller.signal,
+    });
+    const kept = cache.get(lookup("c"));
+    // Normalization is time-sliced, so the reads queue after a few microtasks.
+    await waitUntil(() => scheduled.length === 1, "scheduled.length === 1");
+    controller.abort(reason);
+    await assert.rejects(aborted, reason);
+    scheduled.forEach((run) => run());
+    await kept;
+
+    assert.deepEqual(getManyRequestCounts(), [1]);
+  });
+});
+
+describe("get with autoBatch: false", suiteOptions, () => {
+  it("skips the accumulation wait, and leaves the automatic queue waiting", async (t) => {
+    const { store, getManyRequestCounts } = spiedStore();
+    const scheduled: (() => void)[] = [];
+    const cache = cacheOver(store, {
+      readBatching: { batchScheduleFn: (run) => scheduled.push(run) },
+    });
+    t.after(async () => await cache.close());
+    await cache.store([{ id: "a", content: "a", directives: freshFor100 }]);
+
+    const queued = cache.get(lookup("queued"));
+    const direct = await cache.get(lookup("a"), { autoBatch: false });
+
+    assert.equal(direct.usable?.content, "a");
+    assert.deepEqual(getManyRequestCounts(), [1]);
+    scheduled.forEach((run) => run());
+    await queued;
+    assert.deepEqual(getManyRequestCounts(), [1, 1]);
+  });
+});
+
+describe("maxConcurrentStoreReads", suiteOptions, () => {
+  /** A spied store whose reads stay open until the test releases them. */
+  const gatedStore = () => {
+    const gates: PromiseWithResolvers<void>[] = [];
+    const counts = { running: 0, maxRunning: 0 };
+    const spied = spiedStore({
+      beforeGetMany: async () => {
+        counts.running += 1;
+        counts.maxRunning = Math.max(counts.maxRunning, counts.running);
+        const gate = Promise.withResolvers<void>();
+        gates.push(gate);
+        try {
+          await gate.promise;
+        } finally {
+          counts.running -= 1;
+        }
+      },
+    });
+    return {
+      ...spied,
+      counts,
+      /** Releases the oldest read that is still open. */
+      releaseNext: async () => {
+        await waitUntil(() => gates.length > 0, "gates.length > 0");
+        gates.shift()!.resolve();
+      },
+    };
+  };
+
+  it("runs one Store call at a time, and fills waiting batches", async (t) => {
+    const { store, getManyRequestCounts, counts, releaseNext } = gatedStore();
+    const cache = cacheOver(store, {
+      readBatching: { maxBatchSize: 3 },
+      maxConcurrentStoreReads: 1,
+    });
+    t.after(async () => await cache.close());
+
+    const first = cache.get(lookup("a"));
+    await waitUntil(() => counts.running === 1, "counts.running === 1");
+    // These arrive in separate turns while the first call runs. Without the
+    // limit, each turn would be its own Store call.
+    const waiting = [cache.get(lookup("b"))];
+    await nextTurn();
+    waiting.push(cache.get(lookup("c")));
+    await nextTurn();
+    waiting.push(cache.get(lookup("d")), cache.get(lookup("e")));
+    await nextTurn();
+    assert.deepEqual(getManyRequestCounts(), [1]);
+
+    await releaseNext();
+    await releaseNext();
+    await releaseNext();
+    await Promise.all([first, ...waiting]);
+
+    assert.deepEqual(getManyRequestCounts(), [1, 3, 1]);
+    assert.equal(counts.maxRunning, 1);
+  });
+
+  it("makes a direct read wait for a slot, and lets it be cancelled while it waits", async (t) => {
+    const { store, getManyRequestCounts, counts, releaseNext } = gatedStore();
+    const cache = cacheOver(store, { maxConcurrentStoreReads: 1 });
+    t.after(async () => await cache.close());
+    const controller = new AbortController();
+    const reason = new Error("stop");
+
+    const running = cache.getMany([lookup("a")], { autoBatch: false });
+    await waitUntil(() => counts.running === 1, "counts.running === 1");
+    const cancelled = cache.getMany([lookup("b")], {
+      autoBatch: false,
+      signal: controller.signal,
+    });
+    const waiting = cache.get(lookup("c"), { autoBatch: false });
+    await nextTurn();
+    assert.deepEqual(getManyRequestCounts(), [1]);
+
+    controller.abort(reason);
+    await assert.rejects(cancelled, reason);
+    await releaseNext();
+    await running;
+    await releaseNext();
+    await waiting;
+
+    // The cancelled read never reached the Store.
+    assert.deepEqual(getManyRequestCounts(), [1, 1]);
+    assert.equal(counts.maxRunning, 1);
+  });
+
+  it("reports the slot wait as queue time in the read-store message", async (t) => {
+    const { store, counts, releaseNext } = gatedStore();
+    const cache = cacheOver(store, { maxConcurrentStoreReads: 1 });
+    t.after(async () => await cache.close());
+    const capture = captureChannels(cache.name, { measurements: true });
+    try {
+      const running = cache.getMany([lookup("a")], { autoBatch: false });
+      await waitUntil(() => counts.running === 1, "counts.running === 1");
+      const waiting = cache.getMany([lookup("b"), lookup("c")], {
+        autoBatch: false,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await releaseNext();
+      await running;
+      await releaseNext();
+      await waiting;
+
+      const [first, second] = capture.readStore;
+      // The real time from submit to the Store call: small, but not 0.
+      assert.ok(first!.queueWaitTotalMs! < 15, "the first read did not wait");
+      assert.ok(second!.queueWaitTotalMs! >= 2 * 15, "two requests waited");
+      assert.equal(second!.autoBatched, false);
+    } finally {
+      capture.stop();
+    }
+  });
+
+  it("limits the get calls of a Store without getMany, across callers", async (t) => {
+    const store = new MemoryStore<Spec>();
+    const counts = { running: 0, maxRunning: 0, calls: 0 };
+    const get = store.get.bind(store);
+    mock.method(store, "get", async (...args: Parameters<typeof get>) => {
+      counts.calls += 1;
+      counts.running += 1;
+      counts.maxRunning = Math.max(counts.maxRunning, counts.running);
+      await nextTurn();
+      try {
+        return await get(...args);
+      } finally {
+        counts.running -= 1;
+      }
+    });
+    const cache = cacheOver(store, { maxConcurrentStoreReads: 2 });
+    t.after(async () => await cache.close());
+
+    await Promise.all([
+      cache.getMany(["a", "b", "c"].map((id) => lookup(id))),
+      cache.get(lookup("d")),
+      cache.get(lookup("e")),
+    ]);
+
+    assert.equal(counts.calls, 5);
+    assert.equal(counts.maxRunning, 2);
+  });
+
+  it("rejects a limit that is not a positive integer", () => {
+    assert.throws(
+      () => cacheOver(spiedStore().store, { maxConcurrentStoreReads: 0 }),
+      TypeError,
     );
   });
 });

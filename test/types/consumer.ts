@@ -29,10 +29,13 @@ const cache = new Cache({
   resourceTypes: registry,
 });
 const cached = throwIfAnyError(
-  await cache.getUnbatched([
-    { id: "user:a", params: {}, directives: {} },
-    { id: "count:a", params: {}, directives: {} },
-  ] as const),
+  await cache.getMany(
+    [
+      { id: "user:a", params: {}, directives: {} },
+      { id: "count:a", params: {}, directives: {} },
+    ] as const,
+    { autoBatch: false },
+  ),
 );
 const cachedType: IsEqual<
   NonNullable<(typeof cached)[0]["usable"]>["content"],
@@ -64,6 +67,24 @@ void cache.get(
   // @ts-expect-error Explicit true is not a supported participation override.
   { autoBatch: true },
 );
+void cache.get(
+  { id: "count:a", params: {}, directives: {} },
+  { autoBatch: false },
+);
+void cache.getMany(
+  [{ id: "count:a", params: {}, directives: {} }],
+  // @ts-expect-error Explicit true is not a supported participation override.
+  { autoBatch: true },
+);
+// The default joins automatic accumulation, and keeps per-request types.
+const accumulated = throwIfAnyError(
+  await cache.getMany([{ id: "user:a", params: {}, directives: {} }] as const),
+);
+const accumulatedType: IsEqual<
+  NonNullable<(typeof accumulated)[0]["usable"]>["content"],
+  { name: string }
+> = true;
+void accumulatedType;
 new Cache({
   name: "invalid",
   store: memory,
@@ -100,6 +121,17 @@ const bothProducerCapabilities = {
 wrapProducer(bothProducerCapabilities);
 // @ts-expect-error Explicit true cannot enable producer accumulation.
 void client.get({ id: "count:a" }, { autoBatch: { producer: true } });
+// A single producer never accumulates, so `producer: false` is accepted: it
+// states what already happens.
+void client.get({ id: "count:a" }, { autoBatch: { producer: false } });
+void client.get({ id: "count:a" }, { joinInFlight: false });
+// @ts-expect-error Joining in-flight work is the default; true is not accepted.
+void client.getMany([{ id: "count:a" }], { joinInFlight: true });
+wrapProducer({
+  cache,
+  maxConcurrentProducerCalls: 4,
+  produce: async () => ({ content: 1, directives: { freshUntilAge: 60 } }),
+});
 void [wrappedFirst, wrappedSecond];
 
 type UserInput = { kind: "user"; name: string };

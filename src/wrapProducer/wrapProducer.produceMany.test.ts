@@ -879,12 +879,13 @@ describe("wrapProducer with produceMany", () => {
         const finish = Promise.withResolvers<void>();
         const controller = new AbortController();
         const reason = new Error("abort during cache read");
-        const read = mock.method(cache, "getUnbatched", async () => {
+        // The client reads each request with its own `Cache.get`.
+        const read = mock.method(cache, "get", async () => {
           started.resolve();
           await finish.promise;
           // The Cache completes normally despite cancellation. The wrapper must
           // still prevent production after this pending read settles.
-          return [{ validatable: [] }];
+          return { validatable: [] };
         });
         const producer = mock.fn(async () => []);
         const wrapped = wrapProducer({ cache, produceMany: producer });

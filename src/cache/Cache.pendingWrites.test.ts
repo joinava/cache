@@ -165,18 +165,22 @@ describe("Cache pending writes", suiteOptions, () => {
 
     // "a" has a pending write and "c" does not.
     await assert.rejects(
-      cache.getUnbatched([lookup("a", { language: "bad" }), lookup("b")]),
+      cache.getMany([lookup("a", { language: "bad" }), lookup("b")], {
+        autoBatch: false,
+      }),
       failed,
     );
     await assert.rejects(
-      cache.getUnbatched([lookup("c", { language: "bad" }), lookup("b")]),
+      cache.getMany([lookup("c", { language: "bad" }), lookup("b")], {
+        autoBatch: false,
+      }),
       failed,
     );
     await assert.rejects(cache.get(lookup("a", { language: "bad" })), failed);
     await assert.rejects(cache.get(lookup("c", { language: "bad" })), failed);
 
     assert.deepEqual(getManyRequestCounts(), []);
-    // Each getUnbatched call reports every request as read-failed, and each
+    // Each getMany call reports every request as read-failed, and each
     // get rejects before its read, so it reports nothing.
     assert.deepEqual(
       capture.read.map(({ resourceId, found }) => [resourceId, found]),

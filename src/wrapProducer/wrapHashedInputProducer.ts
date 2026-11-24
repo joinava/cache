@@ -3,7 +3,7 @@ import {
   wrappedReadStartedAt,
   type ClientReadOptions,
   type WrappedReadOptions,
-} from "./wrapProducer.js";
+} from "./producerClient.js";
 import pLimit from "p-limit";
 import type { ReadonlyDeep } from "type-fest";
 
