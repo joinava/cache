@@ -77,12 +77,12 @@ Dates below are npm publication dates (UTC). Version 4.0.0 is unreleased.
   diagnostics are measured times, so a call that nothing held back reports
   a wait close to zero, not exactly zero. Work that is submitted after
   `close()` no longer logs a warning.
-- A Store read call receives a caller's `AbortSignal` exactly when every
-  read in the call carries that same signal, also for an automatic batch.
-  Aborting it can then cancel the Store call, which only affects the callers
-  that cancelled, and the `read-store` message reports `cancelled`. A Store
-  call whose reads carry different signals, or that mixes reads with and
-  without a signal, gets no signal and always completes. Before, only a
+- A Store read call receives an `AbortSignal` that aborts when the signal of
+  every read in the call has aborted, also for an automatic batch. So the
+  Store call can stop only when no caller wants its result any more, and the
+  `read-store` message then reports `cancelled`. When every read carries the
+  same signal, the Store gets that signal itself. A Store call with a read
+  that has no signal gets no signal and always completes. Before, only a
   read with `autoBatch: false` passed its signal to the Store.
 - A package contract violation in one producer result slot, or in one
   `bulkProducerByIdType` slice, rejects only the callers of the affected

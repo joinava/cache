@@ -52,6 +52,7 @@ import {
   mergeCacheLookups,
   type CacheLookupResult,
 } from "../utils/cacheHelpers.js";
+import { allAborted } from "../utils/allAborted.js";
 import type { CacheOptions } from "./CacheOptions.js";
 import { PendingResources } from "./pendingResources.js";
 import pLimit from "p-limit";
@@ -1008,12 +1009,12 @@ export default class Cache<
    * with `getMany` accumulates reads, so no call to a Store without it is
    * automatic.
    *
-   * The Store gets a signal exactly when every read of the call carries that
-   * same signal. Then only callers that cancelled can lose the call. A call
-   * whose reads carry different signals, or that mixes reads with a signal
-   * and reads without one, gets no signal: it always completes, and each
-   * caller races its own signal. Whether the call is automatic does not
-   * matter.
+   * The Store gets a signal that aborts when the signal of every read in the
+   * call has aborted (see {@link allAborted}). So a call stops only when no
+   * caller wants its result any more, and each caller races its own signal.
+   * When every read carries the same signal, the Store gets that signal
+   * itself. A call with a read that has no signal gets no signal, and always
+   * completes. Whether the call is automatic does not matter.
    */
   async #readStore(
     reads: readonly Item<
@@ -1024,33 +1025,34 @@ export default class Cache<
     const autoBatched =
       this.#dataStore.getMany !== undefined &&
       reads.some((read) => !read.expedited);
-    const first = reads[0]?.input;
-    const signal = reads.every(({ input }) => input.signal === first?.signal)
-      ? first?.signal
-      : undefined;
+    const cancellation = allAborted(reads.map(({ input }) => input.signal));
 
-    return readStoreObserved(
-      this.#dataStore,
-      reads.map(({ input }) => input.request),
-      // Only the reads of a Store without `getMany` have a budget, and each
-      // of them is its own call.
-      { signal, budget: first?.budget },
-      cacheReadStoreChannel.hasSubscribers
-        ? (event) => {
-            cacheReadStoreChannel.publish({
-              cache: this.name,
-              operation: event.operation,
-              autoBatched,
-              outcome: event.outcome,
-              requestCount: event.requestCount,
-              failedRequestCount: event.failedRequestCount,
-              entryCount: event.entryCount,
-              durationMs: event.durationMs,
-              queueWaitTotalMs: sumBy(reads, queueWaitMs),
-            });
-          }
-        : undefined,
-    );
+    try {
+      return await readStoreObserved(
+        this.#dataStore,
+        reads.map(({ input }) => input.request),
+        // Only the reads of a Store without `getMany` have a budget, and each
+        // of them is its own call.
+        { signal: cancellation.signal, budget: reads[0]?.input.budget },
+        cacheReadStoreChannel.hasSubscribers
+          ? (event) => {
+              cacheReadStoreChannel.publish({
+                cache: this.name,
+                operation: event.operation,
+                autoBatched,
+                outcome: event.outcome,
+                requestCount: event.requestCount,
+                failedRequestCount: event.failedRequestCount,
+                entryCount: event.entryCount,
+                durationMs: event.durationMs,
+                queueWaitTotalMs: sumBy(reads, queueWaitMs),
+              });
+            }
+          : undefined,
+      );
+    } finally {
+      cancellation.stop();
+    }
   }
 
   /**
@@ -1107,8 +1109,8 @@ type StoreRead<RT extends ResourceTypes, Params extends AnyParams> = {
   /**
    * The signal of the call that made the read. The dispatcher gets the same
    * signal when the read is submitted, to cancel the read while it waits.
-   * It is repeated here because `Cache.#readStore` decides from the reads of
-   * one Store call whether the Store gets a signal.
+   * It is repeated here because `Cache.#readStore` makes the signal of one
+   * Store call from the signals of its reads.
    */
   readonly signal: AbortSignal | undefined;
   /**

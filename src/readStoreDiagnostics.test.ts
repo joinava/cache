@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { describe, it } from "node:test";
 
 import {
@@ -347,6 +348,67 @@ describe("read-store channel", suiteOptions, () => {
       assert.equal(message?.operation, "getMany");
       assert.equal(message?.outcome, settlement);
       assert.equal(message?.failedRequestCount, fails ? 2 : 0);
+    });
+
+    it(`keeps an automatic Store call (Store ${settlement}) while a caller with another signal still waits`, async (t) => {
+      const { cache, capture, scheduled, started, gate } = gatedAutomaticReads(
+        t,
+        `automatic-cancel-one-of-two-${settlement}`,
+        fails,
+      );
+      const cancelled = new AbortController();
+      const waiting = new AbortController();
+      const rejected = assert.rejects(
+        cache.get(lookup("a"), { signal: cancelled.signal }),
+      );
+      // This read has another signal, which does not abort: the Store call
+      // must complete for its caller.
+      const kept = cache.get(lookup("b"), { signal: waiting.signal }).then(
+        () => "fulfilled",
+        () => "rejected",
+      );
+      (await scheduled)();
+      await started.promise;
+      cancelled.abort();
+      await rejected;
+      gate.resolve();
+      assert.equal(await kept, fails ? "rejected" : "fulfilled");
+      await cache.close();
+
+      assert.equal(capture.readStore.length, 1);
+      const [message] = capture.readStore;
+      assert.equal(message?.requestCount, 2);
+      assert.equal(message?.outcome, settlement);
+      // Nothing listens to a caller's signal after the Store call is done.
+      assert.equal(getEventListeners(waiting.signal, "abort").length, 0);
+    });
+
+    it(`cancels an automatic Store call (Store ${settlement}) when its callers with different signals have all aborted`, async (t) => {
+      const { cache, capture, scheduled, started, gate } = gatedAutomaticReads(
+        t,
+        `automatic-cancel-all-different-${settlement}`,
+        fails,
+      );
+      const controllers = [new AbortController(), new AbortController()];
+      const rejections = controllers.map(async ({ signal }, index) =>
+        assert.rejects(cache.get(lookup(`id-${index}`), { signal })),
+      );
+      (await scheduled)();
+      await started.promise;
+      controllers[0]?.abort();
+      await rejections[0];
+      controllers[1]?.abort();
+      await rejections[1];
+      assert.equal(capture.readStore.length, 0);
+      gate.resolve();
+      await cache.close();
+
+      assert.equal(capture.readStore.length, 1);
+      const [message] = capture.readStore;
+      assert.equal(message?.requestCount, 2);
+      // The Store call saw the abort only after the last caller cancelled.
+      assert.equal(message?.outcome, "cancelled");
+      assert.equal(message?.failedRequestCount, 0);
     });
   }
 
