@@ -30,6 +30,11 @@ class LastAbort {
     for (const signal of signals) {
       if (signal.aborted) continue;
       this.#pendingCount += 1;
+      // `addEventListener` takes a function, or an object that has a
+      // `handleEvent` method. This object is the listener: when the signal
+      // aborts, it calls `this.handleEvent(event)`. So no signal needs a
+      // function of its own, and `stop` can remove the listener without a
+      // list of functions, because a listener is found by its identity.
       signal.addEventListener("abort", this, { once: true });
     }
   }
@@ -38,10 +43,16 @@ class LastAbort {
     return this.#controller.signal;
   }
 
-  /** A signal calls this function when it aborts. */
+  /**
+   * Counts one abort. Each signal that the constructor listens to calls this
+   * method once, when it aborts, with its `abort` event. The name is fixed:
+   * an event target calls the `handleEvent` method of a listener that is an
+   * object. `event.target` is the signal that aborted.
+   */
   handleEvent(event: Event): void {
     this.#pendingCount -= 1;
     if (this.#pendingCount > 0) return;
+    // The last signal has aborted, and its reason becomes the reason here.
     // SAFETY: this object only listens to AbortSignals.
     this.#controller.abort((event.target as AbortSignal).reason);
   }
