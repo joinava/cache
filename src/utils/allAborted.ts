@@ -71,9 +71,12 @@ class LastAbort {
  *   no signal, because the work can never be cancelled.
  * - Every caller has the same signal: the result is that signal.
  *
- * Callers with different signals get a new signal. A signal that occurs more
- * than once counts once. A signal that has aborted already counts as
- * aborted.
+ * - Every caller's signal has aborted already: the result is a signal that
+ *   has aborted.
+ *
+ * Other callers with different signals get a new signal that listens to
+ * theirs. A signal that occurs more than once counts once. A signal that has
+ * aborted already counts as aborted.
  *
  * @param signals The signal of each caller, or undefined for a caller that
  *   has none.
@@ -84,23 +87,24 @@ export function allAborted(
   const [first] = signals;
   if (first === undefined) return NEVER;
 
+  // One pass finds every case that needs no listener.
   let allSame = true;
+  let allHaveAborted = true;
   for (const signal of signals) {
     if (signal === undefined) return NEVER;
     if (signal !== first) allSame = false;
+    if (!signal.aborted) allHaveAborted = false;
   }
   if (allSame) return { signal: first, stop: stopNothing };
-
-  // SAFETY: the loop above returned for any undefined element.
-  const distinct = new Set(signals as readonly AbortSignal[]);
-  if ([...distinct].every((signal) => signal.aborted)) {
-    // Every signal has aborted already. The time of each abort is unknown,
-    // so the reason is the reason of the last signal in the list.
+  if (allHaveAborted) {
+    // The time of each abort is unknown, so the reason is the reason of the
+    // last signal in the list.
     return {
       signal: AbortSignal.abort(signals.at(-1)?.reason),
       stop: stopNothing,
     };
   }
 
-  return new LastAbort(distinct);
+  // SAFETY: the loop above returned for any undefined element.
+  return new LastAbort(new Set(signals as readonly AbortSignal[]));
 }
