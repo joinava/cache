@@ -9,29 +9,11 @@ const listenerCounts = (controllers: readonly AbortController[]) =>
   controllers.map(({ signal }) => getEventListeners(signal, "abort").length);
 
 describe("allAborted", () => {
-  it("gives no signal when there is no caller", () => {
+  it("gives no signal for an empty list", () => {
     assert.equal(allAborted([]).signal, undefined);
   });
 
-  it("gives no signal when no caller has a signal", () => {
-    assert.equal(allAborted([undefined, undefined]).signal, undefined);
-  });
-
-  it("gives no signal, and adds no listener, when only some callers have a signal", () => {
-    const controllers = [new AbortController(), new AbortController()];
-    const [a, b] = controllers.map(({ signal }) => signal);
-
-    for (const signals of [
-      [a, undefined, b],
-      [undefined, a, b],
-      [a, b, undefined],
-    ]) {
-      assert.equal(allAborted(signals).signal, undefined);
-    }
-    assert.deepEqual(listenerCounts(controllers), [0, 0]);
-  });
-
-  it("gives the callers' own signal, and adds no listener, when every caller has the same signal", () => {
+  it("gives the same signal back, and adds no listener, when every element is that signal", () => {
     const controller = new AbortController();
     const { signal } = controller;
 

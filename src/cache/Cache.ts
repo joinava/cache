@@ -1025,7 +1025,12 @@ export default class Cache<
     const autoBatched =
       this.#dataStore.getMany !== undefined &&
       reads.some((read) => !read.expedited);
-    const cancellation = allAborted(reads.map(({ input }) => input.signal));
+    const signals = reads.map(({ input }) => input.signal);
+    // A read without a signal can never be cancelled, so neither can a call
+    // that it is in.
+    const cancellation = signals.every((signal) => signal !== undefined)
+      ? allAborted(signals)
+      : undefined;
 
     try {
       return await readStoreObserved(
@@ -1033,7 +1038,7 @@ export default class Cache<
         reads.map(({ input }) => input.request),
         // Only the reads of a Store without `getMany` have a budget, and each
         // of them is its own call.
-        { signal: cancellation.signal, budget: reads[0]?.input.budget },
+        { signal: cancellation?.signal, budget: reads[0]?.input.budget },
         cacheReadStoreChannel.hasSubscribers
           ? (event) => {
               cacheReadStoreChannel.publish({
@@ -1051,7 +1056,7 @@ export default class Cache<
           : undefined,
       );
     } finally {
-      cancellation.stop();
+      cancellation?.stop();
     }
   }
 

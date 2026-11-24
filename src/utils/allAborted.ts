@@ -1,8 +1,8 @@
 /** The signal for work that several callers share. See {@link allAborted}. */
 export type AllAborted = {
   /**
-   * Aborts once every caller's signal has aborted. Undefined when the work
-   * can never be cancelled: a caller has no signal, or there is no caller.
+   * Aborts once every one of the signals has aborted. Undefined when there
+   * is no signal at all: then nothing can cancel the work.
    */
   readonly signal: AbortSignal | undefined;
   /**
@@ -14,7 +14,7 @@ export type AllAborted = {
 
 const stopNothing = (): void => {};
 
-/** The answer for work that can never be cancelled. */
+/** The answer for an empty list of signals. */
 const NEVER: AllAborted = { signal: undefined, stop: stopNothing };
 
 /**
@@ -59,31 +59,28 @@ class LastAbort {
 }
 
 /**
- * Makes the signal for one piece of work that several callers share, from
- * the signal of each caller. The work must stop only when no caller wants
- * its result any more, so the returned signal aborts when every caller's
- * signal has aborted. Its reason is the reason of the signal that aborted
- * last. `AbortSignal.any` is the opposite: it aborts on the first abort.
+ * Makes a signal that aborts when every one of `signals` has aborted. Its
+ * reason is the reason of the signal that aborted last. `AbortSignal.any` is
+ * the opposite: it aborts on the first abort.
+ *
+ * It is for one piece of work that several callers share, where each signal
+ * is one caller's. Such work must stop only when no caller wants its result
+ * any more. A caller without a signal can never cancel, so the code that
+ * shares the work must not ask for a signal at all when it has such a
+ * caller: this function knows only the signals that it gets.
  *
  * The usual cases cost nothing: they add no listener, and make no signal.
  *
- * - No caller has a signal, or only some callers have one: the result has
- *   no signal, because the work can never be cancelled.
- * - Every caller has the same signal: the result is that signal.
+ * - The list is empty: the result has no signal.
+ * - Every element is the same signal: the result is that signal.
+ * - Every signal has aborted already: the result is a signal that has
+ *   aborted.
  *
- * - Every caller's signal has aborted already: the result is a signal that
- *   has aborted.
- *
- * Other callers with different signals get a new signal that listens to
- * theirs. A signal that occurs more than once counts once. A signal that has
- * aborted already counts as aborted.
- *
- * @param signals The signal of each caller, or undefined for a caller that
- *   has none.
+ * Other lists get a new signal that listens to theirs. A signal that occurs
+ * more than once counts once. A signal that has aborted already counts as
+ * aborted.
  */
-export function allAborted(
-  signals: readonly (AbortSignal | undefined)[],
-): AllAborted {
+export function allAborted(signals: readonly AbortSignal[]): AllAborted {
   const [first] = signals;
   if (first === undefined) return NEVER;
 
@@ -91,7 +88,6 @@ export function allAborted(
   let allSame = true;
   let allHaveAborted = true;
   for (const signal of signals) {
-    if (signal === undefined) return NEVER;
     if (signal !== first) allSame = false;
     if (!signal.aborted) allHaveAborted = false;
   }
@@ -105,6 +101,5 @@ export function allAborted(
     };
   }
 
-  // SAFETY: the loop above returned for any undefined element.
-  return new LastAbort(new Set(signals as readonly AbortSignal[]));
+  return new LastAbort(new Set(signals));
 }
